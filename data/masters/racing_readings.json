@@ -1,0 +1,4 @@
+{
+  "__comment": "競馬特化TTS読み辞書（カスタム追加分）。デフォルト辞書はapi_v1/services/tts_pipeline.pyのDEFAULT_READINGSを参照。",
+  "例": "たとえば"
+}

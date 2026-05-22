@@ -1,0 +1,48 @@
+# ── モデルファイル（LightGBM バイナリ・数百MB） ───────────────────────────
+models/v1/
+models/v2/ensemble/
+models/v2/submodels/
+*.lgb
+*.pkl
+*.joblib
+*.onnx
+
+# ── 学習・推論データ（Parquet・数GB） ─────────────────────────────────────
+data/parquet/
+data/outputs/
+*.parquet
+
+# ── 中間出力（CSV・JSON 一時ファイル） ────────────────────────────────────
+outputs/
+
+# ── 環境変数・秘密情報 ────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+
+# ── Python キャッシュ ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Node / フロントエンド ─────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── OS / エディタ ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+*.swp
+
+# ── 除外しない（git で明示管理するもの） ──────────────────────────────────
+# course_physical_master.csv は人間精査済みマスタなので必ず管理対象にする
+!data/masters/
+!data/masters/*.csv
+!data/masters/*.json
