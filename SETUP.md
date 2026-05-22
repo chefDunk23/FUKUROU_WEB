@@ -72,6 +72,23 @@ models/v2/ensemble/
   lgbm_rank_fold4.lgb
 ```
 
+### フクロウ博士AI（PreRace_Model_v1 — YouTube AI）
+
+```powershell
+$src = "C:\workspace\AI_FUKUROU_KEIBA_Ver2\models"
+$dst = "C:\workspace\fukurou_v2_app\models\v1_legacy"
+
+Copy-Item "$src\PreRace_Model_v1.txt"   $dst -Force
+Copy-Item "$src\PreRace_features.json"  $dst -Force
+```
+
+期待されるファイル:
+```
+models/v1_legacy/
+  PreRace_Model_v1.txt    # 190特徴量 LightGBM ランカー
+  PreRace_features.json   # 特徴量リスト
+```
+
 ### V2 サブモデル（6 種 × 3 ファイル）
 
 ```powershell
