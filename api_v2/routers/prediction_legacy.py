@@ -144,12 +144,17 @@ def _fetch_feature_stores(
     with get_jvdl_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
 
+            # レース日 ≤ 利用可能な最新日付 でフォールバック（当日データがない場合も取得）
             cur.execute(
                 "SELECT kishu_code AS jockey_cd, "
                 "       win_rate AS kishu_win_rate, "
                 "       top3_rate AS kishu_top3_rate "
                 "FROM jockey_feature_store "
-                "WHERE kishu_code = ANY(%s) AND target_date = %s",
+                "WHERE kishu_code = ANY(%s) "
+                "  AND target_date = ("
+                "      SELECT MAX(target_date) FROM jockey_feature_store"
+                "      WHERE target_date <= %s"
+                "  )",
                 (jockey_cds, date_val),
             )
             jf = pd.DataFrame(cur.fetchall())
@@ -159,11 +164,16 @@ def _fetch_feature_stores(
                 "       win_rate AS trainer_win_rate, "
                 "       top3_rate AS trainer_top3_rate "
                 "FROM trainer_feature_store "
-                "WHERE chokyoshi_code = ANY(%s) AND target_date = %s",
+                "WHERE chokyoshi_code = ANY(%s) "
+                "  AND target_date = ("
+                "      SELECT MAX(target_date) FROM trainer_feature_store"
+                "      WHERE target_date <= %s"
+                "  )",
                 (trainer_cds, date_val),
             )
             tf = pd.DataFrame(cur.fetchall())
 
+            # race_id 完全一致 → なければ馬ごとに直近の調教スコアをフォールバック
             cur.execute(
                 "SELECT ketto_toroku_bango AS horse_id, "
                 "       chokyo_master_score, s1_time_score, s2_improve_score, "
@@ -172,6 +182,18 @@ def _fetch_feature_stores(
                 (db_race_id,),
             )
             cs = pd.DataFrame(cur.fetchall())
+            if cs.empty:
+                cur.execute(
+                    "SELECT DISTINCT ON (ketto_toroku_bango) "
+                    "       ketto_toroku_bango AS horse_id, "
+                    "       chokyo_master_score, s1_time_score, s2_improve_score, "
+                    "       s3_lastf_score, s4_freq_score, accel_bonus, ref_session_days_before "
+                    "FROM chokyo_scores "
+                    "WHERE ketto_toroku_bango = ANY(%s) AND race_id <= %s "
+                    "ORDER BY ketto_toroku_bango, race_id DESC",
+                    (horse_ids, db_race_id),
+                )
+                cs = pd.DataFrame(cur.fetchall())
 
             cur.execute(
                 "SELECT ketto_toroku_bango AS horse_id, "
@@ -181,6 +203,18 @@ def _fetch_feature_stores(
                 (db_race_id,),
             )
             apt = pd.DataFrame(cur.fetchall())
+            if apt.empty:
+                cur.execute(
+                    "SELECT DISTINCT ON (ketto_toroku_bango) "
+                    "       ketto_toroku_bango AS horse_id, "
+                    "       apt_distance_shift, apt_track_change, apt_bias_fit, "
+                    "       apt_temperament, apt_growth, apt_seasonal "
+                    "FROM aptitude_scores "
+                    "WHERE ketto_toroku_bango = ANY(%s) AND race_id <= %s "
+                    "ORDER BY ketto_toroku_bango, race_id DESC",
+                    (horse_ids, db_race_id),
+                )
+                apt = pd.DataFrame(cur.fetchall())
 
     return {"jf": jf, "tf": tf, "cs": cs, "apt": apt}
 
