@@ -3,10 +3,26 @@ api_v2/routers/prediction_legacy.py
 =====================================
 GET /api/v2/predict-legacy/{race_id} — フクロウ博士AI（PreRace_Model_v1）による予測。
 
-使用モデル: models/v1_legacy/PreRace_Model_v1.txt（175特徴量）
-DBから取得できる特徴量: ~31列。残りはNaN（LightGBMの欠損値処理に委ねる）。
+使用モデル: models/v1_legacy/PreRace_Model_v1.txt（190特徴量）
+実装可能特徴量: ~75列（33基本+42追加）。残りはNaN（LightGBMの欠損値処理に委ねる）。
 
-このルーターは prediction.py と完全に独立しており、一切の共有状態を持たない。
+実装済み特徴量カテゴリ:
+  A. 基本: kyori/wakuban/umaban/bataiju/zogen_sa/futan_juryo + 派生 (13)
+  B. 騎手・調教師: kishu_win_rate/top3_rate + trainer_win_rate/top3_rate + ランク (5)
+  C. 調教: chokyo_master_score/s1-s4/accel_bonus/ref_session_days + trf_store (12)
+  D. 適性: apt_distance_shift/track_change/bias_fit/temperament/growth/seasonal (6)
+  E. 過去5走: prev_N_kyori/bataiju/futan_juryo/umaban (N=1..5) (20)
+  F. 間隔・距離変化: interval/interval_weeks/is_rest_return/is_long_layoff/distance_change (5)
+  G. キャリア統計: career_races/recent_avg_chakujun/recent_run_density/fatigue_index (4)
+  H. 季節・月次成績: horse_month_avg_rank/horse_season_avg_rank/horse_season_rank_deviation (3)
+  I. 重馬場: heavy_track_score/is_winter_heavy (2)
+  J. その他派生: abs_zogen_sa/bataiju_diff/futan_juryo_diff/weight_change_* (5)
+
+不可能な特徴量（切り捨て/NaN）:
+  - sire_* (血統DBなし)
+  - ability_* / time_zscore / relative_time (旧JVLパイプライン必須)
+  - mot_* / furi_* / pace_harmony (複雑な過去走分析)
+  - track_bias_* / cross_* / blood_x_* (旧パイプライン集計値)
 """
 from __future__ import annotations
 
@@ -37,9 +53,11 @@ _GRADE_TO_CLASS: dict[str | None, int] = {
     "B": 5, "A": 4, "C": 3, "H": 2, "E": 1,
     None: 0,
 }
-
-# 重馬場コード（馬場状態コード 3=重, 4=不良）
 _HEAVY_BABA_CODES = {"3", "4"}
+
+# 季節コード（月→季節 1=春 2=夏 3=秋 4=冬）
+def _month_to_season(m: int) -> int:
+    return {1: 4, 2: 4, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 4}[m]
 
 
 # ── レスポンス型 ──────────────────────────────────────────────────────────────
@@ -119,10 +137,33 @@ WHERE r.id = %s
 ORDER BY e.umaban
 """
 
+# 過去走データ（直近全レース、Python側でN走目を抽出）
+_SQL_HORSE_HISTORY = """
+SELECT
+    e.horse_id,
+    r.race_date                       AS prev_race_date,
+    r.distance                        AS prev_kyori,
+    e.horse_weight                    AS prev_bataiju,
+    e.basis_weight                    AS prev_futan_juryo,
+    e.umaban                          AS prev_umaban,
+    e.kakutei_chakujun                AS prev_chakujun,
+    EXTRACT(MONTH FROM r.race_date)::int AS prev_month,
+    ROW_NUMBER() OVER (
+        PARTITION BY e.horse_id
+        ORDER BY r.race_date DESC, r.id DESC
+    ) AS rn
+FROM race_entries e
+JOIN races r ON r.id = e.race_id
+WHERE r.race_date < %s
+  AND e.horse_id = ANY(%s)
+  AND e.kakutei_chakujun IS NOT NULL
+  AND e.kakutei_chakujun > 0
+ORDER BY e.horse_id, rn
+"""
+
 
 def _derive_db_race_id(race_date: object, keibajo_code: str, race_num: int) -> str:
-    date_str = pd.Timestamp(race_date).strftime("%Y%m%d")
-    return date_str + str(keibajo_code).zfill(2) + str(race_num).zfill(2)
+    return pd.Timestamp(race_date).strftime("%Y%m%d") + str(keibajo_code).zfill(2) + str(race_num).zfill(2)
 
 
 def _fetch_entries(race_id: str) -> pd.DataFrame:
@@ -131,6 +172,20 @@ def _fetch_entries(race_id: str) -> pd.DataFrame:
             cur.execute(_SQL_ENTRIES, (race_id,))
             rows = cur.fetchall()
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _fetch_horse_history(horse_ids: list[str], race_date: object) -> pd.DataFrame:
+    date_val = pd.Timestamp(race_date).date()
+    with get_v2_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_SQL_HORSE_HISTORY, (date_val, horse_ids))
+            rows = cur.fetchall()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    for col in ["prev_kyori", "prev_bataiju", "prev_futan_juryo", "prev_umaban", "prev_chakujun"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
 def _fetch_feature_stores(
@@ -144,36 +199,30 @@ def _fetch_feature_stores(
     with get_jvdl_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
 
-            # レース日 ≤ 利用可能な最新日付 でフォールバック（当日データがない場合も取得）
+            # レース日以前の最新 target_date にフォールバック
             cur.execute(
                 "SELECT kishu_code AS jockey_cd, "
-                "       win_rate AS kishu_win_rate, "
-                "       top3_rate AS kishu_top3_rate "
+                "       win_rate AS kishu_win_rate, top3_rate AS kishu_top3_rate, "
+                "       baba_omo_win_rate AS jockey_omo_win_rate, "
+                "       baba_furyo_win_rate AS jockey_furyo_win_rate "
                 "FROM jockey_feature_store "
                 "WHERE kishu_code = ANY(%s) "
-                "  AND target_date = ("
-                "      SELECT MAX(target_date) FROM jockey_feature_store"
-                "      WHERE target_date <= %s"
-                "  )",
+                "  AND target_date = (SELECT MAX(target_date) FROM jockey_feature_store WHERE target_date <= %s)",
                 (jockey_cds, date_val),
             )
             jf = pd.DataFrame(cur.fetchall())
 
             cur.execute(
                 "SELECT chokyoshi_code AS trainer_cd, "
-                "       win_rate AS trainer_win_rate, "
-                "       top3_rate AS trainer_top3_rate "
+                "       win_rate AS trainer_win_rate, top3_rate AS trainer_top3_rate "
                 "FROM trainer_feature_store "
                 "WHERE chokyoshi_code = ANY(%s) "
-                "  AND target_date = ("
-                "      SELECT MAX(target_date) FROM trainer_feature_store"
-                "      WHERE target_date <= %s"
-                "  )",
+                "  AND target_date = (SELECT MAX(target_date) FROM trainer_feature_store WHERE target_date <= %s)",
                 (trainer_cds, date_val),
             )
             tf = pd.DataFrame(cur.fetchall())
 
-            # race_id 完全一致 → なければ馬ごとに直近の調教スコアをフォールバック
+            # chokyo_scores: race_id 完全一致 → なければ馬ごと直近フォールバック
             cur.execute(
                 "SELECT ketto_toroku_bango AS horse_id, "
                 "       chokyo_master_score, s1_time_score, s2_improve_score, "
@@ -184,8 +233,7 @@ def _fetch_feature_stores(
             cs = pd.DataFrame(cur.fetchall())
             if cs.empty:
                 cur.execute(
-                    "SELECT DISTINCT ON (ketto_toroku_bango) "
-                    "       ketto_toroku_bango AS horse_id, "
+                    "SELECT DISTINCT ON (ketto_toroku_bango) ketto_toroku_bango AS horse_id, "
                     "       chokyo_master_score, s1_time_score, s2_improve_score, "
                     "       s3_lastf_score, s4_freq_score, accel_bonus, ref_session_days_before "
                     "FROM chokyo_scores "
@@ -195,6 +243,7 @@ def _fetch_feature_stores(
                 )
                 cs = pd.DataFrame(cur.fetchall())
 
+            # aptitude_scores: 同上
             cur.execute(
                 "SELECT ketto_toroku_bango AS horse_id, "
                 "       apt_distance_shift, apt_track_change, apt_bias_fit, "
@@ -205,8 +254,7 @@ def _fetch_feature_stores(
             apt = pd.DataFrame(cur.fetchall())
             if apt.empty:
                 cur.execute(
-                    "SELECT DISTINCT ON (ketto_toroku_bango) "
-                    "       ketto_toroku_bango AS horse_id, "
+                    "SELECT DISTINCT ON (ketto_toroku_bango) ketto_toroku_bango AS horse_id, "
                     "       apt_distance_shift, apt_track_change, apt_bias_fit, "
                     "       apt_temperament, apt_growth, apt_seasonal "
                     "FROM aptitude_scores "
@@ -216,7 +264,111 @@ def _fetch_feature_stores(
                 )
                 apt = pd.DataFrame(cur.fetchall())
 
-    return {"jf": jf, "tf": tf, "cs": cs, "apt": apt}
+            # training_feature_store: best_z_total→chokyo_best_tscore 等にマッピング
+            cur.execute(
+                "SELECT horse_id, "
+                "       best_z_total AS chokyo_best_tscore, "
+                "       z_trend_slope AS chokyo_trend, "
+                "       avg_accel AS chokyo_accel_avg, "
+                "       session_count AS chokyo_count, "
+                "       slope_ratio AS chokyo_slope_ratio "
+                "FROM training_feature_store "
+                "WHERE horse_id = ANY(%s) "
+                "  AND target_date = (SELECT MAX(target_date) FROM training_feature_store WHERE target_date <= %s)",
+                (horse_ids, date_val),
+            )
+            trf = pd.DataFrame(cur.fetchall())
+
+    return {"jf": jf, "tf": tf, "cs": cs, "apt": apt, "trf": trf}
+
+
+# ── 過去走特徴量アタッチ ──────────────────────────────────────────────────────
+
+def _attach_history_features(df: pd.DataFrame, hist: pd.DataFrame, race_date: object, current_distance: int) -> pd.DataFrame:
+    """
+    horse_id ごとの過去走 DataFrame を受け取り、prev_N_* / interval / career_* / season 特徴量を df に追加する。
+    hist: _fetch_horse_history() の返り値（rn列を持つ）
+    """
+    if hist.empty:
+        return df
+
+    current_date = pd.Timestamp(race_date)
+    current_month = current_date.month
+    current_season = _month_to_season(current_month)
+
+    # ── 馬ごとに集計 ─────────────────────────────────────────────────────────
+    records: list[dict] = []
+    for horse_id, grp in hist.groupby("horse_id", sort=False):
+        grp = grp.sort_values("rn").reset_index(drop=True)
+
+        rec: dict = {"horse_id": str(horse_id)}
+
+        # prev_N_* (N=1..5)
+        for n in range(1, 6):
+            row = grp[grp["rn"] == n]
+            if row.empty:
+                rec[f"prev_{n}_kyori"]      = float("nan")
+                rec[f"prev_{n}_bataiju"]    = float("nan")
+                rec[f"prev_{n}_futan_juryo"]= float("nan")
+                rec[f"prev_{n}_umaban"]     = float("nan")
+            else:
+                r = row.iloc[0]
+                rec[f"prev_{n}_kyori"]      = float(r["prev_kyori"])      if pd.notna(r["prev_kyori"])      else float("nan")
+                rec[f"prev_{n}_bataiju"]    = float(r["prev_bataiju"])    if pd.notna(r["prev_bataiju"])    else float("nan")
+                rec[f"prev_{n}_futan_juryo"]= float(r["prev_futan_juryo"])if pd.notna(r["prev_futan_juryo"])else float("nan")
+                rec[f"prev_{n}_umaban"]     = float(r["prev_umaban"])     if pd.notna(r["prev_umaban"])     else float("nan")
+
+        # 出走間隔（直前レースから）
+        first = grp[grp["rn"] == 1]
+        if not first.empty and pd.notna(first.iloc[0]["prev_race_date"]):
+            last_date = pd.Timestamp(first.iloc[0]["prev_race_date"])
+            interval_days = (current_date - last_date).days
+            rec["interval"]        = float(interval_days)
+            rec["interval_weeks"]  = float(interval_days) / 7.0
+            rec["is_rest_return"]  = float(interval_days >= 28)
+            rec["is_long_layoff"]  = float(interval_days >= 90)
+        else:
+            rec["interval"] = rec["interval_weeks"] = rec["is_rest_return"] = rec["is_long_layoff"] = float("nan")
+
+        # 距離変化
+        if not first.empty and pd.notna(first.iloc[0]["prev_kyori"]):
+            d_change = float(current_distance) - float(first.iloc[0]["prev_kyori"])
+            rec["distance_change"] = d_change
+            rec["dist_change"]     = d_change  # モデル上は同一値
+        else:
+            rec["distance_change"] = rec["dist_change"] = float("nan")
+
+        # キャリア統計
+        rec["career_races"] = float(len(grp))
+
+        chakujun_vals = grp["prev_chakujun"].dropna().tolist()
+        last5 = [v for v in chakujun_vals[:5] if not math.isnan(v)]
+        rec["recent_avg_chakujun"] = float(np.mean(last5)) if last5 else float("nan")
+
+        # 直近90日のレース数（レース密度）
+        recent_cutoff = current_date - pd.Timedelta(days=90)
+        recent_count = grp[pd.to_datetime(grp["prev_race_date"]) >= recent_cutoff].shape[0]
+        rec["recent_run_density"] = float(recent_count)
+        # 疲労指数: 90日に3走以上で線形スケール（最大1.0）
+        rec["fatigue_index"] = min(float(recent_count) / 3.0, 1.0) if recent_count > 0 else 0.0
+
+        # 月次・季節別平均順位
+        month_grp = grp[grp["prev_month"] == current_month]["prev_chakujun"].dropna()
+        rec["horse_month_avg_rank"] = float(month_grp.mean()) if len(month_grp) > 0 else float("nan")
+
+        season_months = [m for m, s in {m: _month_to_season(m) for m in range(1, 13)}.items() if s == current_season]
+        season_grp = grp[grp["prev_month"].isin(season_months)]["prev_chakujun"].dropna()
+        rec["horse_season_avg_rank"] = float(season_grp.mean()) if len(season_grp) > 0 else float("nan")
+        rec["horse_season_rank_deviation"] = float(season_grp.std()) if len(season_grp) > 1 else float("nan")
+
+        records.append(rec)
+
+    if not records:
+        return df
+
+    hist_df = pd.DataFrame(records)
+    hist_df["horse_id"] = hist_df["horse_id"].astype(str)
+    return df.merge(hist_df, on="horse_id", how="left")
 
 
 # ── 特徴量ビルド ──────────────────────────────────────────────────────────────
@@ -230,49 +382,58 @@ def _build_legacy_features(race_id: str) -> pd.DataFrame:
     month     = pd.Timestamp(race_date).month
     kc        = str(df["keibajo_code"].iloc[0]).zfill(2)
     race_num  = int(df["race_num"].iloc[0])
+    distance  = int(pd.to_numeric(df["distance"].iloc[0], errors="coerce") or 0)
 
-    # 数値変換
     for col in ["bataiju", "zogen_sa", "futan_juryo", "distance", "umaban", "wakuban", "tan_odds"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # フィーチャーストア取得
-    db_race_id = _derive_db_race_id(race_date, kc, race_num)
-    stores = _fetch_feature_stores(
-        db_race_id,
-        df["horse_id"].astype(str).tolist(),
-        df["jockey_cd"].astype(str).tolist(),
-        df["trainer_cd"].astype(str).tolist(),
-        race_date,
-    )
 
     df["jockey_cd"]  = df["jockey_cd"].astype(str)
     df["trainer_cd"] = df["trainer_cd"].astype(str)
     df["horse_id"]   = df["horse_id"].astype(str)
 
+    horse_ids   = df["horse_id"].tolist()
+    jockey_cds  = df["jockey_cd"].tolist()
+    trainer_cds = df["trainer_cd"].tolist()
+
+    db_race_id = _derive_db_race_id(race_date, kc, race_num)
+
+    # ── 全ストア並行取得 ──────────────────────────────────────────────────────
+    stores = _fetch_feature_stores(db_race_id, horse_ids, jockey_cds, trainer_cds, race_date)
+    hist   = _fetch_horse_history(horse_ids, race_date)
+
+    # ── 騎手 ──────────────────────────────────────────────────────────────────
     jf = stores["jf"]
     if not jf.empty:
-        jf["jockey_cd"] = jf["jockey_cd"].astype(str)
+        jf = jf.copy(); jf["jockey_cd"] = jf["jockey_cd"].astype(str)
         df = df.merge(jf, on="jockey_cd", how="left")
     else:
-        df["kishu_win_rate"]  = float("nan")
-        df["kishu_top3_rate"] = float("nan")
+        for c in ["kishu_win_rate", "kishu_top3_rate", "jockey_omo_win_rate", "jockey_furyo_win_rate"]:
+            df[c] = float("nan")
 
+    # ── 調教師 ────────────────────────────────────────────────────────────────
     tf = stores["tf"]
     if not tf.empty:
-        tf["trainer_cd"] = tf["trainer_cd"].astype(str)
+        tf = tf.copy(); tf["trainer_cd"] = tf["trainer_cd"].astype(str)
         df = df.merge(tf, on="trainer_cd", how="left")
     else:
-        df["trainer_win_rate"]  = float("nan")
-        df["trainer_top3_rate"] = float("nan")
+        df["trainer_win_rate"] = df["trainer_top3_rate"] = float("nan")
 
+    # ── 調教・適性・training store ────────────────────────────────────────────
     for store_df in [stores["cs"], stores["apt"]]:
         if not store_df.empty:
-            store_df = store_df.copy()
-            store_df["horse_id"] = store_df["horse_id"].astype(str)
-            df = df.merge(store_df, on="horse_id", how="left")
+            s = store_df.copy(); s["horse_id"] = s["horse_id"].astype(str)
+            df = df.merge(s, on="horse_id", how="left")
 
-    # ── 派生特徴量 ──────────────────────────────────────────────────────────
+    trf = stores["trf"]
+    if not trf.empty:
+        trf = trf.copy(); trf["horse_id"] = trf["horse_id"].astype(str)
+        df = df.merge(trf, on="horse_id", how="left")
+
+    # ── 過去走特徴量アタッチ ──────────────────────────────────────────────────
+    df = _attach_history_features(df, hist, race_date, distance)
+
+    # ── 派生特徴量 ────────────────────────────────────────────────────────────
     df["kyori"]       = df["distance"]
     df["class_level"] = df["grade_code"].map(_GRADE_TO_CLASS).fillna(0)
     df["month"]       = month
@@ -281,29 +442,36 @@ def _build_legacy_features(race_id: str) -> pd.DataFrame:
 
     bataiju_mean = df["bataiju"].mean()
     futan_mean   = df["futan_juryo"].mean()
-    df["bataiju_diff_from_race_mean"]    = df["bataiju"] - bataiju_mean
+    df["bataiju_diff_from_race_mean"]     = df["bataiju"]     - bataiju_mean
     df["futan_juryo_diff_from_race_mean"] = df["futan_juryo"] - futan_mean
 
-    # 騎手勝率のレース内ランク（降順: 高勝率 → 1位）
-    df["kishu_win_rate_rank_in_race"] = df["kishu_win_rate"].rank(
-        ascending=False, method="min", na_option="bottom"
-    )
+    # レース内ランク
+    df["kishu_win_rate_rank_in_race"]   = df["kishu_win_rate"].rank(ascending=False, method="min", na_option="bottom")
+    df["trainer_win_rate_rank_in_race"] = df["trainer_win_rate"].rank(ascending=False, method="min", na_option="bottom")
 
     # 季節フラグ
     is_summer = month in (6, 7, 8)
     is_winter = month in (12, 1, 2)
     df["is_summer_hokkaido"] = int(is_summer and kc in ("01", "02"))
 
-    # 重馬場判定（芝または砂で3=重/4=不良）
     shiba = str(df["shiba_baba_code"].iloc[0]) if "shiba_baba_code" in df.columns else ""
     dirt  = str(df["dirt_baba_code"].iloc[0])  if "dirt_baba_code"  in df.columns else ""
     is_heavy = (shiba in _HEAVY_BABA_CODES) or (dirt in _HEAVY_BABA_CODES)
     df["is_winter_heavy"] = int(is_winter and is_heavy)
 
-    # 季節別体重変化
     df["weight_change_summer"] = df["zogen_sa"] * float(is_summer)
     df["weight_change_winter"] = df["zogen_sa"] * float(is_winter)
 
+    # 重馬場スコア: 騎手の重+不良馬場での勝率合計（簡易代替）
+    for col in ["jockey_omo_win_rate", "jockey_furyo_win_rate"]:
+        if col not in df.columns:
+            df[col] = float("nan")
+    df["heavy_track_score"] = df[["jockey_omo_win_rate", "jockey_furyo_win_rate"]].mean(axis=1)
+
+    logger.info(
+        "[LegacyAI] 特徴量ビルド完了: race_id=%s  history_rows=%d",
+        race_id, len(hist),
+    )
     return df
 
 
