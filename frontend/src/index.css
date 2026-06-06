@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+@keyframes modal-slide {
+  from { transform: translateY(24px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+@theme {
+  --animate-modal-slide: modal-slide 0.22s ease-out;
+}
+
 body {
   margin: 0;
   font-family: 'Inter', 'Hiragino Sans', 'Noto Sans JP', sans-serif;

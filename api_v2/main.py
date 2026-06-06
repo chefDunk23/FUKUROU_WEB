@@ -42,11 +42,19 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS — フロントエンド（Vite dev :5173 / prod :3000）から叩けるように許可
+# CORS — Vite dev server（5173〜5180 の任意ポート）および prod から許可
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_methods=["GET"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "http://localhost:5177",
+        "http://localhost:5178",
+        "http://localhost:3000",
+    ],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
