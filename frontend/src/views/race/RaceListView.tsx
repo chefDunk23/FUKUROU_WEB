@@ -42,8 +42,8 @@ function ClassBadge({ label }: { label: string | null }) {
 // ── 馬場ラベル色 ─────────────────────────────────────────────────────────────
 function SurfaceText({ trackCode }: { trackCode: string | null }) {
   const s = surfaceLabel(trackCode)
-  const cls = s === '芝' ? 'text-emerald-600' : s === 'ダ' ? 'text-amber-600' : 'text-violet-600'
-  return <span className={`font-medium ${cls}`}>{s}</span>
+  const cls = s === '芝' ? 'text-emerald-600' : s === 'ダ' ? 'text-amber-600' : s === '障' ? 'text-violet-600' : 'text-gray-400'
+  return <span className={`font-medium ${cls}`}>{s ?? '—'}</span>
 }
 
 // ── 馬場状態 ──────────────────────────────────────────────────────────────────
