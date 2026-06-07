@@ -3,11 +3,11 @@
  * ============================================
  * レースレベル検証のハーフモーダル。
  * PC: 画面中央オーバーレイ / モバイル: 画面下部からせり上がる形式。
- * RaceLevelPanel（RaceLevelView.tsx からエクスポート）をラップする。
+ * RaceLevelPanel（panels/RaceLevelPanel.tsx からエクスポート）をラップする。
  */
 import { useEffect } from 'react'
 import { X } from 'lucide-react'
-import { RaceLevelPanel } from '../views/RaceLevelView'
+import { RaceLevelPanel } from '../panels/RaceLevelPanel'
 import { calcHorseScore, type SelfRaceData } from '../utils/horseScore'
 
 const PACE_CTX_CLS: Record<string, string> = {

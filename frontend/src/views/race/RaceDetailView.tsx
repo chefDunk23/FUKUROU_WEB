@@ -34,11 +34,11 @@ import {
   type EmpRank,
   type PositioningMap,
   type RaceScore,
-} from '../api/raceDetail'
-import { analyzeRaceStory, type RaceStoryResult } from '../utils/raceStory'
-import { calcHorseScore, type PaceContext, type SelfRaceData } from '../utils/horseScore'
+} from '../../api/raceDetail'
+import { analyzeRaceStory, type RaceStoryResult } from '../../utils/raceStory'
+import { calcHorseScore, type PaceContext, type SelfRaceData } from '../../utils/horseScore'
 import { RaceStoryPanel } from './RaceStoryView'
-import { RaceLevelModal } from '../components/RaceLevelModal'
+import { RaceLevelModal } from '../../components/RaceLevelModal'
 
 // ── 定数 ──────────────────────────────────────────────────────────────────────
 
@@ -659,7 +659,7 @@ function PastCell({
   tenIndex,
   onOpenModal,
 }: {
-  pr: import('../api/raceDetail').PastRace | undefined
+  pr: import('../../api/raceDetail').PastRace | undefined
   horseId?: string
   tenIndex?: number | null
   onOpenModal?: (raceId: string, selfHorseId: string, selfRaceData: SelfRaceData) => void

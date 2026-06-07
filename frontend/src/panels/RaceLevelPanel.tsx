@@ -1,29 +1,17 @@
+/**
+ * frontend/src/panels/RaceLevelPanel.tsx
+ * ========================================
+ * レースレベル検証パネル — モーダル・スタンドアロンページ両対応の共有コンポーネント群。
+ *
+ * エクスポート:
+ *   ScoreHero, ScoreBreakdown  — スコア表示（スタンドアロンページのヘッダーでも使用）
+ *   RaceLevelPanel             — データフェッチ＋フィルタ＋全セクション統合パネル
+ */
 import { useEffect, useMemo, useState } from 'react'
 import type { RaceLevelData, RaceLevelOpponent, RaceScore } from '../api/raceDetail'
 import { fetchRaceLevel } from '../api/raceDetail'
 import { calcHorseScoreSimple } from '../utils/horseScore'
 import { analyzeRaceBias, type RaceBiasResult } from '../utils/raceBias'
-
-// ── URL param helpers ──────────────────────────────────────────────────────────
-
-function getSearchParam(key: string): string | null {
-  return new URLSearchParams(window.location.search).get(key)
-}
-function getParamInt(key: string, fallback: number): number {
-  const v = getSearchParam(key)
-  const n = v ? parseInt(v, 10) : NaN
-  return isNaN(n) ? fallback : n
-}
-function getParamFloat(key: string, fallback: number): number {
-  const v = getSearchParam(key)
-  const n = v ? parseFloat(v) : NaN
-  return isNaN(n) ? fallback : n
-}
-function getParamBool(key: string, fallback: boolean): boolean {
-  const v = getSearchParam(key)
-  if (v === null) return fallback
-  return v === 'true' || v === '1'
-}
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 
@@ -48,7 +36,7 @@ const SCORE_CLS: Record<string, { ring: string; text: string; bg: string }> = {
   C: { ring: 'ring-gray-300',    text: 'text-gray-600',    bg: 'bg-gray-50'    },
 }
 
-function ScoreHero({ rs }: { rs: RaceScore }) {
+export function ScoreHero({ rs }: { rs: RaceScore }) {
   const cls = SCORE_CLS[rs.label] ?? SCORE_CLS.C
   return (
     <div className={`flex flex-col items-center justify-center ring-4 ${cls.ring} ${cls.bg} rounded-2xl p-5 min-w-[96px] flex-shrink-0`}>
@@ -59,7 +47,7 @@ function ScoreHero({ rs }: { rs: RaceScore }) {
   )
 }
 
-function ScoreBreakdown({ rs }: { rs: RaceScore }) {
+export function ScoreBreakdown({ rs }: { rs: RaceScore }) {
   const bars: { label: string; value: number; max: number; color: string }[] = [
     { label: 'タイム指数', value: rs.timeScore,        max: 30, color: 'bg-sky-400'     },
     { label: 'メンバー',   value: rs.memberLevelScore, max: 30, color: 'bg-emerald-400' },
@@ -80,47 +68,6 @@ function ScoreBreakdown({ rs }: { rs: RaceScore }) {
       {rs.sampleCount > 0 && (
         <p className="text-[10px] text-gray-400">タイム比較サンプル: {rs.sampleCount}件</p>
       )}
-    </div>
-  )
-}
-
-function RaceLevelHeader({ raceId, data, onBack }: { raceId: string; data: RaceLevelData; onBack: () => void }) {
-  const { raceInfo, raceScore } = data
-  const distSurface = [raceInfo.distance ? `${raceInfo.distance}m` : null, raceInfo.surface].filter(Boolean).join(' ')
-
-  return (
-    <div className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-20">
-      <div className="max-w-4xl mx-auto px-4 py-3">
-        <div className="flex items-center gap-3 mb-3">
-          <button onClick={onBack} className="text-sm text-gray-400 hover:text-gray-700 transition-colors p-1 -ml-1 whitespace-nowrap">
-            ← 戻る
-          </button>
-          <div className="flex-1 min-w-0">
-            <h1 className="text-sm font-bold text-gray-900 truncate">
-              🏁 {raceInfo.raceName ?? `${raceInfo.keibajo ?? ''} レース`}
-            </h1>
-            <p className="text-[11px] text-gray-500">
-              {raceInfo.raceDate} {raceInfo.keibajo} {distSurface}
-              {raceInfo.headCount > 0 && <span className="ml-1">{raceInfo.headCount}頭立て</span>}
-              <span className="ml-2 font-mono text-[9px] text-gray-300">{raceId}</span>
-            </p>
-          </div>
-        </div>
-        {raceScore && (
-          <div className="flex items-start gap-4">
-            <ScoreHero rs={raceScore} />
-            <ScoreBreakdown rs={raceScore} />
-          </div>
-        )}
-        {raceInfo.trackConditionWarning && (
-          <div className="mt-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-2">
-            <span className="text-orange-500 flex-shrink-0">⚠</span>
-            <p className="text-[11px] text-orange-700 leading-snug">
-              同日比較対象に異なる馬場状態のレースが混在しています（タイム指数の精度が低下している可能性があります）
-            </p>
-          </div>
-        )}
-      </div>
     </div>
   )
 }
@@ -154,7 +101,6 @@ function FilterPanel({
       <div className="max-w-4xl mx-auto px-4 py-3 space-y-3">
         <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">絞り込み条件</p>
         <div className="flex flex-wrap gap-4 items-center">
-          {/* max_rank */}
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-600 whitespace-nowrap">対象着順:</span>
             <div className="flex gap-1">
@@ -170,7 +116,6 @@ function FilterPanel({
             </div>
           </div>
 
-          {/* max_margin */}
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-600 whitespace-nowrap">最大着差:</span>
             <div className="flex gap-1">
@@ -186,7 +131,6 @@ function FilterPanel({
             </div>
           </div>
 
-          {/* exclude_self — only shown when a focal horse is identified */}
           {selfHorseId && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-600 whitespace-nowrap">自馬除外:</span>
@@ -224,9 +168,9 @@ function colOf(o: RaceLevelOpponent): NextRaceCol {
 }
 
 const COL_CLS: Record<NextRaceCol, string> = {
-  '1着':   'text-amber-700 font-bold',
-  '2着':   'text-blue-700 font-bold',
-  '3着':   'text-blue-600',
+  '1着':    'text-amber-700 font-bold',
+  '2着':    'text-blue-700 font-bold',
+  '3着':    'text-blue-600',
   '4着以下': 'text-gray-500',
   '出走なし': 'text-gray-300',
 }
@@ -347,13 +291,12 @@ function FactCard({ o, raceScore }: { o: RaceLevelOpponent; raceScore: RaceScore
     ? calcHorseScoreSimple({
         raceLevelScore: raceScore.totalScore,
         rank:           o.thisRank,
-        headCount:      null,  // 頭数は未提供のため rank_factor は thisRank のみで近似
+        headCount:      null,
       })
     : null
 
   return (
     <div className={`flex items-start gap-3 px-4 py-3 border-b border-gray-100 last:border-0 transition-colors ${isTopThree ? 'bg-emerald-50/30 hover:bg-emerald-50/50' : 'hover:bg-gray-50/50'}`}>
-      {/* This-race rank badge + 馬スコア */}
       <div className="flex-shrink-0 flex flex-col items-center gap-1">
         <div className="w-7 h-7 flex items-center justify-center rounded-full bg-gray-100 text-[11px] font-bold text-gray-700">
           {o.thisRank}
@@ -365,7 +308,6 @@ function FactCard({ o, raceScore }: { o: RaceLevelOpponent; raceScore: RaceScore
         )}
       </div>
 
-      {/* Horse name + next race info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-sm font-semibold text-gray-900">{o.horseName ?? o.horseId}</span>
@@ -392,7 +334,6 @@ function FactCard({ o, raceScore }: { o: RaceLevelOpponent; raceScore: RaceScore
         </p>
       </div>
 
-      {/* Next-race rank */}
       <div className={`flex-shrink-0 text-base tabular-nums ${nextRankStyle(o.nextRaceRank)}`}>
         {o.nextRaceRank != null ? `${o.nextRaceRank}着` : '—'}
       </div>
@@ -449,14 +390,12 @@ function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
         <p className="text-[10px] text-gray-400 mt-0.5">上位{bias.topNUsed}頭・全{bias.sampleSize}頭対象</p>
       </div>
       <div className="px-4 py-3 flex flex-wrap gap-3">
-        {/* 決着傾向 */}
         {bias.finishBias && bias.finishBias !== '中間' && (() => {
           const cls = FINISH_BIAS_CLS[bias.finishBias!]
           return (
             <div className={`flex-1 min-w-[140px] rounded-lg px-3 py-2.5 ring-1 ${cls.bg} ${cls.ring}`}>
               <div className={`flex items-center gap-1.5 font-bold text-sm ${cls.text}`}>
-                <span>{cls.icon}</span>
-                <span>{bias.finishBias}</span>
+                <span>{cls.icon}</span><span>{bias.finishBias}</span>
               </div>
               {bias.finishBiasNote && (
                 <p className="text-[10px] text-gray-500 mt-1 leading-snug">{bias.finishBiasNote}</p>
@@ -465,14 +404,12 @@ function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
           )
         })()}
 
-        {/* 枠番バイアス */}
         {bias.gateBias && bias.gateBias !== '均等' && (() => {
           const cls = GATE_BIAS_CLS[bias.gateBias!]
           return (
             <div className={`flex-1 min-w-[140px] rounded-lg px-3 py-2.5 ring-1 ${cls.bg} ${cls.ring}`}>
               <div className={`flex items-center gap-1.5 font-bold text-sm ${cls.text}`}>
-                <span>{cls.icon}</span>
-                <span>{bias.gateBias}</span>
+                <span>{cls.icon}</span><span>{bias.gateBias}</span>
               </div>
               {bias.gateBiasNote && (
                 <p className="text-[10px] text-gray-500 mt-1 leading-snug">{bias.gateBiasNote}</p>
@@ -481,7 +418,6 @@ function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
           )
         })()}
 
-        {/* どちらも中間/均等の場合 */}
         {bias.finishBias === '中間' && bias.gateBias === '均等' && (
           <p className="text-[11px] text-gray-400 py-1">枠番・決着ともに偏りなし（平均的なレース）</p>
         )}
@@ -492,18 +428,42 @@ function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
 
 // ── モーダル組み込み用パネル（URL同期なし・ページクロームなし） ─────────────────
 
+// ── URL param helpers (used when syncUrl=true) ────────────────────────────────
+
+function _getParam(key: string): string | null {
+  return new URLSearchParams(window.location.search).get(key)
+}
+function _getParamInt(key: string, fallback: number): number {
+  const n = parseInt(_getParam(key) ?? '', 10)
+  return isNaN(n) ? fallback : n
+}
+function _getParamFloat(key: string, fallback: number): number {
+  const n = parseFloat(_getParam(key) ?? '')
+  return isNaN(n) ? fallback : n
+}
+function _getParamBool(key: string, fallback: boolean): boolean {
+  const v = _getParam(key)
+  if (v === null) return fallback
+  return v === 'true' || v === '1'
+}
+
+// ── Panel ─────────────────────────────────────────────────────────────────────
+
 export interface RaceLevelPanelProps {
   raceId: string
   selfHorseId?: string | null
+  /** When true, reads initial filter state from URL and syncs changes back (page mode). */
+  syncUrl?: boolean
 }
 
-export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null }: RaceLevelPanelProps) {
-  const [data,    setData]    = useState<RaceLevelData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
-  const [maxRank,     setMaxRank]     = useState(5)
-  const [maxMargin,   setMaxMargin]   = useState(99)
-  const [excludeSelf, setExcludeSelf] = useState(false)
+export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null, syncUrl = false }: RaceLevelPanelProps) {
+  const [data,        setData]        = useState<RaceLevelData | null>(null)
+  const [loading,     setLoading]     = useState(true)
+  const [error,       setError]       = useState<string | null>(null)
+  const [maxRank,     setMaxRank]     = useState(() => syncUrl ? _getParamInt('max_rank', 5) : 5)
+  const [maxMargin,   setMaxMargin]   = useState(() => syncUrl ? _getParamFloat('max_margin', 99) : 99)
+  const [excludeSelf, setExcludeSelf] = useState(() => syncUrl ? _getParamBool('exclude_self', false) : false)
+  const resolvedSelfHorseId = initSelfHorseId ?? (syncUrl ? _getParam('self_horse_id') : null)
 
   useEffect(() => {
     setLoading(true)
@@ -513,25 +473,32 @@ export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null }: 
       .catch((e: unknown) => { setError(String(e)); setLoading(false) })
   }, [raceId])
 
+  useEffect(() => {
+    if (!syncUrl) return
+    const params = new URLSearchParams(window.location.search)
+    if (maxRank !== 5) params.set('max_rank', String(maxRank)); else params.delete('max_rank')
+    if (maxMargin !== 99) params.set('max_margin', String(maxMargin)); else params.delete('max_margin')
+    if (excludeSelf) params.set('exclude_self', 'true'); else params.delete('exclude_self')
+    const qs = params.toString()
+    window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
+  }, [maxRank, maxMargin, excludeSelf, syncUrl])
+
   const selfHorseName = useMemo(() => {
-    if (!initSelfHorseId || !data) return null
-    return data.opponents.find(o => o.horseId === initSelfHorseId)?.horseName ?? null
-  }, [initSelfHorseId, data])
+    if (!resolvedSelfHorseId || !data) return null
+    return data.opponents.find(o => o.horseId === resolvedSelfHorseId)?.horseName ?? null
+  }, [resolvedSelfHorseId, data])
 
   const filteredOpponents = useMemo(() => {
     if (!data) return []
     return data.opponents.filter(o => {
       if (o.thisRank > maxRank) return false
       if (maxMargin < 99 && o.thisMargin != null && o.thisMargin > maxMargin) return false
-      if (excludeSelf && initSelfHorseId && o.horseId === initSelfHorseId) return false
+      if (excludeSelf && resolvedSelfHorseId && o.horseId === resolvedSelfHorseId) return false
       return true
     })
-  }, [data, maxRank, maxMargin, excludeSelf, initSelfHorseId])
+  }, [data, maxRank, maxMargin, excludeSelf, resolvedSelfHorseId])
 
-  const raceBias = useMemo(
-    () => analyzeRaceBias(filteredOpponents),
-    [filteredOpponents],
-  )
+  const raceBias = useMemo(() => analyzeRaceBias(filteredOpponents), [filteredOpponents])
 
   if (loading) {
     return (
@@ -556,7 +523,6 @@ export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null }: 
 
   return (
     <div className="pb-8">
-      {/* スコアセクション */}
       <div className="px-4 py-4 border-b border-gray-100">
         <p className="text-[11px] text-gray-500 mb-3">
           {raceInfo.raceDate} · {raceInfo.keibajo} {distSurface}
@@ -584,7 +550,7 @@ export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null }: 
         maxRank={maxRank}
         maxMargin={maxMargin}
         excludeSelf={excludeSelf}
-        selfHorseId={initSelfHorseId}
+        selfHorseId={resolvedSelfHorseId}
         selfHorseName={selfHorseName}
         onMaxRankChange={setMaxRank}
         onMaxMarginChange={setMaxMargin}
@@ -594,113 +560,7 @@ export function RaceLevelPanel({ raceId, selfHorseId: initSelfHorseId = null }: 
       <div className="px-4 py-6 space-y-6">
         <RaceBiasPanel bias={raceBias} />
         <NextRaceMatrix opponents={filteredOpponents} maxRank={maxRank} />
-        <FactCardList opponents={filteredOpponents} raceScore={data?.raceScore ?? null} />
-      </div>
-    </div>
-  )
-}
-
-// ── Main component ─────────────────────────────────────────────────────────────
-
-interface RaceLevelViewProps {
-  raceId?: string
-  onBack: () => void
-}
-
-export default function RaceLevelView({ raceId, onBack }: RaceLevelViewProps) {
-  const [data,    setData]    = useState<RaceLevelData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
-
-  // Read filter state from URL on mount (for shareable URLs)
-  const [maxRank,     setMaxRank]     = useState(() => getParamInt('max_rank', 5))
-  const [maxMargin,   setMaxMargin]   = useState(() => getParamFloat('max_margin', 99))
-  const [excludeSelf, setExcludeSelf] = useState(() => getParamBool('exclude_self', false))
-  const [selfHorseId] = useState(() => getSearchParam('self_horse_id'))
-
-  useEffect(() => {
-    if (!raceId) return
-    setLoading(true)
-    setError(null)
-    fetchRaceLevel(raceId)
-      .then(d => { setData(d); setLoading(false) })
-      .catch((e: unknown) => { setError(String(e)); setLoading(false) })
-  }, [raceId])
-
-  // Sync filter state back to URL (replaceState — no new history entry)
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    if (maxRank !== 5) params.set('max_rank', String(maxRank))
-    else params.delete('max_rank')
-    if (maxMargin !== 99) params.set('max_margin', String(maxMargin))
-    else params.delete('max_margin')
-    if (excludeSelf) params.set('exclude_self', 'true')
-    else params.delete('exclude_self')
-    const qs = params.toString()
-    window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`)
-  }, [maxRank, maxMargin, excludeSelf])
-
-  const selfHorseName = useMemo(() => {
-    if (!selfHorseId || !data) return null
-    return data.opponents.find(o => o.horseId === selfHorseId)?.horseName ?? null
-  }, [selfHorseId, data])
-
-  const filteredOpponents = useMemo(() => {
-    if (!data) return []
-    return data.opponents.filter(o => {
-      if (o.thisRank > maxRank) return false
-      if (maxMargin < 99 && o.thisMargin != null && o.thisMargin > maxMargin) return false
-      if (excludeSelf && selfHorseId && o.horseId === selfHorseId) return false
-      return true
-    })
-  }, [data, maxRank, maxMargin, excludeSelf, selfHorseId])
-
-  const raceBias = useMemo(() => analyzeRaceBias(filteredOpponents), [filteredOpponents])
-
-  if (!raceId) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-gray-400">
-        <p>race_id が指定されていません</p>
-      </div>
-    )
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center gap-3 text-gray-400">
-        <div className="w-5 h-5 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
-        <span className="text-sm">レースレベルデータを取得中...</span>
-      </div>
-    )
-  }
-
-  if (error || !data) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center gap-4 text-center px-6">
-        <p className="text-3xl">⚠</p>
-        <p className="text-gray-600 text-sm">{error ?? 'データを取得できませんでした'}</p>
-        <button onClick={onBack} className="text-blue-500 hover:underline text-sm">← 戻る</button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-50 pb-16">
-      <RaceLevelHeader raceId={raceId} data={data} onBack={onBack} />
-      <FilterPanel
-        maxRank={maxRank}
-        maxMargin={maxMargin}
-        excludeSelf={excludeSelf}
-        selfHorseId={selfHorseId}
-        selfHorseName={selfHorseName}
-        onMaxRankChange={setMaxRank}
-        onMaxMarginChange={setMaxMargin}
-        onExcludeSelfChange={setExcludeSelf}
-      />
-      <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
-        <RaceBiasPanel bias={raceBias} />
-        <NextRaceMatrix opponents={filteredOpponents} maxRank={maxRank} />
-        <FactCardList opponents={filteredOpponents} raceScore={data?.raceScore ?? null} />
+        <FactCardList opponents={filteredOpponents} raceScore={raceScore} />
       </div>
     </div>
   )

@@ -17,8 +17,8 @@ import {
   buildVenueMatrix,
   type RaceSummary,
   type VenueColumn,
-} from '../api/races'
-import { goToRace } from '../utils/router'
+} from '../../api/races'
+import { goToRace } from '../../utils/router'
 
 // ── セルサイズ設定 ────────────────────────────────────────────────────────────
 interface CellStyle { minWidth: number; pad: string; nameSize: string; metaSize: string }

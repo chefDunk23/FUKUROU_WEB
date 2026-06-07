@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react'
 import { navigate } from './utils/router'
-import RaceLevelView    from './views/RaceLevelView'
+import RaceLevelView    from './views/race/RaceLevelView'
 import PredictionView    from './views/PredictionView'
 import EvAnalysisView   from './views/EvAnalysisView'
-import ClassicVideoView  from './views/ClassicVideoView'
-import VideoGenView      from './views/VideoGenView'
-import VideoShortView    from './views/VideoShortView'
+import ClassicVideoView  from './views/video/ClassicVideoView'
+import VideoGenView      from './views/video/VideoGenView'
+import VideoShortView    from './views/video/VideoShortView'
 import DevView           from './views/DevView'
 // ── ユーザー向けビュー ─────────────────────────────────────────────────────────
 import UserHomeView      from './views/UserHomeView'
-import RaceListView      from './views/RaceListView'
-import RaceDetailView    from './views/RaceDetailView'   // UserRaceDetailView
+import RaceListView      from './views/race/RaceListView'
+import RaceDetailView    from './views/race/RaceDetailView'
 
 // ── 開発者向けビュー（ユーザー向けとは完全独立） ──────────────────────────────
 import DevRaceDetailView from './views/dev/DevRaceDetailView'
