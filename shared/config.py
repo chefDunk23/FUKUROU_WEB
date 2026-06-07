@@ -49,6 +49,10 @@ class _Paths:
         return _ROOT / os.getenv("MODEL_DIR_V2", "models/v2/ensemble")
 
     @property
+    def model_dir_v2_dirt(self) -> Path:
+        return _ROOT / os.getenv("MODEL_DIR_V2_DIRT", "models/v2/ensemble_dirt")
+
+    @property
     def submodel_dir_v2(self) -> Path:
         return _ROOT / os.getenv("SUBMODEL_DIR_V2", "models/v2/submodels")
 
@@ -63,6 +67,14 @@ class _Paths:
 
 PATHS = _Paths()
 
+
+# ── Redis ────────────────────────────────────────────────────────────────────
+REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+
+# ── API 認証 ─────────────────────────────────────────────────────────────────
+# 空文字 = 開発環境（認証スキップ）。本番では必ず設定すること。
+API_KEY: str = os.getenv("API_KEY", "")
 
 # ── 機能フラグ ───────────────────────────────────────────────────────────────
 DEV_MODE: bool = os.getenv("DEV_MODE", "false").lower() == "true"
