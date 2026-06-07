@@ -6,25 +6,24 @@ GET /api/v2/races?date=YYYY-MM-DD — 指定日のレース一覧を返す。
 fukurou_keiba_v2 にデータがない日（今週末の未来レース等）は
 fukurou_jvdl にフォールバックして同等のレスポンスを返す。
 
-クラスラベル計算ロジック:
-  v2 DB grade_code:  A=G1, B=G2, C=G3, L=Listed, E=1勝クラス, H=2勝クラス
-  jvdl jyoken_cd_2:  016=新馬, 010=未勝利, 005=障害未勝利,
-                     703=1勝クラス, 702=2勝クラス, 701=3勝クラス, 999=オープン
-  jvdl race_type_code: 11=2歳, 12=3歳, 13=3歳以上, 14=4歳以上
+クラスラベル計算ロジック（4段フォールバック）:
+  Tier 1: grade_code が信頼できる（keiba_v2 実測値: A/B/C/L/E/H 等）→ 直接変換
+  Tier 2: race_name が _RACE_GRADE_MAP に一致 → G1/G2/G3
+  Tier 3: race_name の正規表現 → 新馬/未勝利/○勝クラス/オープン/障害
+  Tier 4: grade_code == 'R'（jvdl 重賞タグ、格付け不明）→ "重賞"
+
+  ※ jvdl の jyoken_cd_* / race_type_code はパーサー破損により信頼できないため使用しない。
 """
 from __future__ import annotations
 
-import json
 import logging
-import math
-import re
 import time
 from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 import psycopg2.extras
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 try:
@@ -33,57 +32,37 @@ try:
 except ImportError:
     _REDIS_AVAILABLE = False
 
+from api_v2.deps import rate_limit_predict
+from shared.config import REDIS_HOST, REDIS_PORT
 from shared.db.jvdl import get_conn as get_jvdl_conn
 from shared.db.jvdata import get_conn as get_v2_conn
+from ._race_common import (
+    _BABA_LABEL,
+    _CLASS_REGEX,
+    _GRADE_CLASS_SCORE,
+    _GRADE_TO_LABEL,
+    _JYOKEN_TO_CLASS,
+    _KEIBAJO_NAME,
+    _RACE_GRADE_MAP,
+    _TENKO_LABEL,
+    _baba_str,
+    _clean_name,
+    _is_valid_code,
+    _sf,
+    _si,
+    _surface_str,
+    _weather_str,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2", tags=["v2-races"])
 
 # ── 定数 ──────────────────────────────────────────────────────────────────────
 
-_KEIBAJO_NAME: dict[str, str] = {
-    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟",
-    "05": "東京", "06": "中山", "07": "中京", "08": "京都",
-    "09": "阪神", "10": "小倉",
-    "30": "盛岡", "35": "水沢", "42": "金沢", "43": "笠松",
-    "44": "名古屋", "46": "園田", "47": "姫路", "48": "高知", "50": "佐賀",
-}
-
 _COURSE_TYPE_TO_TRACK_CODE: dict[str, str] = {
     "芝":    "10",
-    "ダート": "20",
+    "ダート": "23",   # JV-Data ダート下限; 10-22=芝, 23-29=ダ, 51-59=障
     "障害":   "51",
-}
-
-# grade_code → class_label (v2 DB 実測値)
-_GRADE_TO_LABEL: dict[str, str] = {
-    "A": "G1", "B": "G2", "C": "G3", "L": "Listed",
-    "E": "1勝クラス", "H": "2勝クラス",
-    # 旧コード互換
-    "A01": "G1", "A02": "G2", "A03": "G3", "A04": "Listed",
-    "G": "G1", "F": "G2", "D": "G3",
-}
-
-# jyoken_cd → 条件名 (jvdl DB)
-_JYOKEN_TO_CLASS: dict[str, str] = {
-    "016": "新馬",
-    "010": "未勝利",
-    "005": "障害未勝利",
-    "703": "1勝クラス",
-    "702": "2勝クラス",
-    "701": "3勝クラス",
-    "999": "オープン",
-    "015": "障害オープン",
-}
-
-# race_type_code → 年齢制限プレフィックス
-_RACE_TYPE_TO_AGE: dict[str, str] = {
-    "11": "2歳",
-    "12": "3歳",
-    "13": "3歳以上",
-    "14": "4歳以上",
-    "15": "4歳以上",
-    "17": "障害",
 }
 
 
@@ -99,6 +78,11 @@ def _fmt_time(raw: str | None) -> str | None:
     return None
 
 
+_RELIABLE_GRADE_CODES: frozenset[str] = frozenset({
+    "A", "B", "C", "L", "G", "F", "D", "A01", "A02", "A03", "A04",
+})
+
+
 def _compute_class_label(
     grade_code: str | None,
     race_type_code: str | None,
@@ -109,32 +93,55 @@ def _compute_class_label(
     race_name: str,
 ) -> str | None:
     """
-    利用可能な情報からレースクラスラベルを計算する。
-      1. grade_code (v2 DB / jvdl 共通)
-      2. jyoken_cd + race_type_code (jvdl — データが揃ったとき)
-      3. race_name のキーワード解析 (フォールバック)
+    レースクラスラベルを 6 段フォールバックで計算する。
+
+    Tier 1: grade_code が G1/G2/G3/Listed を明示するコード → _GRADE_TO_LABEL
+    Tier 2: jyoken_cd_2-5 のいずれかが有効 → _JYOKEN_TO_CLASS
+            (jvdl パーサーのバイト位置修正後に有効。v2 DB パスでは None のため skip)
+    Tier 3: grade_code が E/H → "1勝/2勝クラス"
+            (v2 DB パスの fallback。jyoken が取れた場合は Tier 2 で処理済み)
+    Tier 4: race_name が _RACE_GRADE_MAP に一致 → G1/G2/G3
+    Tier 5: race_name の正規表現 → 条件クラス
+    Tier 6: grade_code == 'R' → "重賞"
     """
-    # 1. grade_code から
-    if grade_code:
-        g = grade_code.strip()
+    g = grade_code.strip() if grade_code else ""
+
+    # Tier 1: 重賞グレード・リステッド（jvdl/v2 DB 共通で信頼できるコード）
+    if g and g in _RELIABLE_GRADE_CODES:
         label = _GRADE_TO_LABEL.get(g) or _GRADE_TO_LABEL.get(g.upper())
         if label:
             return label
 
-    # 2. jyoken_cd から（jvdl がデータを持っているとき）
-    age_prefix = _RACE_TYPE_TO_AGE.get((race_type_code or "").strip(), "")
-    for cd in [jyoken_cd_2, jyoken_cd_3, jyoken_cd_4, jyoken_cd_5]:
-        if not cd:
-            continue
-        class_name = _JYOKEN_TO_CLASS.get(cd.strip())
-        if class_name:
-            return f"{age_prefix}{class_name}" if age_prefix else class_name
+    # Tier 2: jyoken_cd（specs.py のバイト位置修正後に有効）
+    for jy_raw in (jyoken_cd_2, jyoken_cd_3, jyoken_cd_4, jyoken_cd_5):
+        jy = (jy_raw or "").strip()
+        if jy and jy != "000":
+            label = _JYOKEN_TO_CLASS.get(jy)
+            if label:
+                return label
 
-    # 3. race_name のキーワード解析
-    name = race_name or ""
-    for kw in ["新馬", "未勝利", "1勝クラス", "2勝クラス", "3勝クラス", "障害"]:
-        if kw in name:
-            return kw
+    # Tier 3: grade_code E/H（v2 DB の 1勝/2勝クラス fallback）
+    if g in ("E", "H"):
+        label = _GRADE_TO_LABEL.get(g)
+        if label:
+            return label
+
+    # Tier 4: race_name 重賞ルックアップ（G1/G2/G3）
+    name = (race_name or "").strip()
+    if name:
+        for fragment, grade_label in _RACE_GRADE_MAP:
+            if fragment in name:
+                return grade_label
+
+    # Tier 5: 正規表現による条件クラス抽出
+    if name:
+        for pattern, class_label in _CLASS_REGEX:
+            if pattern.search(name):
+                return class_label
+
+    # Tier 6: grade_code == 'R'（jvdl 重賞タグ、格付け不明）
+    if g == "R":
+        return "重賞"
 
     return None
 
@@ -179,7 +186,7 @@ SELECT
     COUNT(e.horse_id) AS syusso_tosu
 FROM   races r
 LEFT   JOIN race_entries e ON e.race_id = r.id
-WHERE  r.date::date = %s
+WHERE  r.date >= %s AND r.date < %s + INTERVAL '1 day'
 GROUP  BY r.id, r.race_number, r.place_code, r.name, r.date,
           r.distance, r.course_type, r.grade_code, r.start_time,
           r.race_type_code, r.jyoken_cd_2, r.jyoken_cd_3,
@@ -291,7 +298,7 @@ def list_races(
                 rows = cur.fetchall()
     except Exception as exc:
         logger.exception("[V2Races] keiba_v2 クエリ失敗: %s", exc)
-        raise HTTPException(status_code=500, detail=f"DB照会エラー: {exc}")
+        raise HTTPException(status_code=500, detail="データ取得エラーが発生しました")
 
     if rows:
         return RaceListResponse(date=str(date), races=_build_from_v2(rows))
@@ -301,11 +308,11 @@ def list_races(
     try:
         with get_jvdl_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(_SQL_JVDL_RACES_BY_DATE, (date,))
+                cur.execute(_SQL_JVDL_RACES_BY_DATE, (date, date))
                 jvdl_rows = cur.fetchall()
     except Exception as exc:
         logger.exception("[V2Races] jvdl フォールバック失敗: %s", exc)
-        raise HTTPException(status_code=500, detail=f"jvdl照会エラー: {exc}")
+        raise HTTPException(status_code=500, detail="データ取得エラーが発生しました")
 
     logger.info("[V2Races] jvdl から %d レース取得: %s", len(jvdl_rows), date)
     return RaceListResponse(date=str(date), races=_build_from_jvdl(jvdl_rows))
@@ -318,12 +325,14 @@ class WeekendRacesResponse(BaseModel):
 
 
 def _this_weekend() -> tuple[date, date]:
-    """今週の土曜・日曜を返す。
+    """今週の土曜・日曜を返す。JST 固定（UTC 日曜 00:xx が JST 月曜と誤判定されるのを防ぐ）。
     土曜 → 今日が土曜
     日曜 → 昨日（土曜）＋今日（日曜） ← 日曜は +6 ではなく -1
     平日 → 次の土曜・日曜
     """
-    today   = date.today()
+    import datetime as _dt_jst
+    from zoneinfo import ZoneInfo
+    today   = _dt_jst.datetime.now(ZoneInfo("Asia/Tokyo")).date()
     weekday = today.weekday()   # 0=月 … 5=土 6=日
     if weekday == 5:
         sat = today
@@ -349,7 +358,7 @@ def _fetch_races_for_date(d: date) -> list[RaceSummary]:
     try:
         with get_jvdl_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(_SQL_JVDL_RACES_BY_DATE, (d,))
+                cur.execute(_SQL_JVDL_RACES_BY_DATE, (d, d))
                 jvdl_rows = cur.fetchall()
         return _build_from_jvdl(jvdl_rows)
     except Exception as exc:
@@ -395,41 +404,6 @@ class OpponentResult(BaseModel):
     next_race_rank: int | None   # 次走の確定着順（未出走=None）
 
 
-class RaceLevelRaceInfo(BaseModel):
-    """GET /api/v2/race-level/:race_id — 対象レース基本情報。"""
-    race_name:               str | None
-    race_date:               str
-    keibajo:                 str | None
-    distance:                int | None
-    surface:                 str | None
-    grade_code:              str | None
-    head_count:              int
-    track_condition_warning: bool
-
-
-class RaceLevelOpponentDetail(BaseModel):
-    """同レース出走馬1頭の出走成績 + 次走情報。"""
-    horse_id:       str
-    horse_name:     str | None
-    this_rank:      int
-    this_margin:    float | None
-    gate_num:       int | None    # 枠番（内外バイアス分析用）
-    agari_3f:       float | None  # 上がり3F秒（前残り/差し決着分析用）
-    next_race_id:   str | None
-    next_race_name: str | None
-    next_race_date: str | None
-    next_grade_code: str | None
-    next_race_rank:  int | None
-    next_head_count: int | None
-
-
-class RaceLevelResponse(BaseModel):
-    """GET /api/v2/race-level/:race_id レスポンス。"""
-    race_id:    str
-    race_info:  RaceLevelRaceInfo
-    race_score: RaceScore | None
-    opponents:  list[RaceLevelOpponentDetail]
-
 
 class RaceScore(BaseModel):
     """過去走1レース分のレース点数（P1+P2 実装: 75点満点）。"""
@@ -460,15 +434,18 @@ class PastRaceRecord(BaseModel):
 
 
 class HorseExtra(BaseModel):
-    sire_name:          str | None = None
-    dam_sire_name:      str | None = None
-    prev_race_grade:    str | None = None
-    prev_race_rank:     int | None = None
-    prev_race_days_ago: int | None = None
-    chokyo_score:       float | None = None
-    past_races:         list[PastRaceRecord] = []
-    ten_index:          float | None = None      # 0-100: テン（前半）速度指数、高いほど前付け
-    agari_index:        float | None = None      # 0-100: 上がり（後半）速度指数、高いほど速い
+    sire_name:            str | None = None
+    dam_sire_name:        str | None = None
+    prev_race_grade:      str | None = None
+    prev_race_rank:       int | None = None
+    prev_race_days_ago:   int | None = None
+    chokyo_score:         float | None = None
+    past_races:           list[PastRaceRecord] = []
+    ten_index:            float | None = None   # 0-100: テン速度指数、高いほど前付け
+    agari_index:          float | None = None   # 0-100: 上がり速度指数、高いほど速い
+    position_tendency:    float | None = None   # 0=逃げ〜1=追込: 予測ポジション
+    predicted_field_pace: float | None = None   # 0〜1: レース全体ペース強度
+    pace_harmony:         float | None = None   # ペース適合スコア
 
 
 class RaceDetailHorse(BaseModel):
@@ -497,10 +474,20 @@ class PositioningMap(BaseModel):
     oikomi: list[int] = []   # 追込: 0.75 〜
 
 
+class TrackBiasInfo(BaseModel):
+    """直近同コースレース結果から推定したトラックバイアス情報。"""
+    bias_type:       str | None = None  # "内枠前有利" / "差し有利" / "均等" 等
+    note:            str = ""
+    sample_races:    int = 0
+    is_opening_week: bool = False
+    fallback_used:   bool = False
+
+
 class RaceInfo(BaseModel):
-    pace_prediction: str                     # 'slow' | 'medium' | 'fast' | 'unknown'
+    pace_prediction: str                      # 'slow' | 'medium' | 'fast' | 'unknown'
     bias_note:       str
     positioning_map: PositioningMap | None = None  # AI 隊列予想（データ不足時は null）
+    track_bias:      TrackBiasInfo | None = None   # 直近同コースバイアス
 
 
 class RaceDetailResponse(BaseModel):
@@ -512,11 +499,35 @@ class RaceDetailResponse(BaseModel):
     distance:        int
     track_code:      str
     grade_code:      str | None = None
+    class_label:     str | None = None   # "G1", "3歳未勝利", "2歳新馬" 等
     syusso_tosu:     int
     weather:         str
     track_condition: str
     race_info:       RaceInfo
     horses:          list[RaceDetailHorse]
+
+
+class TrainingSession(BaseModel):
+    training_date: str
+    center:        str
+    course:        str
+    record_type:   str           # 'HC' (坂路) / 'WC' (ウッド)
+    time_total:    float | None
+    lap_1:         float | None  # ラスト1F
+    lap_2:         float | None
+    lap_3:         float | None
+    lap_4:         float | None
+
+
+class HorseTrainingSummary(BaseModel):
+    horse_id: str
+    sessions: list[TrainingSession]
+
+
+class RaceTrainingResponse(BaseModel):
+    race_id:   str
+    race_date: str
+    horses:    list[HorseTrainingSummary]
 
 
 # ── prediction.py の推論パイプラインを借用 ────────────────────────────────────
@@ -558,7 +569,7 @@ def _get_redis():
     # 初回のみ接続試行
     try:
         _redis_client = _redis_mod.Redis(
-            host="localhost", port=6379, decode_responses=True,
+            host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
             socket_connect_timeout=0.3, socket_timeout=0.3,
         )
         _redis_client.ping()
@@ -589,12 +600,13 @@ _PACE_BIAS_NOTE = {
 
 def _compute_pace_prediction(
     raw_df: pd.DataFrame,
-) -> tuple[str, str, "PositioningMap | None"]:
-    """pace_simulation_v1 で展開予想ラベル・bias_note・隊列マップを算出する。
+) -> tuple[str, str, "PositioningMap | None", "dict[int, dict] | None"]:
+    """pace_simulation_v1 で展開予想ラベル・bias_note・隊列マップ・馬別シム値を算出する。
 
     Returns
     -------
-    (pace_label, bias_note, positioning_map)
+    (pace_label, bias_note, positioning_map, sim_per_horse)
+      sim_per_horse: {umaban: {position_tendency, predicted_field_pace, pace_harmony}} | None
     """
     try:
         from src.features.pace_simulation_v1 import create_pace_simulation_features
@@ -603,7 +615,7 @@ def _compute_pace_prediction(
         missing  = [c for c in req_cols if c not in raw_df.columns]
         if missing:
             logger.debug("[PaceSim] 必須カラム不足 %s → unknown", missing)
-            return "unknown", "", None
+            return "unknown", "", None, None
 
         sim_df     = create_pace_simulation_features(raw_df.copy())
         field_pace = float(sim_df["predicted_field_pace"].iloc[0])
@@ -614,6 +626,16 @@ def _compute_pace_prediction(
             label = "medium"
         else:
             label = "slow"
+
+        # 馬別シム値を常に抽出（品質チェックとは独立して返す）
+        sim_per_horse: dict[int, dict] = {}
+        for _, srow in sim_df.iterrows():
+            ub = int(srow["umaban"])
+            sim_per_horse[ub] = {
+                "position_tendency":    _sf(srow.get("predicted_position_norm")),
+                "predicted_field_pace": _sf(srow.get("predicted_field_pace")),
+                "pace_harmony":         _sf(srow.get("pace_harmony_pre")),
+            }
 
         # ── avg_first_corner_norm_5 の実データ品質チェック ──────────────────
         # first_corner = c1→c2→c3→c4 の優先順で最初に記録されたコーナー順位。
@@ -636,7 +658,7 @@ def _compute_pace_prediction(
                 " → positioning_map=None（実データ不足または個性差なし）",
                 raw_df["race_id"].iloc[0], n_valid_fc, n_total, fc_std,
             )
-            return label, _PACE_BIAS_NOTE[label], None
+            return label, _PACE_BIAS_NOTE[label], None, sim_per_horse
 
         # 馬ごとの predicted_position_norm で脚質分類
         # 0=最前（逃げ）… 1=最後方（追込）
@@ -659,67 +681,162 @@ def _compute_pace_prediction(
             raw_df["race_id"].iloc[0], field_pace, label,
             pmap.nige, pmap.senko, n_valid_fc, n_total,
         )
-        return label, _PACE_BIAS_NOTE[label], pmap
+        return label, _PACE_BIAS_NOTE[label], pmap, sim_per_horse
 
     except Exception as e:
         logger.warning("[PaceSim] 計算失敗: %s", e)
-        return "unknown", "", None
+        return "unknown", "", None, None
 
 
-# ── 天候・馬場コード変換 ──────────────────────────────────────────────────────
+# ── トラックバイアス推定（直近同コース結果ベース）────────────────────────────
 
-_TENKO_LABEL: dict[str, str] = {
-    "1": "晴", "2": "曇", "3": "雨", "4": "小雨",
-}
-_BABA_LABEL: dict[str, str] = {
-    "1": "良", "2": "稍重", "3": "重", "4": "不良",
-}
+def _compute_track_bias(
+    keibajo_code: str,
+    track_code: str,
+    race_date,
+    race_id: str,
+) -> "TrackBiasInfo":
+    """直近の同コース（競馬場 + 芝/ダート）レース結果からトラックバイアスを推定。
 
+    シグナル1 (枠番バイアス):
+      勝ち馬の枠番パーセンタイル = (wakuban-1) / (max_gate-1) の平均
+      0=最内, 1=最外。平均 ≤ 0.35 → 内枠有利、≥ 0.65 → 外枠有利
 
-def _is_valid_code(v) -> bool:
-    """None / NaN / '0' / '' / 'nan' / 'None' を無効コードとみなす。"""
-    if v is None:
-        return False
-    try:
-        if math.isnan(float(v)):
-            return False
-    except (TypeError, ValueError):
-        pass
-    s = str(v).strip()
-    return s not in ("", "0", "nan", "None")
+    シグナル2 (決着スタイル):
+      勝ち馬の上がり3Fランク（フィールド昇順）を正規化した平均
+      0=最速クローザー(差し型), 1=最遅(前残り型)
+      平均 ≤ 0.35 → 差し有利、≥ 0.65 → 前有利
 
+    フォールバック:
+      直近14日で3レース未満 → 28日に拡張 (fallback_used=True)
+      それでも3レース未満   → 開幕週扱い。芝はデフォルト内枠前有利。
+    """
+    import datetime as _dt
+    from collections import defaultdict
 
-def _weather_str(v) -> str:
-    if not _is_valid_code(v):
-        return "—"
-    s = str(v).strip()
-    return _TENKO_LABEL.get(s, s or "—")
+    _surface         = _surface_str(track_code) or "芝"
+    surf_lo, surf_hi = {"芝": ("10", "22"), "ダ": ("23", "29"), "障": ("51", "59")}.get(_surface, ("10", "22"))
+    race_dt          = pd.Timestamp(race_date).date()
+    kc_str           = str(keibajo_code).strip().zfill(2)
 
+    def _fetch(days_back: int) -> list:
+        cutoff = race_dt - _dt.timedelta(days=days_back)
+        try:
+            with get_v2_conn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(_SQL_RECENT_COURSE_RESULTS, (
+                        kc_str, surf_lo, surf_hi, cutoff, race_dt, race_id,
+                    ))
+                    return cur.fetchall()
+        except Exception as e:
+            logger.warning("[TrackBias] クエリ失敗: %s", e)
+            return []
 
-def _baba_str(v) -> str:
-    if not _is_valid_code(v):
-        return "良"
-    s = str(v).strip()
-    return _BABA_LABEL.get(s, s or "良")
+    rows          = _fetch(14)
+    fallback_used = False
+    if len({str(r["race_id"]) for r in rows}) < 3:
+        ext = _fetch(28)
+        if len({str(r["race_id"]) for r in ext}) > len({str(r["race_id"]) for r in rows}):
+            rows, fallback_used = ext, True
 
+    races_map: dict[str, list] = defaultdict(list)
+    for row in rows:
+        races_map[str(row["race_id"])].append(row)
 
-# ── 型安全なキャスト（numpy / pandas 型 → Python 組み込み型） ────────────────
+    sample_count    = len(races_map)
+    is_opening_week = sample_count < 3
+    is_turf         = _surface == "芝"
 
-def _sf(v) -> float | None:
-    """numpy.float* / int* / None / NaN → Python float | None"""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-        return None if (math.isnan(f) or math.isinf(f)) else f
-    except (TypeError, ValueError):
-        return None
+    if sample_count == 0:
+        if is_turf:
+            return TrackBiasInfo(
+                bias_type="内枠前有利（推定）",
+                note="直近の同コースデータなし。芝の開幕週は内枠・前有利になりやすいです。",
+                sample_races=0, is_opening_week=True, fallback_used=False,
+            )
+        return TrackBiasInfo(
+            bias_type=None,
+            note="直近の同コースデータがありません。",
+            sample_races=0, is_opening_week=True, fallback_used=False,
+        )
 
+    gate_pcts:  list[float] = []
+    agari_pcts: list[float] = []
 
-def _si(v) -> int | None:
-    """numpy.int* / float / None → Python int | None (NaN は None)"""
-    f = _sf(v)
-    return int(f) if f is not None else None
+    for _rid, entries in races_map.items():
+        winners = [e for e in entries if _si(e.get("finish_rank")) == 1]
+        if not winners:
+            continue
+        winner = winners[0]
+
+        # 枠番バイアス: 勝ち馬の枠番パーセンタイル
+        w_gate   = _si(winner.get("wakuban"))
+        all_gates = [_si(e.get("wakuban")) for e in entries
+                     if _si(e.get("wakuban")) is not None and _si(e.get("wakuban")) > 0]
+        if w_gate and w_gate > 0 and len(all_gates) >= 3:
+            max_gate = max(all_gates)
+            if max_gate > 1:
+                gate_pcts.append((w_gate - 1) / (max_gate - 1))
+
+        # 決着スタイル: 勝ち馬の上がり3Fランク正規化
+        w_agari = _sf(winner.get("go_3f_time"))
+        if w_agari and w_agari > 0:
+            valid_times = sorted([
+                _sf(e.get("go_3f_time"))  # type: ignore[arg-type]
+                for e in entries
+                if _sf(e.get("go_3f_time")) is not None and (_sf(e.get("go_3f_time")) or 0) > 0
+            ])
+            if len(valid_times) >= 3:
+                rank = sum(1 for t in valid_times if t < w_agari - 0.001)
+                agari_pcts.append(rank / max(len(valid_times) - 1, 1))
+
+    if not gate_pcts and not agari_pcts:
+        return TrackBiasInfo(
+            bias_type=None,
+            note=f"直近{sample_count}レースのデータから傾向を判定できませんでした。",
+            sample_races=sample_count, is_opening_week=is_opening_week, fallback_used=fallback_used,
+        )
+
+    avg_gate  = sum(gate_pcts)  / len(gate_pcts)  if gate_pcts  else 0.5
+    avg_agari = sum(agari_pcts) / len(agari_pcts) if agari_pcts else 0.5
+
+    n_gate  = len(gate_pcts)
+    n_agari = len(agari_pcts)
+    inner_bias  = n_gate  >= 3 and avg_gate  <= 0.35
+    outer_bias  = n_gate  >= 3 and avg_gate  >= 0.65
+    front_bias  = n_agari >= 3 and avg_agari >= 0.65
+    closer_bias = n_agari >= 3 and avg_agari <= 0.35
+
+    if   inner_bias and front_bias:   bias_type = "内枠前有利"
+    elif inner_bias and closer_bias:  bias_type = "内枠差し有利"
+    elif outer_bias and front_bias:   bias_type = "外枠前有利"
+    elif outer_bias and closer_bias:  bias_type = "外枠差し有利"
+    elif inner_bias:                  bias_type = "内枠有利"
+    elif outer_bias:                  bias_type = "外枠有利"
+    elif front_bias:                  bias_type = "前有利（先行有利）"
+    elif closer_bias:                 bias_type = "差し・追込有利"
+    else:                             bias_type = "均等（バイアスなし）"
+
+    note_parts: list[str] = []
+    if gate_pcts:
+        note_parts.append(f"内枠勝率 {round((1 - avg_gate) * 100)}%（{n_gate}R）")
+    if agari_pcts:
+        style = "前残り傾向" if front_bias else ("差し傾向" if closer_bias else "中間")
+        note_parts.append(style)
+
+    if fallback_used:
+        pfx = f"先週以前{sample_count}レース: "
+    elif is_opening_week:
+        pfx = f"開幕週（{sample_count}レース）: "
+    else:
+        pfx = f"直近{sample_count}レース: "
+
+    note = pfx + "、".join(note_parts) if note_parts else pfx + "バイアス判定中"
+    return TrackBiasInfo(
+        bias_type=bias_type, note=note,
+        sample_races=sample_count, is_opening_week=is_opening_week, fallback_used=fallback_used,
+    )
+
 
 
 # ── 前走データ取得ヘルパー ────────────────────────────────────────────────────
@@ -787,6 +904,28 @@ WHERE  e.horse_id = ANY(%s)
 ORDER  BY e.horse_id, r.race_date DESC, r.id DESC
 """
 
+# ── 直近同コース結果取得（トラックバイアス判定用）────────────────────────────
+_SQL_RECENT_COURSE_RESULTS = """
+SELECT
+    r.id    AS race_id,
+    r.race_date,
+    e.umaban,
+    e.wakuban,
+    e.kakutei_chakujun  AS finish_rank,
+    e.go_3f_time
+FROM race_entries e
+JOIN races r ON e.race_id = r.id
+WHERE r.keibajo_code = %s
+  AND r.track_code BETWEEN %s AND %s
+  AND r.race_date >= %s
+  AND r.race_date <  %s
+  AND r.id != %s
+  AND e.kakutei_chakujun IS NOT NULL
+  AND e.kakutei_chakujun > 0
+ORDER BY r.race_date DESC
+LIMIT 300
+"""
+
 # ── 同日タイム統計一括取得 ─────────────────────────────────────────────────────
 # 最大90レース分の (race_date, keibajo_code, distance, track_code) を
 # unnest で一括JOINし、1クエリで全統計を取得する（N+1回避）。
@@ -828,17 +967,6 @@ GROUP BY keys.d, keys.kj, keys.dist, keys.tc
 
 # ── レース点数スコア計算ヘルパー ────────────────────────────────────────────────
 
-# grade_code → class_score 点数表（v2 DB コード）
-_GRADE_CLASS_SCORE: dict[str, float] = {
-    "A": 15.0, "G": 15.0, "A01": 15.0,   # G1
-    "B": 13.0, "F": 13.0, "A02": 13.0,   # G2
-    "C": 11.0, "D": 11.0, "A03": 11.0,   # G3
-    "L": 9.0,  "A04": 9.0,               # Listed / OP
-    "H": 7.0,                             # 2勝クラス
-    "E": 5.0,                             # 1勝クラス
-    # 3勝クラス / 未勝利 / 新馬 は None / 不明扱い → デフォルト 3.0
-}
-
 
 def _score_to_label(score: float) -> str:
     """75点満点スケールのラベル変換。"""
@@ -860,13 +988,13 @@ def _compute_class_score(grade_code: str | None) -> float:
 
 def _compute_member_level_score(opponents: list) -> float:
     """対戦馬（this_rank ≤ 5 のもの）の次走3着以内率 → 0〜30点。
-    データ不足時は中間値 15.0 を返す。
+    サンプル 3 件未満は統計的に不安定なため中間値 15.0 を返す。
     """
     eligible = [
         o for o in opponents
         if o.next_race_rank is not None and o.this_rank <= 5
     ]
-    if not eligible:
+    if len(eligible) < 3:
         return 15.0
     good_rate = sum(1 for o in eligible if o.next_race_rank <= 3) / len(eligible)
     return round(good_rate * 30.0, 2)
@@ -967,79 +1095,6 @@ WHERE e.horse_id = ANY(%s)
   AND e.kakutei_chakujun > 0
 ORDER BY e.horse_id, r.race_date ASC, r.id ASC
 """
-
-# ── レースレベル検証: 単一 race_id 用クエリ ────────────────────────────────────
-_SQL_RACE_LEVEL_INFO = """
-SELECT
-    id               AS race_id,
-    race_date,
-    race_name_hondai AS race_name,
-    race_num,
-    keibajo_code,
-    distance,
-    track_code,
-    grade_code,
-    shiba_baba_code,
-    dirt_baba_code
-FROM races
-WHERE id = %s
-"""
-
-_SQL_RACE_LEVEL_ENTRIES = """
-SELECT
-    e.horse_id,
-    e.kakutei_chakujun AS this_rank,
-    e.race_time,
-    e.wakuban,
-    e.go_3f_time,
-    CASE
-        WHEN TRIM(e.time_diff) ~ '^[+-][0-9]+$'
-        THEN GREATEST(0.0, TRIM(e.time_diff)::integer / 10.0)
-        ELSE NULL
-    END AS this_margin
-FROM race_entries e
-WHERE e.race_id = %s
-  AND e.kakutei_chakujun IS NOT NULL
-  AND e.kakutei_chakujun > 0
-ORDER BY e.kakutei_chakujun
-"""
-
-# next_head_count: 次走レース全体の完走馬数（自チームのみでなく全馬を集計するサブクエリ）
-_SQL_RACE_LEVEL_NEXT_BULK = """
-SELECT
-    e.horse_id,
-    r.id               AS next_race_id,
-    r.race_date        AS next_race_date,
-    r.race_name_hondai AS next_race_name,
-    r.grade_code       AS next_grade_code,
-    e.kakutei_chakujun AS next_rank,
-    rc.head_count      AS next_head_count
-FROM race_entries e
-JOIN races r ON r.id = e.race_id
-JOIN (
-    SELECT race_id, COUNT(*) AS head_count
-    FROM race_entries
-    WHERE kakutei_chakujun IS NOT NULL AND kakutei_chakujun > 0
-    GROUP BY race_id
-) rc ON rc.race_id = r.id
-WHERE e.horse_id = ANY(%s)
-  AND r.race_date >= %s
-  AND e.kakutei_chakujun IS NOT NULL
-  AND e.kakutei_chakujun > 0
-ORDER BY e.horse_id, r.race_date ASC, r.id ASC
-"""
-
-
-def _surface_str(track_code) -> str | None:
-    """track_code の先頭桁で馬場種別を返す。"""
-    tc = str(track_code).strip().zfill(2) if track_code else ""
-    if tc.startswith("1"):
-        return "芝"
-    if tc.startswith("2"):
-        return "ダ"
-    if tc.startswith("5"):
-        return "障"
-    return None
 
 
 def _fetch_past_5_races(
@@ -1253,134 +1308,6 @@ def _fetch_opponents_next_races(
     return result
 
 
-def _fetch_race_level(race_id: str) -> RaceLevelResponse | None:
-    """GET /api/v2/race-level/{race_id} のデータを3クエリで取得する。
-    ① race info (v2)  ② entries + next races (v2)  ③ horse names (jvdl)
-    """
-    from collections import defaultdict
-
-    try:
-        with get_v2_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(_SQL_RACE_LEVEL_INFO, (race_id,))
-                race_row = cur.fetchone()
-                if not race_row:
-                    return None
-
-                cur.execute(_SQL_RACE_LEVEL_ENTRIES, (race_id,))
-                entry_rows = cur.fetchall()
-
-                if not entry_rows:
-                    return None
-
-                horse_ids = [str(r["horse_id"]) for r in entry_rows]
-                race_date = race_row["race_date"]
-
-                cur.execute(_SQL_RACE_LEVEL_NEXT_BULK, (horse_ids, race_date))
-                next_rows = cur.fetchall()
-
-    except Exception as e:
-        logger.warning("[RaceLevel] DB取得失敗: %s", e)
-        return None
-
-    horse_name_map = _fetch_horse_name_map(horse_ids)
-
-    # horse_id → 最初の次走行 (race_date > focal race_date)
-    future_by_horse: dict[str, list] = defaultdict(list)
-    for nr in next_rows:
-        future_by_horse[str(nr["horse_id"])].append(nr)
-
-    next_by_horse: dict[str, dict] = {}
-    for hid, rows in future_by_horse.items():
-        for nr in rows:
-            if nr["next_race_date"] > race_date:
-                next_by_horse[hid] = nr
-                break
-
-    # OpponentResult リスト（_build_race_score の member_level_score 計算用）
-    opp_results: list[OpponentResult] = []
-    opponents:   list[RaceLevelOpponentDetail] = []
-    winner_time: float | None = None
-
-    for row in entry_rows:
-        hid        = str(row["horse_id"])
-        margin_raw = row.get("this_margin")
-        this_rank  = int(row["this_rank"])
-        rt         = row.get("race_time")
-
-        if this_rank == 1 and rt and float(rt) > 0:
-            winner_time = float(rt)
-
-        next_race = next_by_horse.get(hid)
-        next_rank = int(next_race["next_rank"]) if next_race else None
-
-        opp_results.append(OpponentResult(
-            horse_id       = hid,
-            this_rank      = this_rank,
-            this_margin    = float(margin_raw) if margin_raw is not None else None,
-            next_race_rank = next_rank,
-        ))
-        gate_raw  = row.get("wakuban")
-        agari_raw = row.get("go_3f_time")
-        opponents.append(RaceLevelOpponentDetail(
-            horse_id        = hid,
-            horse_name      = horse_name_map.get(hid),
-            this_rank       = this_rank,
-            this_margin     = float(margin_raw) if margin_raw is not None else None,
-            gate_num        = int(gate_raw)      if gate_raw  is not None else None,
-            agari_3f        = float(agari_raw)   if agari_raw is not None and float(agari_raw) > 0 else None,
-            next_race_id    = str(next_race["next_race_id"])        if next_race else None,
-            next_race_name  = next_race.get("next_race_name")       if next_race else None,
-            next_race_date  = str(next_race["next_race_date"])      if next_race else None,
-            next_grade_code = next_race.get("next_grade_code")      if next_race else None,
-            next_race_rank  = next_rank,
-            next_head_count = int(next_race["next_head_count"])     if next_race and next_race.get("next_head_count") else None,
-        ))
-
-    kc      = str(race_row["keibajo_code"]).strip().zfill(2)
-    grade   = str(race_row["grade_code"]).strip() if race_row.get("grade_code") else None
-    surface = _surface_str(race_row.get("track_code"))
-
-    # race_score 計算（_fetch_daily_time_stats + _build_race_score）
-    race_meta_map = {
-        race_id: {
-            "date":         race_row["race_date"],
-            "keibajo_code": kc,
-            "distance":     int(race_row["distance"]) if race_row.get("distance") else None,
-            "track_code":   str(race_row["track_code"]).strip() if race_row.get("track_code") else None,
-            "grade_code":   grade,
-        }
-    }
-    time_stats_map = _fetch_daily_time_stats(race_meta_map)
-    time_stats     = time_stats_map.get(race_id)
-
-    pr_for_score = PastRaceRecord(
-        race_id               = race_id,
-        date                  = str(race_row["race_date"]),
-        race_name             = race_row.get("race_name"),
-        race_time             = winner_time,
-        opponents_next_races  = opp_results,
-    )
-    race_score = _build_race_score(pr_for_score, time_stats, grade)
-
-    tc_warning = bool(time_stats.get("track_condition_warning", False)) if time_stats else False
-
-    return RaceLevelResponse(
-        race_id   = race_id,
-        race_info = RaceLevelRaceInfo(
-            race_name               = race_row.get("race_name"),
-            race_date               = str(race_row["race_date"]),
-            keibajo                 = _KEIBAJO_NAME.get(kc, kc),
-            distance                = int(race_row["distance"]) if race_row.get("distance") else None,
-            surface                 = surface,
-            grade_code              = grade,
-            head_count              = len(entry_rows),
-            track_condition_warning = tc_warning,
-        ),
-        race_score = race_score,
-        opponents  = opponents,
-    )
-
 
 def _compute_ten_index(avg_first_corner: float | None) -> float | None:
     """avg_first_corner_norm_5 (0=逃げ, 1=追込) → テン指数 (0-100, 高いほど前付け)。"""
@@ -1414,14 +1341,6 @@ def _fetch_horse_name_map(horse_ids: list[str]) -> dict[str, str | None]:
     except Exception as e:
         logger.warning("[RaceDetail] 父・母父名ルックアップ失敗: %s", e)
         return {}
-
-
-def _clean_name(v) -> str | None:
-    """'Unknown_XXXXX' や空文字を None に変換する。"""
-    if not v:
-        return None
-    s = str(v).strip()
-    return None if (not s or s.startswith("Unknown")) else s
 
 
 def _fetch_detail_supplements(race_id: str) -> dict[int, dict]:
@@ -1498,8 +1417,85 @@ def _fetch_detail_supplements(race_id: str) -> dict[int, dict]:
 
 # ── エンドポイント ────────────────────────────────────────────────────────────
 
+_SQL_TRAINING: str = """
+SELECT DISTINCT
+    t.horse_id,
+    t.date::date   AS training_date,
+    t.center,
+    t.course,
+    t.time_total,
+    t.lap_1,
+    t.lap_2,
+    t.lap_3,
+    t.lap_4
+FROM  training_data t
+WHERE t.horse_id = ANY(%s)
+  AND t.date::date >= %s::date - INTERVAL '30 days'
+  AND t.date::date <  %s::date
+ORDER BY t.horse_id, t.date::date DESC
+"""
+
+
+@router.get("/races/{race_id}/training", response_model=RaceTrainingResponse)
+def get_race_training(race_id: str) -> RaceTrainingResponse:
+    """対象レースの全出走馬の直近30日調教データを返す（重複排除済み）。"""
+    race_date_str = race_id[:8]
+    if len(race_date_str) < 8 or not race_date_str.isdigit():
+        raise HTTPException(status_code=400, detail=f"不正な race_id: {race_id}")
+
+    with get_jvdl_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT horse_id FROM race_entries WHERE race_id = %s",
+                (race_id,),
+            )
+            horse_rows = cur.fetchall()
+
+    if not horse_rows:
+        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
+
+    horse_ids = [str(r["horse_id"]) for r in horse_rows]
+
+    with get_jvdl_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_SQL_TRAINING, (horse_ids, race_date_str, race_date_str))
+            rows = cur.fetchall()
+
+    sessions_map: dict[str, list[TrainingSession]] = {}
+    for r in rows:
+        hid    = str(r["horse_id"])
+        course = str(r["course"] or "")
+        rtype  = "HC" if course == "坂路" else "WC"
+        s = TrainingSession(
+            training_date=str(r["training_date"]),
+            center=str(r["center"] or ""),
+            course=course,
+            record_type=rtype,
+            time_total=_sf(r["time_total"]),
+            lap_1=_sf(r["lap_1"]),
+            lap_2=_sf(r["lap_2"]),
+            lap_3=_sf(r["lap_3"]),
+            lap_4=_sf(r["lap_4"]),
+        )
+        sessions_map.setdefault(hid, []).append(s)
+
+    horses_out = [
+        HorseTrainingSummary(horse_id=hid, sessions=sessions)
+        for hid, sessions in sessions_map.items()
+    ]
+
+    return RaceTrainingResponse(
+        race_id=race_id,
+        race_date=race_date_str,
+        horses=horses_out,
+    )
+
+
 @router.get("/races/{race_id}", response_model=RaceDetailResponse)
-def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
+def get_race_detail(
+    race_id: str,
+    _: None = Depends(rate_limit_predict),
+) -> Response | RaceDetailResponse:
     """
     レース詳細を返す。
     Redisキャッシュ（TTL 5分）→ DB + LightGBM 推論 の順に処理する。
@@ -1543,10 +1539,11 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
     try:
         raw_df, X, *_ = _build_features(race_id)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=f"AIモデル未ロード: {e}")
+        logger.error("[V2RaceDetail] AIモデルファイル未検出: %s", e)
+        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
     except Exception as e:
         logger.exception("[V2RaceDetail] 特徴量構築エラー: %s", e)
-        raise HTTPException(status_code=500, detail=f"特徴量構築エラー: {e}")
+        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
 
     elapsed_s2 = time.perf_counter() - t_s2
 
@@ -1568,7 +1565,11 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
                 X_in[feat] = np.nan
         scores = engine.predict(X_in[engine.feature_names])
     except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=f"AIモデル未ロード: {e}")
+        logger.error("[V2RaceDetail] メインモデルファイル未検出: %s", e)
+        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
+    except Exception as e:
+        logger.exception("[V2RaceDetail] メインアンサンブル推論エラー: %s", e)
+        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
 
     elapsed_s3 = time.perf_counter() - t_s3
 
@@ -1592,12 +1593,17 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
     else:
         emp_scores = np.full(len(_raw), 50.0)
 
-    # 展開予想 + 隊列マップ
-    pace_label, bias_note, positioning_map = _compute_pace_prediction(raw_df)
+    # 展開予想 + 隊列マップ + 馬別シムデータ
+    pace_label, bias_note, positioning_map, sim_per_horse = _compute_pace_prediction(raw_df)
 
-    # 前走・父母父名・枠番/騎手/調教師・過去5走の補完クエリ
+    # トラックバイアス推定（直近同コースデータベース）
     horse_ids = raw_df["horse_id"].astype(str).tolist()
     race_date = raw_df["race_date"].iloc[0]
+    _raw_kc = str(raw_df["keibajo_code"].iloc[0]).strip().zfill(2)
+    _raw_tc = str(raw_df["track_code"].iloc[0]).strip()
+    track_bias_result = _compute_track_bias(_raw_kc, _raw_tc, race_date, race_id)
+
+    # 前走・父母父名・枠番/騎手/調教師・過去5走の補完クエリ
     prev_map                              = _fetch_prev_race(horse_ids, race_date)
     past5_map, past_race_ids, race_meta_map = _fetch_past_5_races(horse_ids, race_date)
 
@@ -1624,9 +1630,12 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
                     _pr, time_stats_map.get(_pr.race_id), _grade
                 )
 
-    # 上がり指数に使うフィールドの馬場種別
-    _tc_for_agari = str(raw_df["track_code"].iloc[0]).strip().zfill(2)
-    _agari_col    = "avg_go3f_rank_5_dirt" if _tc_for_agari.startswith("2") else "avg_go3f_rank_5_turf"
+    # 上がり指数に使うフィールドの馬場種別（_surface_str で整数範囲判定）
+    _agari_col = (
+        "avg_go3f_rank_5_dirt"
+        if _surface_str(str(raw_df["track_code"].iloc[0])) != "芝"
+        else "avg_go3f_rank_5_turf"
+    )
     _field_size   = int(raw_df["umaban"].max()) or 16
 
     has_sire = "sire_id" in raw_df.columns
@@ -1648,15 +1657,40 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
     grade_str = str(grade_raw).strip() \
                 if grade_raw and str(grade_raw).strip() not in ("None", "") else None
 
-    # 天候・馬場: keiba_v2 は tenko_code(1〜4) + shiba_baba_code(1〜4)
-    #             jvdl フォールバックは shiba_baba_code=NULL, tenko_code="良" 等の文字列
+    # class_label: _compute_class_label で確定（jyoken_cd は raw_df にない場合が多いが
+    # race_name フォールバックで "未勝利"等を補完できる）
+    class_label_str = _compute_class_label(
+        grade_str,
+        str(first.get("race_type_code") or "").strip() or None,
+        str(first.get("jyoken_cd_2") or "").strip() or None,
+        str(first.get("jyoken_cd_3") or "").strip() or None,
+        str(first.get("jyoken_cd_4") or "").strip() or None,
+        str(first.get("jyoken_cd_5") or "").strip() or None,
+        race_name,
+    )
+
+    # 天候・馬場（3経路）:
+    #   keiba_v2 芝  : tenko_code=天候(1〜4), shiba_baba_code=馬場(1〜4)
+    #   keiba_v2 ダート: tenko_code=天候(1〜4), dirt_baba_code=馬場(1〜4)
+    #   jvdl フォールバック: shiba/dirt は NULL
+    #     jvdl_track_condition = r.track_condition（馬場コード）→ _baba_str
+    #     jvdl_weather         = r.weather（天候コード）→ _weather_str
+    #     ※ keiba_v2 の tenko_code(天候) とは別カラム — SQL エイリアスで明示
     shiba = first.get("shiba_baba_code")
+    dirt  = first.get("dirt_baba_code")
     if _is_valid_code(shiba):
+        # keiba_v2 芝レース
         weather         = _weather_str(first.get("tenko_code"))
         track_condition = _baba_str(shiba)
+    elif _is_valid_code(dirt):
+        # keiba_v2 ダートレース（tenko_code=天候コード、shiba_baba_code は空/0）
+        weather         = _weather_str(first.get("tenko_code"))
+        track_condition = _baba_str(dirt)
     else:
-        weather         = "—"
-        track_condition = _baba_str(first.get("tenko_code"))
+        # jvdl フォールバック: shiba/dirt は NULL
+        jvdl_wx = first.get("jvdl_weather")
+        weather         = _weather_str(jvdl_wx) if _is_valid_code(jvdl_wx) else "—"
+        track_condition = _baba_str(first.get("jvdl_track_condition"))
 
     # 6. 出走馬リスト組み立て（numpy 型を Python 型へ明示キャスト）
     horses_out: list[RaceDetailHorse] = []
@@ -1686,16 +1720,22 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
         ten_raw   = _sf(row.get("avg_first_corner_norm_5"))
         agari_raw = _sf(row.get(_agari_col))
 
+        # 馬別ペースシム値（_compute_pace_prediction が成功した場合のみ）
+        sim_h = sim_per_horse.get(umaban) if sim_per_horse else None
+
         extra = HorseExtra(
-            sire_name          = name_map.get(sire_id) if sire_id else None,
-            dam_sire_name      = name_map.get(bms_id)  if bms_id  else None,
-            prev_race_grade    = prev.get("prev_race_grade"),
-            prev_race_rank     = prev.get("prev_race_rank"),
-            prev_race_days_ago = prev.get("prev_race_days_ago"),
-            chokyo_score       = _sf(row.get("chokyo_master_score")),
-            past_races         = past5_map.get(hid, []),
-            ten_index          = _compute_ten_index(ten_raw),
-            agari_index        = _compute_agari_index(agari_raw, _field_size),
+            sire_name             = name_map.get(sire_id) if sire_id else None,
+            dam_sire_name         = name_map.get(bms_id)  if bms_id  else None,
+            prev_race_grade       = prev.get("prev_race_grade"),
+            prev_race_rank        = prev.get("prev_race_rank"),
+            prev_race_days_ago    = prev.get("prev_race_days_ago"),
+            chokyo_score          = _sf(row.get("chokyo_master_score")),
+            past_races            = past5_map.get(hid, []),
+            ten_index             = _compute_ten_index(ten_raw),
+            agari_index           = _compute_agari_index(agari_raw, _field_size),
+            position_tendency     = sim_h.get("position_tendency")    if sim_h else None,
+            predicted_field_pace  = sim_h.get("predicted_field_pace") if sim_h else None,
+            pace_harmony          = sim_h.get("pace_harmony")         if sim_h else None,
         )
 
         # EMP T-score を 0-1 範囲に正規化してから格納する。
@@ -1732,6 +1772,7 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
         distance        = int(first["distance"]),
         track_code      = str(first.get("track_code", "10")).strip().zfill(2),
         grade_code      = grade_str,
+        class_label     = class_label_str,
         syusso_tosu     = len(horses_out),
         weather         = weather,
         track_condition = track_condition,
@@ -1739,6 +1780,7 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
             pace_prediction = pace_label,
             bias_note       = bias_note,
             positioning_map = positioning_map,
+            track_bias      = track_bias_result,
         ),
         horses = horses_out,
     )
@@ -1774,17 +1816,3 @@ def get_race_detail(race_id: str) -> Response | RaceDetailResponse:
             logger.warning("[Cache] set失敗（処理継続）: %s", e)
 
     return response
-
-
-@router.get("/race-level/{race_id}", response_model=RaceLevelResponse)
-def get_race_level(race_id: str) -> RaceLevelResponse:
-    """レースレベル検証: 指定レースの全出走馬の次走成績を返す。
-
-    出走馬の次走好走率からそのレースの価値（レベル）を可視化するための
-    データを提供する。RaceScore（member_level + time_score + class_score）
-    も算出して返す。
-    """
-    data = _fetch_race_level(race_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail=f"race_id={race_id!r} が見つかりません")
-    return data
