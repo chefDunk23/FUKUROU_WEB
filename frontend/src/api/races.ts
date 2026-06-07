@@ -10,6 +10,8 @@
  * バックエンド: GET /api/v2/races?date=YYYY-MM-DD
  */
 
+import { apiFetch } from './client'
+
 // ── 型定義 ─────────────────────────────────────────────────────────────────
 export interface RaceSummary {
   race_id:         string
@@ -70,39 +72,47 @@ function _buildMockWeekendRaces(): WeekendRacesResponse {
 
 // ── API クライアント ─────────────────────────────────────────────────────────
 
-/** 今週末のレース一覧を1リクエストで取得。APIが落ちていればモックにフォールバック。 */
+/** 今週末のレース一覧を1リクエストで取得。 */
 export async function fetchWeekendRaces(): Promise<WeekendRacesResponse> {
   try {
-    const res = await fetch('/api/v2/races/weekend')
+    const res = await apiFetch('/api/v2/races/weekend')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json() as WeekendRacesResponse
-  } catch {
-    console.warn('[races] fetchWeekendRaces failed — using mock fallback')
-    return _buildMockWeekendRaces()
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      console.warn('[races] fetchWeekendRaces failed — using mock fallback (dev only)', err)
+      return _buildMockWeekendRaces()
+    }
+    throw err
   }
 }
 
-/** 日付指定でレース一覧を取得。APIが落ちていればモックにフォールバック。 */
+/** 日付指定でレース一覧を取得。 */
 export async function fetchRacesByDate(date: string): Promise<RaceSummary[]> {
   try {
-    const res = await fetch(`/api/v2/races?date=${date}`)
+    const res = await apiFetch(`/api/v2/races?date=${date}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data: RaceListResponse = await res.json()
     return data.races ?? []
-  } catch {
-    console.warn(`[races] fetchRacesByDate(${date}) failed — using mock fallback`)
-    const { races_by_date } = _buildMockWeekendRaces()
-    return races_by_date[date] ?? []
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      console.warn(`[races] fetchRacesByDate(${date}) failed — using mock fallback (dev only)`, err)
+      const { races_by_date } = _buildMockWeekendRaces()
+      return races_by_date[date] ?? []
+    }
+    throw err
   }
 }
 
 // ── 馬場種別ラベル ───────────────────────────────────────────────────────────
-export function surfaceLabel(trackCode: string | null): '芝' | 'ダ' | '障' {
-  if (!trackCode) return '芝'
-  const tc = parseInt(trackCode, 10)
-  if (tc >= 51) return '障'
-  if (tc >= 20) return 'ダ'
-  return '芝'
+export function surfaceLabel(trackCode: string | null | number): '芝' | 'ダ' | '障' | null {
+  if (trackCode === null || trackCode === undefined || trackCode === '') return null
+  const tc = typeof trackCode === 'number' ? trackCode : parseInt(trackCode, 10)
+  if (isNaN(tc)) return null
+  if (tc >= 10 && tc <= 22) return '芝'
+  if (tc >= 23 && tc <= 29) return 'ダ'
+  if (tc >= 51 && tc <= 59) return '障'
+  return null
 }
 
 // ── バッジスタイル（class_label の文字列に基づいてカラーを返す）──────────────
