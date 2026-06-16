@@ -1,0 +1,779 @@
+"""
+shared/worker/job_runner.py
+============================
+ジョブキューワーカー（常駐プロセス）。
+
+fukurou_jvdl.jobs テーブルを POLL_INTERVAL 秒ごとにポーリングし、
+queued ジョブを 1 件ずつ取り出して逐次実行する。
+
+多重起動防止: pg_try_advisory_lock で 1 ワーカーのみ動作保証。
+              ジョブ単位の排他は SELECT ... FOR UPDATE SKIP LOCKED。
+
+起動方法:
+    python -m shared.worker.job_runner
+    # または
+    python shared/worker/job_runner.py
+
+プロセス管理:
+    pm2 start "python -m shared.worker.job_runner" --name jvdl-worker
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+_ROOT = Path(__file__).parent.parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import psycopg2
+import psycopg2.extras
+from apscheduler.schedulers.background import BackgroundScheduler
+
+from shared.config import DB_JVDL
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s [Worker] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# ── 定数 ─────────────────────────────────────────────────────────────────────
+
+POLL_INTERVAL = 5          # 秒
+LOG_MAX_LINES = 50         # log_tail に保持する最大行数
+_HEALTH_CHECK_HOUR_JST = 9  # 毎日 09:00 JST にヘルスチェック
+_ADVISORY_LOCK_KEY = 42002  # ワーカー起動唯一性保証（batch_predictor の 42001 と別）
+
+# スケジュール定義（hour/minute は JST）
+_SCHEDULES = [
+    # 毎日 09:00 — health_check（_scheduled_health_check を直接呼ぶ）
+    {"kind": "direct",  "day_of_week": "*",    "hour": 9,  "minute": 0,  "fn": "_scheduled_health_check"},
+    # 金曜 21:00 — 週末レース事前計算をジョブキューに投入
+    {"kind": "enqueue", "day_of_week": "fri",  "hour": 21, "minute": 0,
+     "job_type": "recompute_predictions", "params": {"mode": "weekend"}},
+    # 土曜 08:30 — 当日レース再計算をジョブキューに投入
+    {"kind": "enqueue", "day_of_week": "sat",  "hour": 8,  "minute": 30,
+     "job_type": "recompute_predictions", "params": {"mode": "today"}},
+    # 日曜 08:30 — 当日レース再計算をジョブキューに投入
+    {"kind": "enqueue", "day_of_week": "sun",  "hour": 8,  "minute": 30,
+     "job_type": "recompute_predictions", "params": {"mode": "today"}},
+]
+
+# ── ジョブハンドラ登録 ─────────────────────────────────────────────────────────
+
+_HANDLERS: dict[str, Callable[[dict, "JobContext"], None]] = {}
+
+
+def register(job_type: str):
+    """job_type ハンドラをデコレータで登録する。"""
+    def _dec(fn: Callable):
+        _HANDLERS[job_type] = fn
+        return fn
+    return _dec
+
+
+# ── JobContext ────────────────────────────────────────────────────────────────
+
+@dataclass
+class JobContext:
+    """ハンドラからジョブ状態を更新するためのコンテキスト。"""
+    job_id: int
+    _conn: psycopg2.extensions.connection
+    _log_buf: deque = None  # type: ignore[assignment]
+    _artifact_path: str | None = None
+
+    def __post_init__(self):
+        self._log_buf = deque(maxlen=LOG_MAX_LINES)
+
+    def set_artifact(self, path: str) -> None:
+        """ジョブ完了時に保存する成果物パスを設定する。"""
+        self._artifact_path = path
+
+    def report_progress(self, pct: int) -> None:
+        pct = max(0, min(100, pct))
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET progress = %s WHERE id = %s",
+                (pct, self.job_id),
+            )
+        self._conn.commit()
+
+    def append_log(self, line: str) -> None:
+        self._log_buf.append(line)
+        tail = "\n".join(self._log_buf)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET log_tail = %s WHERE id = %s",
+                (tail, self.job_id),
+            )
+        self._conn.commit()
+
+
+# ── ジョブハンドラ実装 ─────────────────────────────────────────────────────────
+
+# ── フィーチャーストア名 → バッチ識別子マップ ─────────────────────────────────
+
+_STORE_KEY_MAP: dict[str, str] = {
+    "training":    "training",
+    "condition":   "condition",
+    "jockey":      "jockey",
+    "trainer":     "trainer",
+    "sire":        "sire",
+    "horse_rating": "horse_rating",
+    "synergy":     "synergy",
+    "course":      "course",
+}
+
+
+@register("update_feature_stores")
+def _handle_update_feature_stores(params: dict, ctx: JobContext) -> None:
+    """全フィーチャーストアを更新する。
+
+    params:
+        stores: list[str] | None — 省略時は全ストア
+                例: ["training", "jockey", "horse_rating"]
+                キー: training / condition / jockey / trainer / sire /
+                      horse_rating / synergy / course
+        target_date: str | None — "YYYY-MM-DD"。省略時は今日
+    """
+    from datetime import date as _date
+
+    from ml.db import engine as _engine
+    from ml.batch.training_feature_batch import TrainingFeatureBatch
+    from ml.batch.condition_match_batch import ConditionMatchBatch
+    from ml.batch.external_factor_store import ExternalFactorStoreBatch
+    from ml.batch.horse_rating_batch import HorseRatingBatch
+    from ml.batch.synergy_store_batch import SynergyStoreBatch
+    from ml.batch.course_profile_store import CourseProfileStoreBatch
+    from shared.notification.discord import send_embed
+
+    target_date_str: str | None = params.get("target_date")
+    if target_date_str:
+        try:
+            target_date = _date.fromisoformat(target_date_str)
+        except ValueError:
+            target_date = _date.today()
+    else:
+        target_date = _date.today()
+
+    requested: list[str] = params.get("stores") or list(_STORE_KEY_MAP.keys())
+    requested_set = {_STORE_KEY_MAP.get(s, s) for s in requested}
+
+    ctx.append_log(f"[update_feature_stores] target_date={target_date} stores={sorted(requested_set)}")
+    ctx.report_progress(5)
+
+    results: dict[str, str] = {}  # store_key → "ok" | "skip" | "ERROR: ..."
+
+    # ── Step 1: training（condition より先に実行必須）────────────────────────
+    _training_n: int = 0
+    if "training" in requested_set:
+        ctx.append_log("[1/6] training_feature_batch 開始")
+        try:
+            _training_n = TrainingFeatureBatch(engine=_engine).run(target_date=target_date)
+            results["training"] = "ok"
+            ctx.append_log(f"[1/6] training 完了: {_training_n} 行 UPSERT")
+        except Exception as e:
+            results["training"] = f"ERROR: {e}"
+            ctx.append_log(f"[1/6] training 失敗: {e}")
+    else:
+        results["training"] = "skip"
+
+    ctx.report_progress(20)
+
+    # ── Step 2: condition（training 依存）───────────────────────────────────
+    if "condition" in requested_set:
+        if _training_n == 0:
+            # training データが空なら condition も意味がないのでスキップ
+            results["condition"] = "skip"
+            ctx.append_log("[2/6] condition スキップ (training 0行 → 対象データなし)")
+        else:
+            ctx.append_log("[2/6] condition_match_batch 開始")
+            try:
+                n = ConditionMatchBatch(engine=_engine).run(target_date=target_date)
+                results["condition"] = "ok"
+                ctx.append_log(f"[2/6] condition 完了: {n} 行 UPSERT")
+            except Exception as e:
+                results["condition"] = f"ERROR: {e}"
+                ctx.append_log(f"[2/6] condition 失敗: {e}")
+    else:
+        results["condition"] = "skip"
+
+    ctx.report_progress(35)
+
+    # ── Step 3-6: 独立バッチ（直列実行、並列化は将来課題）─────────────────
+
+    # horse_rating は差分更新（全期間再計算を避ける）
+    def _horse_rating_run() -> int:
+        from sqlalchemy import text as _text
+        with _engine.connect() as _conn:
+            row = _conn.execute(_text("SELECT MAX(race_date) FROM horse_rating_store")).fetchone()
+        max_stored = row[0] if row and row[0] else None
+        from_date_hr = (max_stored + __import__("datetime").timedelta(days=1)) if max_stored else None
+        ctx.append_log(f"  horse_rating from_date={from_date_hr}")
+        return HorseRatingBatch(target_date=target_date, engine=_engine).run(from_date=from_date_hr)
+
+    independent = [
+        ("jockey/trainer/sire", "external",
+         lambda: ExternalFactorStoreBatch(target_date=target_date).run()),
+        ("horse_rating", "horse_rating", _horse_rating_run),
+        ("synergy", "synergy",
+         lambda: SynergyStoreBatch(engine=_engine).run(target_date=target_date)),
+        ("course", "course",
+         lambda: CourseProfileStoreBatch(target_date=target_date, engine=_engine).run()),
+    ]
+
+    pct_step = 15
+    for idx, (label, key, run_fn) in enumerate(independent, start=3):
+        if key in requested_set or any(s in requested_set for s in ("jockey", "trainer", "sire") if key == "external"):
+            ctx.append_log(f"[{idx}/6] {label} 開始")
+            try:
+                n = run_fn()
+                results[key] = "ok"
+                ctx.append_log(f"[{idx}/6] {label} 完了: {n} 行 UPSERT")
+            except Exception as e:
+                results[key] = f"ERROR: {e}"
+                ctx.append_log(f"[{idx}/6] {label} 失敗: {e}")
+        else:
+            results[key] = "skip"
+        ctx.report_progress(35 + idx * pct_step)
+
+    # ── 集計 ─────────────────────────────────────────────────────────────────
+    ok_count    = sum(1 for v in results.values() if v == "ok")
+    err_count   = sum(1 for v in results.values() if v.startswith("ERROR"))
+    skip_count  = sum(1 for v in results.values() if v == "skip")
+    total_run   = ok_count + err_count
+
+    summary = f"完了: {ok_count}/{total_run} 成功 / {skip_count} スキップ / {err_count} 失敗"
+    ctx.append_log(f"[update_feature_stores] {summary}")
+    ctx.report_progress(100)
+
+    # ── Discord 通知 ──────────────────────────────────────────────────────────
+    status_color = 0x00FF00 if err_count == 0 else 0xFF0000
+    status_icon  = "✅" if err_count == 0 else "❌"
+    fields = [
+        {"name": k, "value": v, "inline": True}
+        for k, v in results.items()
+    ]
+    send_embed(
+        title=f"{status_icon} フィーチャーストア更新 {target_date}",
+        description=summary,
+        color=status_color,
+        fields=fields,
+    )
+
+    if err_count > 0:
+        failed_stores = [k for k, v in results.items() if v.startswith("ERROR")]
+        raise RuntimeError(f"一部バッチ失敗: {failed_stores}")
+
+
+@register("sync_races_from_jvdl")
+def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
+    """DB_JVDL の races_v2 / race_entries_v2 を DB_V2 (fukurou_keiba_v2) に同期する。
+
+    bulk_ingest_v2.py で投入した RA/SE レコードを予測 DB に反映することで、
+    AI_FUKUROU_KEIBA_Ver2 パイプラインへの依存を解消する。
+
+    params:
+        from_date: str | None — "YYYY-MM-DD"。省略時は過去 90 日分のみ
+                   "all" を指定すると全期間を同期（初回のみ推奨）
+    """
+    import datetime as _dt
+
+    from shared.config import DB_V2
+
+    from_date_str: str | None = params.get("from_date")
+    if from_date_str == "all":
+        from_yyyymmdd = "00000000"
+    elif from_date_str:
+        try:
+            d = _dt.date.fromisoformat(from_date_str)
+            from_yyyymmdd = d.strftime("%Y%m%d")
+        except ValueError:
+            from_yyyymmdd = (_dt.date.today() - _dt.timedelta(days=90)).strftime("%Y%m%d")
+    else:
+        from_yyyymmdd = (_dt.date.today() - _dt.timedelta(days=90)).strftime("%Y%m%d")
+
+    ctx.append_log(f"[sync_races_from_jvdl] from={from_date_str!r} (yyyymmdd>={from_yyyymmdd})")
+    ctx.report_progress(5)
+
+    jvdl_conn = psycopg2.connect(**DB_JVDL)
+    v2_conn   = psycopg2.connect(**DB_V2)
+
+    races_upserted = 0
+    entries_upserted = 0
+
+    try:
+        # ── Step 1: races_v2 を取得 ──────────────────────────────────────────
+        with jvdl_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT race_id, kaisai_year, kaisai_monthday,
+                       keibajo_code, kaisai_kai, kaisai_nichime, race_num,
+                       race_name_hondai, race_name_short_10, race_name_short_6,
+                       grade_code, kyoso_shubetsu, distance, track_code,
+                       hassou_time, toroku_tosu, shusso_tosu,
+                       tenko_code, shiba_baba_code, dirt_baba_code,
+                       data_kubun
+                FROM   races_v2
+                WHERE  kaisai_year || kaisai_monthday >= %s
+                ORDER  BY kaisai_year, kaisai_monthday
+            """, (from_yyyymmdd,))
+            race_rows = cur.fetchall()
+
+        ctx.append_log(f"  races_v2 取得: {len(race_rows)} 行")
+        ctx.report_progress(20)
+
+        # ── Step 2: races → DB_V2 UPSERT ─────────────────────────────────────
+        def _si(v):
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        race_records = []
+        valid_race_ids = []
+        for r in race_rows:
+            year     = (r["kaisai_year"] or "").strip()
+            monthday = (r["kaisai_monthday"] or "").strip()
+            if len(year) != 4 or len(monthday) != 4:
+                continue
+            race_date = f"{year}-{monthday[:2]}-{monthday[2:]}"
+            race_records.append((
+                r["race_id"],
+                race_date,
+                (r["keibajo_code"] or "").strip().zfill(2),
+                _si(r["kaisai_kai"]),
+                _si(r["kaisai_nichime"]),
+                _si(r["race_num"]),
+                r["race_name_hondai"],
+                r["race_name_short_10"],
+                r["race_name_short_6"],
+                r["grade_code"],
+                r["kyoso_shubetsu"],
+                _si(r["distance"]),
+                r["track_code"],
+                r["hassou_time"],
+                _si(r["toroku_tosu"]),
+                _si(r["shusso_tosu"]),
+                r["tenko_code"],
+                r["shiba_baba_code"],
+                r["dirt_baba_code"],
+                r["data_kubun"],
+            ))
+            valid_race_ids.append(r["race_id"])
+
+        if race_records:
+            with v2_conn.cursor() as cur:
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO races (
+                        id, race_date, keibajo_code, kaiji, nichiji, race_num,
+                        race_name_hondai, race_name_short_10, race_name_short_6,
+                        grade_code, race_syubetsu_code, distance, track_code,
+                        hassou_time, touroku_tosu, syusso_tosu,
+                        tenko_code, shiba_baba_code, dirt_baba_code, data_kubun
+                    ) VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        race_date       = EXCLUDED.race_date,
+                        syusso_tosu     = EXCLUDED.syusso_tosu,
+                        tenko_code      = EXCLUDED.tenko_code,
+                        shiba_baba_code = EXCLUDED.shiba_baba_code,
+                        dirt_baba_code  = EXCLUDED.dirt_baba_code,
+                        data_kubun      = EXCLUDED.data_kubun
+                """, race_records, page_size=500)
+            v2_conn.commit()
+            races_upserted = len(race_records)
+            ctx.append_log(f"  races UPSERT: {races_upserted} 行")
+
+        ctx.report_progress(50)
+
+        # ── Step 3: race_entries_v2 を取得 ────────────────────────────────────
+        if not valid_race_ids:
+            ctx.append_log("  同期対象レースなし。完了。")
+            ctx.report_progress(100)
+            return
+
+        with jvdl_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT race_id, umaban, blood_no, horse_name, sex_cd, horse_age,
+                       chokyosi_code, kinryo, blinker, kishu_code,
+                       horse_weight, zogen_fugo, zogen_sa, ijyo_kubun,
+                       nyusen_juni, kakutei_chakujun, race_time,
+                       corner_1, corner_2, corner_3, corner_4,
+                       tansho_odds, tansho_ninki, kohan_4f, kohan_3f,
+                       data_kubun
+                FROM   race_entries_v2
+                WHERE  race_id = ANY(%s)
+            """, (valid_race_ids,))
+            entry_rows = cur.fetchall()
+
+        ctx.append_log(f"  race_entries_v2 取得: {len(entry_rows)} 行")
+        ctx.report_progress(70)
+
+        # ── Step 4: race_entries → DB_V2 UPSERT ──────────────────────────────
+        entry_records = []
+        for e in entry_rows:
+            kinryo = e.get("kinryo")
+            basis_weight = round(kinryo / 10.0, 1) if kinryo is not None else None
+            entry_records.append((
+                e["race_id"],
+                e["umaban"],
+                e.get("blood_no"),        # → horse_id
+                e.get("horse_name"),
+                e.get("sex_cd"),
+                e.get("horse_age"),       # → age
+                e.get("chokyosi_code"),   # → trainer_cd
+                basis_weight,             # kinryo/10 → basis_weight (NUMERIC 4,1)
+                e.get("blinker"),         # → blinker_cd
+                e.get("kishu_code"),      # → jockey_cd
+                e.get("horse_weight"),
+                e.get("zogen_fugo"),      # → weight_sign
+                e.get("zogen_sa"),        # → weight_diff
+                e.get("ijyo_kubun"),      # → abnormal_cd
+                e.get("nyusen_juni"),     # → nyuusen_order
+                e.get("kakutei_chakujun"),
+                e.get("race_time"),
+                e.get("corner_1"),
+                e.get("corner_2"),
+                e.get("corner_3"),
+                e.get("corner_4"),
+                e.get("tansho_odds"),     # → tan_odds
+                e.get("tansho_ninki"),    # → ninki
+                e.get("kohan_4f"),        # → go_4f_time
+                e.get("kohan_3f"),        # → go_3f_time
+                e.get("data_kubun"),
+            ))
+
+        if entry_records:
+            with v2_conn.cursor() as cur:
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO race_entries (
+                        race_id, umaban, horse_id, horse_name, sex_cd, age,
+                        trainer_cd, basis_weight, blinker_cd, jockey_cd,
+                        horse_weight, weight_sign, weight_diff, abnormal_cd,
+                        nyuusen_order, kakutei_chakujun, race_time,
+                        corner_1, corner_2, corner_3, corner_4,
+                        tan_odds, ninki, go_4f_time, go_3f_time,
+                        data_kubun
+                    ) VALUES %s
+                    ON CONFLICT (race_id, umaban) DO UPDATE SET
+                        horse_id         = EXCLUDED.horse_id,
+                        kakutei_chakujun = EXCLUDED.kakutei_chakujun,
+                        race_time        = EXCLUDED.race_time,
+                        corner_1         = EXCLUDED.corner_1,
+                        corner_2         = EXCLUDED.corner_2,
+                        corner_3         = EXCLUDED.corner_3,
+                        corner_4         = EXCLUDED.corner_4,
+                        tan_odds         = EXCLUDED.tan_odds,
+                        ninki            = EXCLUDED.ninki,
+                        go_4f_time       = EXCLUDED.go_4f_time,
+                        go_3f_time       = EXCLUDED.go_3f_time,
+                        horse_weight     = EXCLUDED.horse_weight,
+                        weight_sign      = EXCLUDED.weight_sign,
+                        weight_diff      = EXCLUDED.weight_diff,
+                        data_kubun       = EXCLUDED.data_kubun
+                """, entry_records, page_size=1000)
+            v2_conn.commit()
+            entries_upserted = len(entry_records)
+            ctx.append_log(f"  race_entries UPSERT: {entries_upserted} 行")
+
+        ctx.report_progress(100)
+        ctx.append_log(
+            f"[sync_races_from_jvdl] 完了: races={races_upserted} / entries={entries_upserted}"
+        )
+
+    finally:
+        jvdl_conn.close()
+        v2_conn.close()
+
+
+@register("recompute_predictions")
+def _handle_recompute_predictions(params: dict, ctx: JobContext) -> None:
+    """今週末（または指定 race_ids）の予測キャッシュを再計算する。
+
+    params:
+        race_ids:  list[str] | None — 省略時は今週末の全レース
+        mode:      "weekend" | "today" | "ids" — デフォルト "weekend"
+    """
+    mode = params.get("mode", "weekend")
+    race_ids: list[str] | None = params.get("race_ids")
+
+    ctx.append_log(f"[recompute_predictions] mode={mode} started")
+    ctx.report_progress(5)
+
+    # 意図的なレイヤー違反の例外（AD-1 で判断・記録）:
+    # _run_batch 自体が api_v2.routers.prediction / api_v2.routers.races の
+    # 計算ロジック（_compute_prediction, _compute_detail 等）に依存しているため、
+    # shared/ に切り出しても api_v2 依存が shared 側に移るだけで解消しない。
+    # 予測計算ロジックを api_v2 から動かす設計変更が必要になるため、ここでは
+    # 遅延 import のまま残す。
+    from api_v2.services.batch_predictor import (
+        _run_batch,
+        get_weekend_race_ids,
+        get_today_race_ids,
+    )
+
+    if mode == "ids" and race_ids:
+        ids = race_ids
+    elif mode == "today":
+        ids = get_today_race_ids()
+    else:
+        ids = get_weekend_race_ids()
+
+    ctx.append_log(f"対象 race_ids: {len(ids)} 件")
+    ctx.report_progress(10)
+
+    if not ids:
+        ctx.append_log("対象レースなし — 完了")
+        return
+
+    saved, failed_cnt, skipped = _run_batch(ids, batch_label=f"worker_{mode}")
+    ctx.report_progress(100)
+
+    # Redis 無効化
+    redis_deleted = 0
+    try:
+        from shared.cache import RACE_DETAIL_CACHE_PFX, get_redis_client
+        r = get_redis_client()
+        if r:
+            keys = [f"{RACE_DETAIL_CACHE_PFX}{rid}" for rid in ids]
+            redis_deleted = r.delete(*keys)
+    except Exception as e:
+        ctx.append_log(f"Redis 無効化スキップ: {e}")
+
+    ctx.append_log(
+        f"完了: 計算対象={len(ids)} / 保存={saved} / スキップ(データなし)={skipped}"
+        f" / 失敗={failed_cnt} / Redis削除={redis_deleted}"
+    )
+
+
+# ── ワーカーループ ─────────────────────────────────────────────────────────────
+
+_SQL_DEQUEUE = """
+SELECT id, job_type, params
+FROM   jobs
+WHERE  status = 'queued'
+ORDER  BY created_at
+LIMIT  1
+FOR UPDATE SKIP LOCKED
+"""
+
+_SQL_MARK_RUNNING = """
+UPDATE jobs SET status = 'running', started_at = now(), progress = 0
+WHERE id = %s
+"""
+
+_SQL_MARK_DONE = """
+UPDATE jobs
+SET    status = 'done', progress = 100,
+       finished_at = now(),
+       artifact_path = %s
+WHERE  id = %s
+"""
+
+_SQL_MARK_FAILED = """
+UPDATE jobs
+SET    status = 'failed', finished_at = now(), log_tail = %s
+WHERE  id = %s
+"""
+
+
+def _process_one(conn: psycopg2.extensions.connection) -> bool:
+    """キューから 1 件取り出して実行する。実行した場合 True を返す。"""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(_SQL_DEQUEUE)
+        row = cur.fetchone()
+        if row is None:
+            conn.rollback()
+            return False
+
+        job_id = row["id"]
+        job_type = row["job_type"]
+        params = row["params"] or {}
+
+        cur.execute(_SQL_MARK_RUNNING, (job_id,))
+        conn.commit()
+
+    logger.info("JOB START: id=%d type=%s params=%s", job_id, job_type, params)
+
+    ctx = JobContext(job_id=job_id, _conn=conn)
+
+    handler = _HANDLERS.get(job_type)
+    if handler is None:
+        msg = f"未知の job_type: {job_type!r}"
+        logger.error(msg)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_MARK_FAILED, (msg, job_id))
+        conn.commit()
+        return True
+
+    try:
+        handler(params, ctx)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_MARK_DONE, (ctx._artifact_path, job_id))
+        conn.commit()
+        logger.info("JOB DONE:  id=%d type=%s", job_id, job_type)
+    except Exception:
+        tb = traceback.format_exc()
+        logger.exception("JOB FAIL:  id=%d type=%s", job_id, job_type)
+        ctx._log_buf.append(tb[-1000:])
+        tail = "\n".join(ctx._log_buf)
+        with conn.cursor() as cur:
+            cur.execute(_SQL_MARK_FAILED, (tail, job_id))
+        conn.commit()
+
+    return True
+
+
+_SQL_RESET_ORPHANS = """
+UPDATE jobs
+SET    status = 'failed',
+       finished_at = now(),
+       log_tail = COALESCE(log_tail || E'\n', '') || '[worker-restart] 起動時に孤児 running ジョブをリセット'
+WHERE  status = 'running'
+RETURNING id
+"""
+
+
+def _reset_orphan_jobs(conn: psycopg2.extensions.connection) -> None:
+    """前回クラッシュで running のまま残ったジョブを failed に遷移させる。"""
+    with conn.cursor() as cur:
+        cur.execute(_SQL_RESET_ORPHANS)
+        orphans = [row[0] for row in cur.fetchall()]
+    conn.commit()
+    if orphans:
+        logger.warning("孤児 running ジョブをリセット: ids=%s", orphans)
+
+
+def _enqueue_job(job_type: str, params: dict) -> None:
+    """APScheduler スレッドからジョブキューにジョブを投入する。"""
+    try:
+        conn = psycopg2.connect(**DB_JVDL)
+        with conn.cursor() as cur:
+            import json as _json
+            cur.execute(
+                "INSERT INTO jobs (job_type, params, status) VALUES (%s, %s, 'queued')",
+                (job_type, _json.dumps(params)),
+            )
+        conn.commit()
+        conn.close()
+        logger.info("[Scheduler] job enqueued: type=%s params=%s", job_type, params)
+    except Exception:
+        logger.exception("[Scheduler] ジョブ投入失敗: type=%s", job_type)
+
+
+def _make_enqueue_fn(job_type: str, params: dict):
+    """クロージャでジョブ種別・パラメータを束縛した投入関数を返す。"""
+    def _fn() -> None:
+        _enqueue_job(job_type, params)
+    _fn.__name__ = f"enqueue_{job_type}"
+    return _fn
+
+
+def _scheduled_health_check() -> None:
+    """APScheduler から毎日 09:00 JST に呼ばれるヘルスチェック。"""
+    try:
+        from scripts.health_check import (
+            _has_problem,
+            format_report_text,
+            run_health_check,
+        )
+        from shared.notification.discord import send_embed
+
+        report = run_health_check()
+        text = format_report_text(report)
+        logger.info("[HealthCheck/scheduled]\n%s", text)
+
+        if _has_problem(report):
+            send_embed(
+                title="⚠️ ヘルスチェック異常",
+                description=text[:4000],
+                color=0xFF0000,
+            )
+            logger.info("[HealthCheck/scheduled] Discord 通知送信完了（問題あり）")
+        else:
+            # 毎日 OK 通知を送りたい場合は下行を有効化
+            # send_embed(title="✅ ヘルスチェック正常", description=text[:4000], color=0x00FF00)
+            pass
+    except Exception:
+        logger.exception("[HealthCheck/scheduled] 実行エラー（続行）")
+
+
+def run_worker() -> None:
+    """ワーカーのメインループ。Ctrl+C で停止する。"""
+    # ワーカー起動唯一性保証（advisory lock）
+    lock_conn = psycopg2.connect(**DB_JVDL)
+    lock_conn.autocommit = True
+    with lock_conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_ADVISORY_LOCK_KEY,))
+        if not cur.fetchone()[0]:
+            logger.error("別のワーカーが既に起動中です（advisory lock 取得失敗）。終了します。")
+            lock_conn.close()
+            sys.exit(1)
+
+    logger.info("ワーカー起動: POLL_INTERVAL=%ds", POLL_INTERVAL)
+
+    # 未適用 DDL チェック（警告のみ、起動は続行）
+    try:
+        from scripts.check_migrations import check_migrations
+        check_migrations(warn_only=True)
+    except Exception as _e:
+        logger.warning("check_migrations 失敗（続行）: %s", _e)
+
+    import pytz
+    _JST = pytz.timezone("Asia/Tokyo")
+    scheduler = BackgroundScheduler(timezone=_JST)
+    for sched in _SCHEDULES:
+        dow = sched.get("day_of_week", "*")
+        h, m = sched["hour"], sched["minute"]
+        if sched["kind"] == "direct":
+            scheduler.add_job(
+                _scheduled_health_check, "cron",
+                day_of_week=dow, hour=h, minute=m,
+            )
+            logger.info("APScheduler 登録: health_check  dow=%s %d:%02d JST", dow, h, m)
+        else:
+            fn = _make_enqueue_fn(sched["job_type"], sched["params"])
+            scheduler.add_job(fn, "cron", day_of_week=dow, hour=h, minute=m)
+            logger.info(
+                "APScheduler 登録: enqueue %s %s  dow=%s %d:%02d JST",
+                sched["job_type"], sched["params"], dow, h, m,
+            )
+    scheduler.start()
+
+    work_conn = psycopg2.connect(**DB_JVDL)
+    _reset_orphan_jobs(work_conn)
+    try:
+        while True:
+            try:
+                ran = _process_one(work_conn)
+                if not ran:
+                    time.sleep(POLL_INTERVAL)
+            except psycopg2.OperationalError:
+                logger.warning("DB 接続断。再接続を試みます...")
+                try:
+                    work_conn.close()
+                except Exception:
+                    pass
+                time.sleep(5)
+                work_conn = psycopg2.connect(**DB_JVDL)
+            except KeyboardInterrupt:
+                logger.info("ワーカー停止（KeyboardInterrupt）")
+                break
+    finally:
+        scheduler.shutdown(wait=False)
+        with lock_conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
+        lock_conn.close()
+        work_conn.close()
+
+
+if __name__ == "__main__":
+    run_worker()
