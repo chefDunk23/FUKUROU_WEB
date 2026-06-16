@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_v2.deps import verify_api_key
-from api_v2.routers import analysis, prediction, race_level, races
+from api_v2.routers import analysis, prediction, public_races, race_level, races
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -48,8 +48,16 @@ async def _lifespan(app: FastAPI):
             "本番環境では .env に API_KEY=<random_hex> を設定してください。"
             "（開発環境では DEV_MODE=true を設定すると認証をスキップできます）"
         )
-    logger.info("startup: DEV_MODE=%s, API_KEY=%s", DEV_MODE, "set" if API_KEY else "empty")
+
+    logger.info(
+        "startup: DEV_MODE=%s, API_KEY=%s"
+        " (スケジューラは shared/worker/job_runner.py に統一)",
+        DEV_MODE, "set" if API_KEY else "empty",
+    )
+
     yield
+
+    logger.info("shutdown")
 
 
 app = FastAPI(
@@ -78,10 +86,13 @@ app.add_middleware(
 )
 
 _auth = [Depends(verify_api_key)]
-app.include_router(races.router,      dependencies=_auth)
-app.include_router(race_level.router, dependencies=_auth)
-app.include_router(prediction.router, dependencies=_auth)
-app.include_router(analysis.router,   dependencies=_auth)
+app.include_router(races.router,         dependencies=_auth)
+app.include_router(race_level.router,    dependencies=_auth)
+app.include_router(prediction.router,    dependencies=_auth)
+app.include_router(analysis.router,      dependencies=_auth)
+# 公開エンドポイント: 認証不要（/api/v2/public/*）
+app.include_router(public_races.router)
+# admin 系は api_admin (port 8003) に移設済み — docs/deploy.md 参照
 
 
 @app.get("/healthz", tags=["system"])
