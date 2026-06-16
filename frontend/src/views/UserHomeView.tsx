@@ -2,12 +2,15 @@
  * frontend/src/views/UserHomeView.tsx
  * =====================================
  * ユーザー向けホーム画面 — モダン SaaS ダッシュボード（shadcn/ui 風）
- * デザイン: 白/グレーベース + エメラルドアクセント、lucide-react アイコン
- * データ: 現フェーズは静的モック（TODO: 実APIに接続）
+ * データ: /api/v2/races/weekend から動的取得
+ *   - 月〜水: DB未更新のため「準備中」状態を表示
+ *   - 木〜日: 実レースデータを表示し、正しい race_id でレース詳細へ遷移
  */
+import { useEffect, useState } from 'react'
 import { goToRace } from '../utils/router'
+import { fetchWeekendRaces, surfaceLabel } from '../api/races'
+import type { RaceSummary } from '../api/races'
 import {
-  AlertCircle,
   ArrowRight,
   BarChart2,
   Calendar,
@@ -24,135 +27,96 @@ import {
 
 // ── 型 ────────────────────────────────────────────────────────────────────────
 
-interface MainEvent {
-  grade: string
-  title: string
-  subtitle: string
-  date: string
-  venue: string
-  race: string
-  conditions: string
-  upsetPct: number
-  topPickCount: number
-}
+type HomeStatus = 'loading' | 'preparing' | 'ready'
 
-interface PickupRace {
-  id: string
-  venue: string
-  raceNum: number
-  raceName: string
-  upsetPct?: number
-  isAIPick?: boolean
-  reason?: string   // AI厳選レースの推奨根拠
-  surface: string
-  distance: number
+interface HomeData {
+  status:        HomeStatus
+  mainRace:      RaceSummary | null
+  mainRaceDate:  string          // "YYYY.MM.DD (曜)"
+  notableRaces:  RaceSummary[]
 }
 
 interface HitHighlight {
-  date: string
-  raceName: string
-  impact: string    // 最大強調する実績数値（例: "単勝 12.4倍"）
-  result: string    // 補足の結果テキスト
+  date: string; raceName: string; impact: string; result: string
 }
 
-interface DataLabCard {
-  title: string
-  description: string
-  icon: React.ReactNode
-  badge?: string
+interface DataLabCardItem {
+  title: string; description: string; icon: React.ReactNode; badge?: string
 }
 
-// ── モックデータ ──────────────────────────────────────────────────────────────
-
-const MAIN_EVENT: MainEvent = {
-  grade:        'G1',
-  title:        '第76回 安田記念',
-  subtitle:     '今週末のメインレース',
-  date:         '2026.06.07 (日)',
-  venue:        '東京',
-  race:         '11R',
-  conditions:   '芝 1600m',
-  upsetPct:     72,
-  topPickCount: 2,
-}
-
-const UPSET_RACES: PickupRace[] = [
-  { id: 'u1', venue: '阪神',  raceNum: 10, raceName: '鳴尾記念',      upsetPct: 88, surface: '芝', distance: 2000 },
-  { id: 'u2', venue: '東京',  raceNum: 9,  raceName: '香港ジョッキークラブトロフィー', upsetPct: 81, surface: '芝', distance: 2000 },
-  { id: 'u3', venue: '阪神',  raceNum: 11, raceName: '水無月ステークス', upsetPct: 77, surface: 'ダ', distance: 1200 },
-]
-
-const AI_PICK_RACES: PickupRace[] = [
-  {
-    id: 'p1', venue: '東京', raceNum: 10, raceName: '八王子特別',
-    isAIPick: true, reason: '推定ポテンシャルスコア 出走馬中1位',
-    surface: 'ダ', distance: 1400,
-  },
-  {
-    id: 'p2', venue: '阪神', raceNum: 9, raceName: '洲本特別',
-    isAIPick: true, reason: 'AI算出 単勝期待値 130%オーバー',
-    surface: 'ダ', distance: 1400,
-  },
-  {
-    id: 'p3', venue: '阪神', raceNum: 12, raceName: '三木特別',
-    isAIPick: true, reason: '類似条件での推薦馬 複勝率 83%',
-    surface: '芝', distance: 1800,
-  },
-]
+// ── 定数（変更なし: Issue ④） ───────────────────────────────────────────────
 
 const HIT_HIGHLIGHTS: HitHighlight[] = [
   {
-    date:     '2026.06.01',
-    raceName: 'ダービー卿チャレンジトロフィー',
-    impact:   '単勝 12.4倍',
-    result:   'AIポテンシャル1位が的中',
+    date: '2026.06.01', raceName: 'ダービー卿チャレンジトロフィー',
+    impact: '単勝 12.4倍', result: 'AIポテンシャル1位が的中',
   },
   {
-    date:     '2026.05.31',
-    raceName: 'マイラーズカップ',
-    impact:   '3連単 完全的中',
-    result:   '指名3頭すべてが馬券圏内',
+    date: '2026.05.31', raceName: 'マイラーズカップ',
+    impact: '3連単 完全的中', result: '指名3頭すべてが馬券圏内',
   },
   {
-    date:     '2026.05.25',
-    raceName: '葵ステークス',
-    impact:   '単勝 89倍 激走',
-    result:   '波乱予測84%で大穴的中',
+    date: '2026.05.25', raceName: '葵ステークス',
+    impact: '単勝 89倍 激走', result: '波乱予測84%で大穴的中',
   },
 ]
 
-const DATA_LAB_CARDS: DataLabCard[] = [
+const DATA_LAB_CARDS: DataLabCardItem[] = [
   {
-    title:       'ハイレベル戦トラッカー',
+    title: 'ハイレベル戦トラッカー',
     description: '過去レースのラップ・ペース・上がりタイムをスコア化。レースの質を偏差値で比較できます。',
-    icon:        <BarChart2 className="w-5 h-5 text-emerald-600" />,
-    badge:       'NEW',
+    icon: <BarChart2 className="w-5 h-5 text-emerald-600" />,
+    badge: 'NEW',
   },
   {
-    title:       'AIポテンシャル分析',
+    title: 'AIポテンシャル分析',
     description: 'サブモデル6種のスコア内訳をビジュアル化。どの能力が評価されているかを直感的に確認。',
-    icon:        <Cpu className="w-5 h-5 text-emerald-600" />,
+    icon: <Cpu className="w-5 h-5 text-emerald-600" />,
   },
   {
-    title:       '馬場・コース適性ビューア',
+    title: '馬場・コース適性ビューア',
     description: '天候・馬場状態ごとの成績傾向を自動集計。当日の馬場に強い馬を素早く見つけます。',
-    icon:        <TrendingUp className="w-5 h-5 text-emerald-600" />,
+    icon: <TrendingUp className="w-5 h-5 text-emerald-600" />,
   },
 ]
 
-// ── サブコンポーネント ─────────────────────────────────────────────────────────
+// ── ヘルパー ─────────────────────────────────────────────────────────────────
 
-/** 波乱予測パーセンテージのカラー分岐 */
-function upsetColor(pct: number): string {
-  if (pct >= 80) return 'text-red-600'
-  if (pct >= 65) return 'text-orange-500'
-  return 'text-yellow-600'
+function _gradeScore(r: RaceSummary): number {
+  const cl = r.class_label
+  if (cl === 'G1') return 100
+  if (cl === 'G2') return 90
+  if (cl === 'G3') return 80
+  if (cl === '重賞') return 85  // jvdl grade_code='R'（G1/G2/G3 混合）
+  if (cl === 'Listed') return 70
+  const g = r.grade_code?.trim().toUpperCase()
+  if (g === 'A' || g === 'G') return 100
+  if (g === 'B' || g === 'F') return 90
+  if (g === 'C') return 80
+  if (g === 'D' || g === 'L') return 70
+  return r.race_num
 }
 
-function upsetBgColor(pct: number): string {
-  if (pct >= 80) return 'bg-red-50 text-red-700 ring-1 ring-red-200'
-  if (pct >= 65) return 'bg-orange-50 text-orange-700 ring-1 ring-orange-200'
-  return 'bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200'
+function _pickMainRace(races: RaceSummary[]): RaceSummary {
+  return races.reduce((best, r) => _gradeScore(r) > _gradeScore(best) ? r : best)
+}
+
+function _pickNotableRaces(races: RaceSummary[], excludeId: string): RaceSummary[] {
+  return [...races]
+    .filter(r => r.race_id !== excludeId)
+    .sort((a, b) => _gradeScore(b) - _gradeScore(a))
+    .slice(0, 8)
+}
+
+function _formatDateStr(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00')
+  if (isNaN(d.getTime())) return dateStr
+  const days = ['日', '月', '火', '水', '木', '金', '土']
+  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} (${days[d.getDay()]})`
+}
+
+function _gradeLabel(r: RaceSummary): string {
+  return r.class_label ?? r.grade_code ?? ''
 }
 
 // ── A. オープンベータ バナー ──────────────────────────────────────────────────
@@ -170,58 +134,86 @@ function BetaBanner() {
 }
 
 // ── B. メインイベント ヒーロー ────────────────────────────────────────────────
-function HeroCard({ event }: { event: MainEvent }) {
-  const upsetLevel = event.upsetPct >= 80 ? '大波乱注意' : event.upsetPct >= 65 ? '波乱注意' : '標準的'
+function HeroCard({ homeData }: { homeData: HomeData }) {
+  // ローディング中 — スケルトン
+  if (homeData.status === 'loading') {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
+        <div className="animate-pulse space-y-3">
+          <div className="flex gap-2">
+            <div className="h-5 bg-gray-200 rounded w-12" />
+            <div className="h-5 bg-gray-200 rounded w-32" />
+          </div>
+          <div className="h-8 bg-gray-200 rounded w-2/3" />
+          <div className="flex gap-4 mt-1">
+            <div className="h-4 bg-gray-200 rounded w-28" />
+            <div className="h-4 bg-gray-200 rounded w-24" />
+            <div className="h-4 bg-gray-200 rounded w-20" />
+          </div>
+          <div className="h-11 bg-gray-200 rounded w-40 mt-2" />
+        </div>
+      </div>
+    )
+  }
+
+  // 準備中 — データなし状態
+  if (homeData.status === 'preparing' || homeData.mainRace == null) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="bg-gray-100 text-gray-500 px-2 py-0.5 rounded text-xs font-bold">準備中</span>
+          <span className="text-xs text-gray-400">今週末のメインレース</span>
+        </div>
+        <p className="text-xl font-bold text-gray-700 mb-2">レース情報を準備中です</p>
+        <p className="text-sm text-gray-400 leading-relaxed">
+          今週末のレース情報は木曜日頃から順次更新されます。<br />
+          更新後に今週末のメインレースと出馬表が表示されます。
+        </p>
+      </div>
+    )
+  }
+
+  // データあり
+  const race = homeData.mainRace
+  const grade = _gradeLabel(race)
+  const surface = surfaceLabel(race.track_code)
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
       <div className="p-6 sm:p-8">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-
-          {/* レース情報 */}
           <div className="flex-1">
-            {/* グレードバッジ + サブタイトル */}
             <div className="flex items-center gap-2 mb-2.5">
-              <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-xs font-bold">
-                {event.grade}
-              </span>
-              <span className="text-xs text-gray-500">{event.subtitle}</span>
+              {grade && (
+                <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-xs font-bold">
+                  {grade}
+                </span>
+              )}
+              <span className="text-xs text-gray-500">今週末のメインレース</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-3 tracking-tight">
-              {event.title}
+              {race.race_name}
             </h2>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500 mb-5">
-              <span className="flex items-center gap-1.5">
-                <Calendar className="w-4 h-4" />
-                {event.date}
-              </span>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500">
+              {homeData.mainRaceDate && (
+                <span className="flex items-center gap-1.5">
+                  <Calendar className="w-4 h-4" />
+                  {homeData.mainRaceDate}
+                </span>
+              )}
               <span className="flex items-center gap-1.5">
                 <MapPin className="w-4 h-4" />
-                {event.venue} {event.race}
+                {race.keibajo_name} {race.race_num}R
               </span>
               <span className="flex items-center gap-1.5">
                 <Shield className="w-4 h-4" />
-                {event.conditions}
+                {surface} {race.distance}m
               </span>
             </div>
-
-            {/* AI指標バッジ */}
-            <div className="flex flex-wrap gap-3">
-              <div className={`inline-flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-full ${upsetBgColor(event.upsetPct)}`}>
-                <AlertCircle className="w-4 h-4" />
-                AI波乱予測: {event.upsetPct}%（{upsetLevel}）
-              </div>
-              <div className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
-                <Sparkles className="w-4 h-4" />
-                AIポテンシャル上位馬: {event.topPickCount}頭
-              </div>
-            </div>
           </div>
-
-          {/* CTAボタン */}
           <div className="flex-shrink-0">
             <button
-              onClick={() => goToRace('main')}
+              onClick={() => goToRace(race.race_id)}
               className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-3 rounded-lg transition-colors shadow-sm"
             >
               AI出馬表を見る
@@ -234,36 +226,32 @@ function HeroCard({ event }: { event: MainEvent }) {
   )
 }
 
-// ── C. ピックアップ レースカード ──────────────────────────────────────────────
-function PickupRaceItem({ race }: { race: PickupRace }) {
+// ── C. 今週末の注目レース ─────────────────────────────────────────────────────
+function NotableRaceItem({ race }: { race: RaceSummary }) {
+  const surface = surfaceLabel(race.track_code)
+  const grade = _gradeLabel(race)
   return (
-    <div className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 -mx-4 px-4 rounded-lg cursor-pointer transition-colors group"
-      onClick={() => goToRace(race.id)}>
+    <div
+      className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 -mx-4 px-4 rounded-lg cursor-pointer transition-colors group"
+      onClick={() => goToRace(race.race_id)}
+    >
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-md bg-gray-100 flex items-center justify-center flex-shrink-0">
-          <span className="text-[11px] font-bold text-gray-600">{race.raceNum}R</span>
+          <span className="text-[11px] font-bold text-gray-600">{race.race_num}R</span>
         </div>
         <div>
           <p className="text-sm font-semibold text-gray-800 group-hover:text-emerald-700 transition-colors">
-            {race.raceName}
+            {race.race_name}
           </p>
           <p className="text-xs text-gray-400">
-            {race.venue}　{race.surface}{race.distance}m
+            {race.keibajo_name}　{surface}{race.distance}m
           </p>
-          {race.reason && (
-            <p className="text-xs text-gray-500 mt-0.5">{race.reason}</p>
-          )}
         </div>
       </div>
       <div className="flex items-center gap-2">
-        {race.upsetPct != null && (
-          <span className={`text-xs font-semibold tabular-nums ${upsetColor(race.upsetPct)}`}>
-            {race.upsetPct}%
-          </span>
-        )}
-        {race.isAIPick && (
-          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200">
-            AI推奨
+        {grade && (
+          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+            {grade}
           </span>
         )}
         <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-emerald-600 transition-colors" />
@@ -272,42 +260,81 @@ function PickupRaceItem({ race }: { race: PickupRace }) {
   )
 }
 
-function PickupSection() {
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-      {/* 波乱警戒レース */}
+function PickupSection({ homeData }: { homeData: HomeData }) {
+  // ローディング
+  if (homeData.status === 'loading') {
+    return (
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        <div className="flex items-center gap-2.5 mb-4">
-          <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center">
-            <Zap className="w-4 h-4 text-red-500" />
+        <div className="animate-pulse space-y-3">
+          <div className="flex gap-3 mb-4">
+            <div className="w-8 h-8 bg-gray-200 rounded-lg" />
+            <div className="space-y-1.5 flex-1">
+              <div className="h-4 bg-gray-200 rounded w-32" />
+              <div className="h-3 bg-gray-200 rounded w-40" />
+            </div>
           </div>
-          <div>
-            <h3 className="text-sm font-bold text-gray-900">波乱警戒レース</h3>
-            <p className="text-xs text-gray-400">AI波乱予測が高いレース</p>
-          </div>
-        </div>
-        <div className="px-0">
-          {UPSET_RACES.map(r => <PickupRaceItem key={r.id} race={r} />)}
+          {[1, 2, 3].map(i => (
+            <div key={i} className="flex gap-3 py-2">
+              <div className="w-8 h-8 bg-gray-200 rounded-md" />
+              <div className="flex-1 space-y-1.5">
+                <div className="h-4 bg-gray-200 rounded w-3/4" />
+                <div className="h-3 bg-gray-200 rounded w-1/2" />
+              </div>
+            </div>
+          ))}
         </div>
       </div>
+    )
+  }
 
-      {/* AI厳選レース */}
+  // 準備中 — エビデンスなしは表示しない
+  if (homeData.status === 'preparing' || homeData.notableRaces.length === 0) {
+    return (
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
         <div className="flex items-center gap-2.5 mb-4">
           <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center">
             <Sparkles className="w-4 h-4 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-gray-900">AI厳選レース</h3>
-            <p className="text-xs text-gray-400">AIポテンシャル上位馬が出走</p>
+            <h3 className="text-sm font-bold text-gray-900">今週のAIピックアップ</h3>
+            <p className="text-xs text-gray-400">週末が近くなると分析データが表示されます</p>
           </div>
         </div>
-        <div className="px-0">
-          {AI_PICK_RACES.map(r => <PickupRaceItem key={r.id} race={r} />)}
+        <div className="py-8 flex flex-col items-center text-center gap-2">
+          <Zap className="w-8 h-8 text-gray-200" />
+          <p className="text-sm text-gray-400">分析データ準備中</p>
+          <p className="text-xs text-gray-300">木曜日頃から更新されます</p>
         </div>
       </div>
+    )
+  }
 
+  // 開催場ごとにグルーピングして最大2場を表示
+  const venueMap = new Map<string, RaceSummary[]>()
+  for (const race of homeData.notableRaces) {
+    const existing = venueMap.get(race.keibajo_name) ?? []
+    venueMap.set(race.keibajo_name, [...existing, race])
+  }
+  const venueEntries = Array.from(venueMap.entries()).slice(0, 2)
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {venueEntries.map(([venueName, races]) => (
+        <div key={venueName} className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+          <div className="flex items-center gap-2.5 mb-4">
+            <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center">
+              <Sparkles className="w-4 h-4 text-emerald-600" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-gray-900">{venueName} 注目レース</h3>
+              <p className="text-xs text-gray-400">グレード・格上レースを優先表示</p>
+            </div>
+          </div>
+          <div className="px-0">
+            {races.map(r => <NotableRaceItem key={r.race_id} race={r} />)}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -325,25 +352,20 @@ function HitHighlightsCard() {
           <p className="text-xs text-gray-400">AIモデルの主な予測実績</p>
         </div>
       </div>
-
       <div className="space-y-4">
         {HIT_HIGHLIGHTS.map((h, i) => (
           <div key={i} className="flex gap-3 pb-4 border-b border-gray-100 last:border-0 last:pb-0">
             <div className="flex-shrink-0 w-1 rounded-full bg-emerald-400 self-stretch" />
             <div className="min-w-0 flex-1">
-              {/* インパクト数値 — 最大強調 */}
               <p className="text-base font-bold text-emerald-700 leading-tight mb-0.5 tabular-nums">
                 {h.impact}
               </p>
-              {/* 結果テキスト */}
               <p className="text-sm font-medium text-gray-700">{h.result}</p>
-              {/* 補足情報 — 控えめ */}
               <p className="text-xs text-gray-400 mt-0.5">{h.raceName}　{h.date}</p>
             </div>
           </div>
         ))}
       </div>
-
       <button className="mt-4 w-full text-sm text-emerald-600 hover:text-emerald-700 font-medium flex items-center justify-center gap-1.5 py-2 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition-colors">
         すべての実績を見る
         <ArrowRight className="w-3.5 h-3.5" />
@@ -352,8 +374,8 @@ function HitHighlightsCard() {
   )
 }
 
-// ── D. データラボ ─────────────────────────────────────────────────────────────
-function DataLabCard({ title, description, icon, badge }: DataLabCard) {
+// ── E. データラボ ─────────────────────────────────────────────────────────────
+function DataLabCardItem({ title, description, icon, badge }: DataLabCardItem) {
   return (
     <button className="w-full text-left p-4 rounded-lg border border-gray-200 hover:border-emerald-300 hover:shadow-sm transition-all group bg-white">
       <div className="flex items-start gap-3">
@@ -391,10 +413,9 @@ function DataLabSection() {
           <p className="text-xs text-gray-400">高度な分析ツール一覧</p>
         </div>
       </div>
-
       <div className="space-y-2">
         {DATA_LAB_CARDS.map((card, i) => (
-          <DataLabCard key={i} {...card} />
+          <DataLabCardItem key={i} {...card} />
         ))}
       </div>
     </div>
@@ -402,7 +423,47 @@ function DataLabSection() {
 }
 
 // ── メイン ────────────────────────────────────────────────────────────────────
+
+function _subtitleLabel(status: HomeStatus): string {
+  if (status === 'loading')   return 'AI予測データを読み込んでいます'
+  if (status === 'preparing') return '今週末のレース情報は準備中です'
+  return '今週末のAI予測レポート'
+}
+
 export default function UserHomeView() {
+  const [homeData, setHomeData] = useState<HomeData>({
+    status: 'loading',
+    mainRace: null,
+    mainRaceDate: '',
+    notableRaces: [],
+  })
+
+  useEffect(() => {
+    fetchWeekendRaces().then(data => {
+      const allRaces = Object.values(data.races_by_date)
+        .flat()
+        .filter(r => !r.race_id.startsWith('mock_'))
+
+      if (allRaces.length === 0) {
+        setHomeData({ status: 'preparing', mainRace: null, mainRaceDate: '', notableRaces: [] })
+        return
+      }
+
+      const mainRace = _pickMainRace(allRaces)
+
+      let mainRaceDate = ''
+      for (const [date, races] of Object.entries(data.races_by_date)) {
+        if (races.some(r => r.race_id === mainRace.race_id)) {
+          mainRaceDate = _formatDateStr(date)
+          break
+        }
+      }
+
+      const notableRaces = _pickNotableRaces(allRaces, mainRace.race_id)
+      setHomeData({ status: 'ready', mainRace, mainRaceDate, notableRaces })
+    })
+  }, [])
+
   return (
     <div className="min-h-screen bg-gray-50">
 
@@ -414,16 +475,16 @@ export default function UserHomeView() {
         {/* ページタイトル */}
         <div>
           <h1 className="text-xl font-bold text-gray-900">ダッシュボード</h1>
-          <p className="text-sm text-gray-500 mt-0.5">今週末のAI予測レポート</p>
+          <p className="text-sm text-gray-500 mt-0.5">{_subtitleLabel(homeData.status)}</p>
         </div>
 
         {/* B. メインイベント ヒーロー */}
-        <HeroCard event={MAIN_EVENT} />
+        <HeroCard homeData={homeData} />
 
         {/* C. AI ピックアップ */}
         <div>
           <h2 className="text-sm font-semibold text-gray-700 mb-3">今週のAIピックアップ</h2>
-          <PickupSection />
+          <PickupSection homeData={homeData} />
         </div>
 
         {/* D. 的中ハイライト & データラボ */}

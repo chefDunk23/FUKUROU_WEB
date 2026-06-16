@@ -5,6 +5,10 @@
  *
  * すべての関数は純粋関数（副作用なし、引数を変更しない）。
  * docs/CORE_FEATURES_SPEC.md §2 に基づく実装。
+ *
+ * v2 アップデート:
+ *   馬の「テン速度（物理）」に加え「AI予測ポジション（positionTendency）」を掛け合わせることで、
+ *   騎手の戦術傾向（前を取る意志 vs 控える傾向）を間接的に反映したリスク判定・ストーリー生成を実現。
  */
 
 import type { HorseData, PositioningMap } from '../api/raceDetail'
@@ -38,7 +42,7 @@ export interface RaceStoryResult {
 
 // ── 閾値定数 ──────────────────────────────────────────────────────────────────
 
-/** tenIndex >= この値 → 逃げ候補 */
+/** tenIndex >= この値 → 逃げ候補（物理的速さ） */
 const NIGE_THRESHOLD = 70
 /** tenIndex >= この値 → 先行以上 */
 const SENKO_THRESHOLD = 55
@@ -51,6 +55,14 @@ const INNER_AVG_MIN_FOR_OUTER_RISK = 45
 /** 内枠包まれリスク判定における外馬平均テン最低値 */
 const OUTER_AVG_MIN_FOR_INNER_RISK = 48
 
+/**
+ * positionTendency（0=逃げ〜1=追込）の前付け判定しきい値。
+ * この値「以下」なら「前に行く意志あり（逃げ〜先行の見込み）」と判断する。
+ */
+const PT_FRONT_MAX   = 0.40   // 0〜0.40 → 前付け意向（逃げ or 先行）
+const PT_CONTROL_MAX = 0.20   // 0〜0.20 → 強い逃げ意向
+const PT_HOLD_MIN    = 0.55   // 0.55以上 → 控える傾向
+
 // ── 公開ヘルパー ──────────────────────────────────────────────────────────────
 
 /** tenIndex (0–100) から脚質ラベルを返す */
@@ -61,11 +73,32 @@ export function runningStyleLabel(tenIndex: number): RunningStyleLabel {
   return '追込'
 }
 
+/** positionTendency (0〜1) から予測ポジションラベルを返す。null なら null。 */
+export function positionTendencyLabel(pt: number | null): RunningStyleLabel | null {
+  if (pt === null) return null
+  if (pt < 0.15) return '逃げ'
+  if (pt < 0.45) return '先行'
+  if (pt < 0.75) return '差し'
+  return '追込'
+}
+
 // ── 内部ヘルパー ──────────────────────────────────────────────────────────────
 
 function fmt(name: string, ten: number | null, frame?: number | null): string {
   const tenStr = ten !== null ? `テン${Math.round(ten)}` : 'テン不明'
   return frame != null ? `${name}（枠${frame}・${tenStr}）` : `${name}（${tenStr}）`
+}
+
+/** positionTendency が存在する場合、前付け意向あり（0〜PT_FRONT_MAX）かを返す */
+function willGoFront(h: HorseData): boolean {
+  if (h.positionTendency === null) return true  // データなしの場合は保守的にtrue
+  return h.positionTendency <= PT_FRONT_MAX
+}
+
+/** positionTendency が存在し、控える傾向（PT_HOLD_MIN以上）の場合 true */
+function willHoldBack(h: HorseData): boolean {
+  if (h.positionTendency === null) return false
+  return h.positionTendency >= PT_HOLD_MIN
 }
 
 function avg(values: number[]): number {
@@ -78,6 +111,7 @@ function avg(values: number[]): number {
 /**
  * ① ペースカット
  * 内枠（1〜3枠）の先行馬の直外枠に、さらに極端に速い馬がいる場合。
+ * 外枠馬が「控える傾向」(positionTendency >= PT_HOLD_MIN) の場合はリスクを除外。
  * ターゲット = カットされる側（内枠先行馬）。
  */
 function detectPaceCut(horses: HorseData[]): DisadvantageRisk | null {
@@ -89,14 +123,21 @@ function detectPaceCut(horses: HorseData[]): DisadvantageRisk | null {
     const ten = horse.tenIndex
     if (ten === null || ten < SENKO_THRESHOLD) continue
 
-    const outerFaster = horses.filter(h =>
-      h.frameNum === horse.frameNum + 1 &&
-      (h.tenIndex ?? 0) > ten + FAST_GAP
-    )
+    const outerFaster = horses.filter(h => {
+      if (h.frameNum !== horse.frameNum! + 1) return false
+      if ((h.tenIndex ?? 0) <= ten + FAST_GAP) return false
+      // 外枠馬が控える傾向なら実際にカットする可能性は低い
+      if (willHoldBack(h)) return false
+      return true
+    })
     if (outerFaster.length === 0) continue
 
     affectedIds.push(horse.id)
-    const outerDesc = outerFaster.map(h => fmt(h.horseName, h.tenIndex)).join('・')
+    const outerDesc = outerFaster.map(h => {
+      const ptNote = h.positionTendency !== null && h.positionTendency <= PT_CONTROL_MAX
+        ? '・逃げ予測' : ''
+      return `${fmt(h.horseName, h.tenIndex)}${ptNote}`
+    }).join('・')
     descParts.push(
       `${fmt(horse.horseName, ten, horse.frameNum)}は先行を図るが、直外の${outerDesc}にカットされてポジションを下げるリスクがある`
     )
@@ -115,38 +156,67 @@ function detectPaceCut(horses: HorseData[]): DisadvantageRisk | null {
 
 /**
  * ② ハナ争い激化
- * テン速度上位で逃げ候補（tenIndex ≥ 70）が2頭以上いる場合。
- * ターゲット = 該当全馬（全員が消耗リスクを負う）。
+ * テン速度上位（tenIndex ≥ 70）かつ「前付け意向あり（positionTendency ≤ PT_FRONT_MAX）」の
+ * 「確定的な逃げ馬」が2頭以上いる場合に発動。
+ *
+ * tenIndex ≥ 70 でも positionTendency が高い（控える傾向）馬は
+ * 「テンは速いが控える見込み」として注記のみに留める。
  */
 function detectHanaArasoi(horses: HorseData[]): DisadvantageRisk | null {
-  const nigeHorses = [...horses]
+  const nigeByTen = [...horses]
     .filter(h => (h.tenIndex ?? 0) >= NIGE_THRESHOLD)
     .sort((a, b) => (b.tenIndex ?? 0) - (a.tenIndex ?? 0))
     .slice(0, 5)
 
-  if (nigeHorses.length < 2) return null
+  if (nigeByTen.length === 0) return null
 
-  const names = nigeHorses
-    .map(h => fmt(h.horseName, h.tenIndex))
+  // 「確定的逃げ馬」= テンが速く、かつAI予測でも前付けの馬
+  const confirmedNige = nigeByTen.filter(h => willGoFront(h))
+  // 「控える逃げ馬」= テンは速いがAI予測では控える見込み
+  const hesitantNige  = nigeByTen.filter(h => willHoldBack(h))
+
+  if (confirmedNige.length < 2) {
+    // 確定的逃げが1頭以下の場合は争いにならない
+    return null
+  }
+
+  const names = confirmedNige
+    .slice(0, 4)
+    .map(h => {
+      const ptLabel = h.positionTendency !== null
+        ? `AI予測:${positionTendencyLabel(h.positionTendency)}` : ''
+      return ptLabel
+        ? `${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}・${ptLabel}）`
+        : fmt(h.horseName, h.tenIndex)
+    })
     .join('・')
+
+  let desc = `逃げ意向馬が${confirmedNige.length}頭（${names}）おりハナ争いが激化するリスクが高い。ハイペース化の可能性が大きく、先行馬全体への消耗が懸念される。`
+  if (hesitantNige.length > 0) {
+    const holdNames = hesitantNige.map(h => h.horseName).join('・')
+    desc += ` なお${holdNames}はテンが速いものの、AI予測では控える見込み。`
+  }
 
   return {
     type: 'HANA_ARASOI',
     label: 'ハナ争い激化',
     starRating: 4,
-    description: `逃げ候補が${nigeHorses.length}頭（${names}）おりハナ争いが激化するリスクが高い。ハイペース化の可能性が大きく、先行馬全体への消耗が懸念される。`,
-    targetHorseIds: nigeHorses.map(h => h.id),
+    description: desc,
+    targetHorseIds: confirmedNige.map(h => h.id),
   }
 }
 
 /**
  * ③ 外枠先行の距離損
- * 外枠（7〜8枠）の先行馬で、内側の馬が平均的に遅くない場合。
- * コーナーを外々に回り続けるロスが発生する。
+ * 外枠（7〜8枠）の先行馬で、かつAI予測でも前付け意向がある馬（positionTendency ≤ PT_FRONT_MAX）。
+ * 「控える傾向」の外枠馬は外を回る距離ロスが発生しないため除外する。
  */
 function detectOuterSensen(horses: HorseData[]): DisadvantageRisk | null {
   const outerFast = horses.filter(h =>
-    h.frameNum !== null && h.frameNum >= 7 && (h.tenIndex ?? 0) >= SENKO_THRESHOLD
+    h.frameNum !== null &&
+    h.frameNum >= 7 &&
+    (h.tenIndex ?? 0) >= SENKO_THRESHOLD &&
+    !willHoldBack(h)  // AI予測で控える傾向なら距離損は起きない
   )
   if (outerFast.length === 0) return null
 
@@ -157,7 +227,12 @@ function detectOuterSensen(horses: HorseData[]): DisadvantageRisk | null {
 
   if (avg(innerTens) < INNER_AVG_MIN_FOR_OUTER_RISK) return null
 
-  const names = outerFast.map(h => fmt(h.horseName, h.tenIndex, h.frameNum)).join('・')
+  const names = outerFast.map(h => {
+    const ptNote = h.positionTendency !== null
+      ? `・AI予測${positionTendencyLabel(h.positionTendency)}` : ''
+    return `${h.horseName}（枠${h.frameNum}・テン${Math.round(h.tenIndex ?? 0)}${ptNote}）`
+  }).join('・')
+
   return {
     type: 'OUTER_SENSEN',
     label: '外枠先行の距離損',
@@ -170,7 +245,6 @@ function detectOuterSensen(horses: HorseData[]): DisadvantageRisk | null {
 /**
  * ④ 内枠遅馬の包まれ
  * 1〜2枠で追込脚質（tenIndex < 35）かつ外側の馬が平均的に速い場合。
- * スタート直後に馬群に包まれて進路がなくなるリスク。
  */
 function detectInnerSlow(horses: HorseData[]): DisadvantageRisk | null {
   const innerSlow = horses.filter(h =>
@@ -198,7 +272,6 @@ function detectInnerSlow(horses: HorseData[]): DisadvantageRisk | null {
 /**
  * ⑤ 外枠追込の届かず
  * 8枠の追込馬（tenIndex < 35）で、ペース予測がスローの場合。
- * 前が止まらず、外を回る距離ロスも加わり物理的に届きにくい。
  */
 function detectOutsideDisadvantage(
   horses: HorseData[],
@@ -224,9 +297,6 @@ function detectOutsideDisadvantage(
 /**
  * ⑥ 展開不一致（ペースハーモニーミス）
  * 馬の脚質（tenIndex）とAI隊列予想のポジションが大きく乖離している場合。
- * spec §2.2 の「大きく乖離」定義: 追込(<35)→前付け、逃げ(≥70)→後方のみを対象とする。
- * 先行(55-69)が後方、差し(35-54)が前方といった中間ケースは意図的に除外している。
- * ※ positioningMap が null の場合は判定しない（graceful degradation）
  */
 function detectPaceHarmonyMiss(
   horses: HorseData[],
@@ -273,11 +343,6 @@ function detectPaceHarmonyMiss(
 }
 
 // ── ★評価の複合補正 ───────────────────────────────────────────────────────────
-//
-// 複数パターンが同時発生した場合の★相互作用（spec §2.2 セクションC 参照）:
-//   HANA_ARASOI + PACE_CUT が両立 → 双方★5
-//   PACE_CUT + PACE_HARMONY_MISS が両立（HANA_ARASOIなし） → PACE_CUT→★4
-//   HANA_ARASOI 単独（PACE_CUTなし） → ★4（デフォルト）
 
 function applyStarRatingInteractions(risks: DisadvantageRisk[]): DisadvantageRisk[] {
   const types = new Set(risks.map(r => r.type))
@@ -303,7 +368,8 @@ function applyStarRatingInteractions(risks: DisadvantageRisk[]): DisadvantageRis
 
 /**
  * レース全体の展開ストーリー文字列をルールベースで生成する。
- * ハナ候補の有無・ペース予測・外枠状況・後方勢へのメリット等を条件分岐で組み立てる。
+ * v2: positionTendency を活用し「テンが速いが控える馬」「外枠の逃げ意向馬」等の
+ * 騎手戦術的ニュアンスを文章に反映する。
  */
 export function generateRaceStory(
   horses: HorseData[],
@@ -311,15 +377,21 @@ export function generateRaceStory(
 ): string {
   const byTenDesc = [...horses].sort((a, b) => (b.tenIndex ?? 0) - (a.tenIndex ?? 0))
 
-  const nigeHorses = byTenDesc.filter(h => (h.tenIndex ?? 0) >= NIGE_THRESHOLD)
+  const nigeHorses  = byTenDesc.filter(h => (h.tenIndex ?? 0) >= NIGE_THRESHOLD)
   const senkoHorses = byTenDesc.filter(h => {
     const t = h.tenIndex ?? 0
     return t >= SENKO_THRESHOLD && t < NIGE_THRESHOLD
   })
   const sashiOikomiHorses = byTenDesc.filter(h => (h.tenIndex ?? 50) < SENKO_THRESHOLD)
-  const outerFastHorses = horses.filter(h =>
-    h.frameNum !== null && h.frameNum >= 6 && (h.tenIndex ?? 0) >= SENKO_THRESHOLD
+  const outerFastHorses   = horses.filter(h =>
+    h.frameNum !== null && h.frameNum >= 6 &&
+    (h.tenIndex ?? 0) >= SENKO_THRESHOLD &&
+    !willHoldBack(h)
   )
+
+  // positionTendency で「実際に前を取りに行く」逃げ馬を選別
+  const confirmedNige  = nigeHorses.filter(h => willGoFront(h))
+  const hesitantNige   = nigeHorses.filter(h => willHoldBack(h))
 
   const parts: string[] = []
 
@@ -338,23 +410,39 @@ export function generateRaceStory(
       parts.push('展開ペースは不明確。')
   }
 
-  // 2. ハナ候補
-  if (nigeHorses.length === 1) {
-    const h = nigeHorses[0]
-    parts.push(`${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}）がハナを主張する見込み。`)
-  } else if (nigeHorses.length >= 2) {
-    const listed = nigeHorses
+  // 2. ハナ候補（positionTendency で確定度を強調）
+  if (confirmedNige.length === 1) {
+    const h = confirmedNige[0]
+    const ptNote = h.positionTendency !== null && h.positionTendency <= PT_CONTROL_MAX
+      ? '・逃げ意向強め' : ''
+    parts.push(`${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}${ptNote}）がハナを主張する見込み。`)
+  } else if (confirmedNige.length >= 2) {
+    const listed = confirmedNige
       .slice(0, 3)
-      .map(h => `${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}）`)
+      .map(h => {
+        const ptNote = h.positionTendency !== null && h.positionTendency <= PT_CONTROL_MAX
+          ? '・逃げ確定的' : ''
+        return `${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}${ptNote}）`
+      })
       .join('・')
     parts.push(`${listed}らがハナを争い、序盤から激しい先頭争いになる可能性がある。`)
-  } else if (senkoHorses.length > 0) {
+  } else if (nigeHorses.length === 0 && senkoHorses.length > 0) {
     parts.push(
       `明確な逃げ馬は不在で、${senkoHorses[0].horseName}ら先行勢が比較的楽な隊列を作りそう。`
     )
   }
 
-  // 3. 外枠有力先行馬の言及
+  // 3. 「テンが速いが控える見込み」の馬（騎手の戦術傾向を反映）
+  if (hesitantNige.length > 0) {
+    const listed = hesitantNige
+      .map(h => `${h.horseName}（テン${Math.round(h.tenIndex ?? 0)}）`)
+      .join('・')
+    parts.push(
+      `なお${listed}はテンの速さはあるものの、AI予測では控える可能性がある点に注目。`
+    )
+  }
+
+  // 4. 外枠の前付け意向馬
   if (outerFastHorses.length >= 2) {
     const listed = outerFastHorses
       .slice(0, 2)
@@ -363,7 +451,7 @@ export function generateRaceStory(
     parts.push(`外枠から${listed}ら速いテンの馬が内に切れ込む動きで、ペースがさらに上がる展開もあり得る。`)
   }
 
-  // 4. ペース別シナリオ
+  // 5. ペース別シナリオ
   if (pacePrediction === 'fast') {
     if (sashiOikomiHorses.length > 0) {
       const listed = sashiOikomiHorses
@@ -373,7 +461,7 @@ export function generateRaceStory(
       parts.push(`ハイペースで前が崩れれば、${listed}など後方勢に展開が向く可能性がある。`)
     }
   } else if (pacePrediction === 'slow') {
-    const frontCandidates = [...nigeHorses, ...senkoHorses].slice(0, 2)
+    const frontCandidates = [...confirmedNige, ...senkoHorses].slice(0, 2)
     if (frontCandidates.length > 0) {
       const listed = frontCandidates.map(h => h.horseName).join('・')
       parts.push(`スローで先行有利な展開では、${listed}がそのまま押し切るシナリオに注意。`)
@@ -387,10 +475,6 @@ export function generateRaceStory(
 
 // ── 公開 API ──────────────────────────────────────────────────────────────────
 
-/**
- * 全6パターンの不利リスクを判定して返す。
- * ★評価の複合補正を適用済み。
- */
 export function detectRiskHorses(
   horses: HorseData[],
   pacePrediction: PacePrediction,
@@ -408,10 +492,6 @@ export function detectRiskHorses(
   return applyStarRatingInteractions(raw)
 }
 
-/**
- * 展開ストーリーと不利リスク判定をまとめて返す。
- * RaceStoryPage コンポーネントのメインエントリポイント。
- */
 export function analyzeRaceStory(
   horses: HorseData[],
   pacePrediction: PacePrediction,

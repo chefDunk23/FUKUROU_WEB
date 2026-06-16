@@ -8,6 +8,8 @@
  * UIコンポーネントは一切変更不要。
  */
 
+import { apiFetch } from './client'
+
 // ── Raw API types（バックエンドが返す生の型） ────────────────────────────────
 
 export interface RawSubmodelScores {
@@ -69,15 +71,18 @@ export interface RawHorse {
   ai_rank:        number
   submodel_scores: RawSubmodelScores
   extra: {
-    sire_name:           string | null
-    dam_sire_name:       string | null
-    prev_race_grade:     string | null
-    prev_race_rank:      number | null
-    prev_race_days_ago:  number | null
-    chokyo_score:        number | null   // 0–100
-    past_races:          RawPastRace[]   // 直近最大5走
-    ten_index:           number | null   // 0-100: テン速度指数
-    agari_index:         number | null   // 0-100: 上がり速度指数
+    sire_name:            string | null
+    dam_sire_name:        string | null
+    prev_race_grade:      string | null
+    prev_race_rank:       number | null
+    prev_race_days_ago:   number | null
+    chokyo_score:         number | null   // 0–100
+    past_races:           RawPastRace[]   // 直近最大5走
+    ten_index:            number | null   // 0-100: テン速度指数
+    agari_index:          number | null   // 0-100: 上がり速度指数
+    position_tendency:    number | null   // 0=逃げ〜1=追込: AI予測ポジション
+    predicted_field_pace: number | null   // 0〜1: レース全体ペース強度
+    pace_harmony:         number | null   // ペース適合スコア
   }
 }
 
@@ -90,6 +95,7 @@ export interface RawRaceDetail {
   distance:      number
   track_code:    string
   grade_code:    string | null
+  class_label:   string | null   // バックエンド計算済みクラスラベル ("G1", "3歳未勝利" 等)
   syusso_tosu:   number
   weather:       string
   track_condition: string
@@ -101,6 +107,13 @@ export interface RawRaceDetail {
       senko:  number[]
       sashi:  number[]
       oikomi: number[]
+    } | null
+    track_bias?: {
+      bias_type:       string | null
+      note:            string
+      sample_races:    number
+      is_opening_week: boolean
+      fallback_used:   boolean
     } | null
   }
   horses: RawHorse[]
@@ -177,8 +190,11 @@ export interface HorseData {
   prevRaceDaysAgo: number | null
   chokyoScore:     number | null
   pastRaces:       PastRace[]       // 直近最大5走
-  tenIndex:        number | null    // 0-100: テン速度指数
-  agariIndex:      number | null    // 0-100: 上がり速度指数
+  tenIndex:           number | null   // 0-100: テン速度指数
+  agariIndex:         number | null   // 0-100: 上がり速度指数
+  positionTendency:   number | null   // 0=逃げ〜1=追込: AI予測ポジション
+  predictedFieldPace: number | null   // 0〜1: レース全体ペース強度
+  paceHarmony:        number | null   // ペース適合スコア
 }
 
 export interface PositioningMap {
@@ -204,6 +220,9 @@ export interface RaceDetailData {
   biasNote:        string
   positioningMap:  PositioningMap | null
   horses:          HorseData[]
+  trackBiasType:   string | null   // "内枠前有利" / "差し有利" / "均等" 等
+  trackBiasNote:   string          // 詳細テキスト
+  isOpeningWeek:   boolean
 }
 
 // ── Adapter 設定 ──────────────────────────────────────────────────────────────
@@ -239,16 +258,22 @@ function resolveSurface(trackCode: string): '芝' | 'ダ' | '障' {
   return '芝'
 }
 
-function resolveGradeLabel(code: string | null): string | null {
+const _GRADE_CODE_MAP: Record<string, string> = {
+  A: 'G1',
+  B: 'G2',
+  C: 'G3',
+  D: '重賞',
+  F: 'J・G1',
+  G: 'J・G2',
+  H: 'J・G3',
+  L: 'L',
+  // E: class_label に委ねる → null
+  // R: 廃止コード → null
+}
+
+export function resolveGradeLabel(code: string | null): string | null {
   if (!code) return null
-  const g = code.trim().toUpperCase()
-  if (g === 'A' || g === 'G') return 'G1'
-  if (g === 'B' || g === 'F') return 'G2'
-  if (g === 'C' || g === 'D') return 'G3'
-  if (g === 'L') return 'L'
-  if (g === 'E') return '1勝クラス'
-  if (g === 'H') return '2勝クラス'
-  return null
+  return _GRADE_CODE_MAP[code.trim().toUpperCase()] ?? null
 }
 
 // ── Adapter 関数（生データ → UI クリーン型） ──────────────────────────────────
@@ -316,8 +341,11 @@ export function transformRaceData(raw: RawRaceDetail): RaceDetailData {
           label:                 p.race_score.label as 'S' | 'A' | 'B' | 'C',
         } : null,
       })),
-      tenIndex:        h.extra.ten_index ?? null,
-      agariIndex:      h.extra.agari_index ?? null,
+      tenIndex:           h.extra.ten_index ?? null,
+      agariIndex:         h.extra.agari_index ?? null,
+      positionTendency:   h.extra.position_tendency ?? null,
+      predictedFieldPace: h.extra.predicted_field_pace ?? null,
+      paceHarmony:        h.extra.pace_harmony ?? null,
     }
   }).sort((a, b) => a.aiRank - b.aiRank)
 
@@ -329,7 +357,7 @@ export function transformRaceData(raw: RawRaceDetail): RaceDetailData {
     raceName:       raw.race_name,
     distance:       raw.distance,
     surface:        resolveSurface(raw.track_code),
-    gradeLabel:     resolveGradeLabel(raw.grade_code),
+    gradeLabel:     raw.class_label ?? resolveGradeLabel(raw.grade_code),
     entryCount:     raw.syusso_tosu,
     weather:        raw.weather,
     trackCondition: raw.track_condition,
@@ -337,6 +365,9 @@ export function transformRaceData(raw: RawRaceDetail): RaceDetailData {
     biasNote:       raw.race_info.bias_note,
     positioningMap: raw.race_info.positioning_map ?? null,
     horses,
+    trackBiasType:  raw.race_info.track_bias?.bias_type ?? null,
+    trackBiasNote:  raw.race_info.track_bias?.note ?? '',
+    isOpeningWeek:  raw.race_info.track_bias?.is_opening_week ?? false,
   }
 }
 
@@ -376,6 +407,13 @@ export const MOCK_RACE_DETAIL: RawRaceDetail = {
   race_info: {
     pace_prediction: 'fast',
     bias_note: '内枠有利。前日の雨後に内側が回復し良好。直線は内から伸びやすい馬場。',
+    track_bias: {
+      bias_type: '内枠前有利',
+      note: '直近8レース: 内枠勝率 72%、前残り傾向',
+      sample_races: 8,
+      is_opening_week: false,
+      fallback_used: false,
+    },
   },
   horses: [
     h(1,1,'h01','ロマンチックウォリアー','R.ムーア','C.フェローズ',        558, 4,57, 4.8, 2,0.93,1, [0.96,0.90,0.88,0.92,0.91,0.89],'クリエイター','ウォーフロント','G1',1,42,95, 48),
@@ -481,6 +519,7 @@ function generateMockRaceDetail(raceId: string): RawRaceDetail {
     race_info: {
       pace_prediction: pace,
       bias_note: `${keibajo_name}${course.distance}m。今週の馬場傾向を踏まえた展開予測です。`,
+      track_bias: null,
     },
   }
 }
@@ -495,7 +534,9 @@ const raceDetailCache = new Map<string, { data: RawRaceDetail; timestamp: number
 
 // ── データ取得関数 ───────────────────────────────────────────────────────────
 
-/** レース詳細を取得。FastAPI `/api/v2/races/:id` → フォールバックはフロントモック
+/** レース詳細を取得。FastAPI `/api/v2/races/:id` からデータを取得する。
+ *  - 開発環境 (import.meta.env.DEV): API 失敗時はモックにフォールバック（サーバー未起動でも動作確認可能）
+ *  - 本番環境: API 失敗時はエラーをスローする（UI側でエラー状態を表示させる）
  *  インメモリキャッシュにより、同一 raceId の2回目以降は即時返却（0ms）。
  */
 export async function fetchRaceDetail(raceId: string): Promise<RawRaceDetail> {
@@ -507,19 +548,162 @@ export async function fetchRaceDetail(raceId: string): Promise<RawRaceDetail> {
 
   // キャッシュ MISS → API 取得
   try {
-    const res = await fetch(`/api/v2/races/${encodeURIComponent(raceId)}`)
+    const res = await apiFetch(`/api/v2/races/${encodeURIComponent(raceId)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const raw = await res.json() as RawRaceDetail
     // 取得成功時のみキャッシュに保存
     raceDetailCache.set(raceId, { data: raw, timestamp: Date.now() })
     return raw
-  } catch {
-    // サーバー未起動またはネットワークエラー時はフロント側モックで継続
-    // ※モックデータはキャッシュしない（APIが復旧したとき即座に反映させるため）
-    if (raceId === MOCK_RACE_DETAIL.race_id || raceId === 'main') {
-      return { ...MOCK_RACE_DETAIL }
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      // 開発時のみモックにフォールバック（APIサーバー未起動でも動作確認可能）
+      console.warn('[fetchRaceDetail] API unavailable, using mock data:', err)
+      if (raceId === MOCK_RACE_DETAIL.race_id || raceId === 'main') {
+        return { ...MOCK_RACE_DETAIL }
+      }
+      return generateMockRaceDetail(raceId)
     }
-    return generateMockRaceDetail(raceId)
+    // 本番では再スロー → UI がエラー状態を表示する
+    throw err
+  }
+}
+
+// ── 公開用レース詳細（認証不要エンドポイント） ──────────────────────────────────
+
+interface PublicRawHorse {
+  umaban:       number
+  wakuban:      number | null
+  horse_id:     string
+  horse_name:   string | null
+  jockey_name:  string | null
+  trainer_name: string | null
+  horse_weight: number | null
+  weight_diff:  number | null
+  burden_weight: number
+  tan_odds:     number | null
+  ninki:        number | null
+  ai_score:     number
+  ai_rank:      number
+  extra: {
+    prev_race_grade:      string | null
+    prev_race_rank:       number | null
+    prev_race_days_ago:   number | null
+    chokyo_score:         number | null
+    ten_index:            number | null
+    agari_index:          number | null
+    position_tendency:    number | null
+    predicted_field_pace: number | null
+    pace_harmony:         number | null
+  }
+}
+
+interface PublicRawRaceDetail {
+  race_id:        string
+  race_date:      string
+  keibajo_name:   string
+  race_num:       number
+  race_name:      string
+  distance:       number
+  track_code:     string
+  grade_code:     string | null
+  class_label:    string | null
+  is_special:     boolean
+  syusso_tosu:    number
+  weather:        string
+  track_condition: string
+  race_info: {
+    pace_prediction: string
+    bias_note:       string
+    positioning_map: unknown
+    track_bias:      unknown
+  }
+  horses: PublicRawHorse[]
+}
+
+const _ZERO_SUBMODEL: RawSubmodelScores = {
+  score_ability_v2: 0, score_course_v2: 0, score_team_v2: 0,
+  score_training_v2: 0, score_pace_v2: 0, score_pedigree_v1: 0,
+}
+
+function _normalizePublicToRaw(pub: PublicRawRaceDetail): RawRaceDetail {
+  return {
+    race_id:         pub.race_id,
+    race_date:       pub.race_date,
+    keibajo_name:    pub.keibajo_name,
+    race_num:        pub.race_num,
+    race_name:       pub.race_name,
+    distance:        pub.distance,
+    track_code:      pub.track_code,
+    grade_code:      pub.grade_code,
+    class_label:     pub.class_label,
+    syusso_tosu:     pub.syusso_tosu,
+    weather:         pub.weather,
+    track_condition: pub.track_condition,
+    race_info: {
+      pace_prediction: pub.race_info.pace_prediction as 'slow' | 'medium' | 'fast' | 'unknown',
+      bias_note:       pub.race_info.bias_note,
+      positioning_map: pub.race_info.positioning_map as RawRaceDetail['race_info']['positioning_map'],
+      track_bias:      pub.race_info.track_bias as RawRaceDetail['race_info']['track_bias'],
+    },
+    horses: pub.horses.map(h => ({
+      umaban:         h.umaban,
+      wakuban:        h.wakuban,
+      horse_id:       h.horse_id,
+      horse_name:     h.horse_name,
+      jockey_name:    h.jockey_name,
+      trainer_name:   h.trainer_name,
+      horse_weight:   h.horse_weight,
+      weight_diff:    h.weight_diff,
+      burden_weight:  h.burden_weight,
+      tan_odds:       h.tan_odds,
+      ninki:          h.ninki,
+      ai_score:       h.ai_score,
+      ai_rank:        h.ai_rank,
+      submodel_scores: { ..._ZERO_SUBMODEL },
+      extra: {
+        sire_name:            null,
+        dam_sire_name:        null,
+        prev_race_grade:      h.extra.prev_race_grade,
+        prev_race_rank:       h.extra.prev_race_rank,
+        prev_race_days_ago:   h.extra.prev_race_days_ago,
+        chokyo_score:         h.extra.chokyo_score,
+        past_races:           [],
+        ten_index:            h.extra.ten_index,
+        agari_index:          h.extra.agari_index,
+        position_tendency:    h.extra.position_tendency,
+        predicted_field_pace: h.extra.predicted_field_pace,
+        pace_harmony:         h.extra.pace_harmony,
+      },
+    })),
+  }
+}
+
+/** 公開エンドポイント（APIキー不要）からレース詳細を取得し RawRaceDetail に正規化。
+ *  submodel_scores はゼロ埋め、past_races / sire_name は空。
+ *  変換後は既存の transformRaceData() をそのまま使用できる。
+ */
+export async function fetchPublicRaceDetail(raceId: string): Promise<RawRaceDetail> {
+  const cached = raceDetailCache.get(raceId)
+  if (cached && Date.now() - cached.timestamp < RACE_DETAIL_CACHE_TTL) {
+    return Promise.resolve(cached.data)
+  }
+
+  try {
+    const res = await fetch(`/api/v2/public/races/${encodeURIComponent(raceId)}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const pub = await res.json() as PublicRawRaceDetail
+    const raw = _normalizePublicToRaw(pub)
+    raceDetailCache.set(raceId, { data: raw, timestamp: Date.now() })
+    return raw
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      console.warn('[fetchPublicRaceDetail] API unavailable, using mock data:', err)
+      if (raceId === MOCK_RACE_DETAIL.race_id || raceId === 'main') {
+        return { ...MOCK_RACE_DETAIL }
+      }
+      return generateMockRaceDetail(raceId)
+    }
+    throw err
   }
 }
 
@@ -671,11 +855,15 @@ export const MOCK_RACE_LEVEL: RawRaceLevelResponse = {
 
 export async function fetchRaceLevel(raceId: string): Promise<RaceLevelData> {
   try {
-    const res = await fetch(`/api/v2/race-level/${encodeURIComponent(raceId)}`)
+    const res = await apiFetch(`/api/v2/race-level/${encodeURIComponent(raceId)}`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const raw = await res.json() as RawRaceLevelResponse
     return transformRaceLevelData(raw)
-  } catch {
-    return transformRaceLevelData(MOCK_RACE_LEVEL)
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      console.warn('[fetchRaceLevel] API unavailable, using mock data:', err)
+      return transformRaceLevelData(MOCK_RACE_LEVEL)
+    }
+    throw err
   }
 }

@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import {
   transformRaceData,
-  fetchRaceDetail,
+  fetchPublicRaceDetail,
   type HorseData,
   type RaceDetailData,
   type AiMetric,
@@ -39,6 +39,14 @@ import { analyzeRaceStory, type RaceStoryResult } from '../../utils/raceStory'
 import { calcHorseScore, type PaceContext, type SelfRaceData } from '../../utils/horseScore'
 import { RaceStoryPanel } from './RaceStoryView'
 import { RaceLevelModal } from '../../components/RaceLevelModal'
+import {
+  fetchRaceTraining,
+  formatVenue,
+  formatLaps,
+  formatTotalTime,
+  type RaceTrainingResponse,
+  type HorseTrainingSummary,
+} from '../../api/raceTraining'
 
 // ── 定数 ──────────────────────────────────────────────────────────────────────
 
@@ -294,13 +302,33 @@ function PositioningMapPanel({
   )
 }
 
+// ── バイアスタイプ → 表示スタイルマッピング ───────────────────────────────────
+
+const BIAS_TYPE_CLS: Record<string, string> = {
+  '内枠前有利':        'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300',
+  '内枠差し有利':      'bg-teal-100    text-teal-800    ring-1 ring-teal-300',
+  '外枠前有利':        'bg-orange-100  text-orange-800  ring-1 ring-orange-300',
+  '外枠差し有利':      'bg-amber-100   text-amber-800   ring-1 ring-amber-300',
+  '内枠有利':          'bg-blue-100    text-blue-800    ring-1 ring-blue-300',
+  '外枠有利':          'bg-yellow-100  text-yellow-800  ring-1 ring-yellow-300',
+  '前有利（先行有利）': 'bg-sky-100     text-sky-800     ring-1 ring-sky-300',
+  '差し・追込有利':    'bg-purple-100  text-purple-800  ring-1 ring-purple-300',
+  '均等（バイアスなし）': 'bg-gray-100 text-gray-600    ring-1 ring-gray-200',
+  '内枠前有利（推定）': 'bg-emerald-50  text-emerald-600 ring-1 ring-emerald-200',
+}
+
 // ── レースサマリーパネル（展開・バイアス） ────────────────────────────────────
 
 function RaceSummaryPanel({ race }: { race: RaceDetailData }) {
   const pace = PACE_LABEL[race.pacePrediction] ?? PACE_LABEL.unknown
+  const biasCls = race.trackBiasType
+    ? (BIAS_TYPE_CLS[race.trackBiasType] ?? 'bg-gray-100 text-gray-600 ring-1 ring-gray-200')
+    : null
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
 
+      {/* 展開予想（ペースモデル由来） */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
         <div className="flex items-center gap-2 mb-2">
           <Gauge className="w-4 h-4 text-gray-500" />
@@ -312,12 +340,29 @@ function RaceSummaryPanel({ race }: { race: RaceDetailData }) {
         <p className="text-xs text-gray-400 mt-2">{race.biasNote || 'AIによるペース予測です。'}</p>
       </div>
 
+      {/* トラックバイアス（直近同コース結果ベース） */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-        <div className="flex items-center gap-2 mb-2">
-          <AlertTriangle className="w-4 h-4 text-gray-500" />
-          <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">トラックバイアス予想</span>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-gray-500" />
+            <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">トラックバイアス</span>
+          </div>
+          {race.isOpeningWeek && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-50 text-orange-600 ring-1 ring-orange-200 font-medium">
+              開幕週
+            </span>
+          )}
         </div>
-        <p className="text-xs text-gray-400">{race.biasNote || 'バイアス情報はありません。'}</p>
+        {biasCls ? (
+          <span className={`inline-flex items-center text-sm font-semibold px-3 py-1 rounded-full ${biasCls}`}>
+            {race.trackBiasType}
+          </span>
+        ) : (
+          <span className="text-xs text-gray-400">判定中...</span>
+        )}
+        <p className="text-xs text-gray-400 mt-2">
+          {race.trackBiasNote || '直近の同コースデータを集計中です。'}
+        </p>
       </div>
 
     </div>
@@ -640,19 +685,6 @@ function fmtTime(sec: number | null): string {
   return m > 0 ? `${m}:${s.padStart(4, '0')}` : s
 }
 
-function IndexBar({ value, color }: { value: number | null; color: string }) {
-  if (value == null) return <span className="text-gray-300 text-xs">—</span>
-  return (
-    <div className="flex flex-col items-center gap-0.5">
-      <span className={`text-xs font-bold tabular-nums ${color}`}>{value}</span>
-      <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden w-12">
-        <div className={`h-full rounded-full ${color.replace('text-', 'bg-')}`}
-          style={{ width: `${value}%` }} />
-      </div>
-    </div>
-  )
-}
-
 function PastCell({
   pr,
   horseId,
@@ -740,14 +772,12 @@ function ProHorseTable({
   return (
     <div className="bg-white rounded-b-xl border border-gray-200 shadow-sm">
       <div className="overflow-x-auto w-full">
-        <table className="min-w-[820px] w-full border-collapse text-xs">
+        <table className="min-w-[660px] w-full border-collapse text-xs">
           <thead>
             <tr className="bg-gray-50 border-b-2 border-gray-200 text-[11px] font-semibold text-gray-500 uppercase tracking-wide">
-              <th className="sticky left-0 bg-gray-50 px-3 py-2.5 text-left whitespace-nowrap z-10 min-w-[130px]">
+              <th className="sticky left-0 bg-gray-50 px-3 py-2.5 text-left whitespace-nowrap z-10 min-w-[160px]">
                 枠・馬番 / 馬名
               </th>
-              <th className="px-3 py-2.5 text-center whitespace-nowrap">テン</th>
-              <th className="px-3 py-2.5 text-center whitespace-nowrap border-r border-gray-200">上がり</th>
               {[1, 2, 3, 4, 5].map(n => (
                 <th key={n} className="px-2 py-2.5 text-center whitespace-nowrap border-l border-gray-100 w-[88px]">
                   {n}走前
@@ -760,28 +790,18 @@ function ProHorseTable({
               <tr key={h.id}
                 className={`border-b border-gray-100 hover:bg-emerald-50/30 transition-colors ${rowIdx % 2 === 1 ? 'bg-gray-50/50' : 'bg-white'}`}
               >
-                {/* 枠・馬番・馬名（sticky） */}
+                {/* 枠・馬番・馬名（sticky） — テン/上がりをインライン表示 */}
                 <td className={`sticky left-0 px-3 py-2.5 z-10 ${rowIdx % 2 === 1 ? 'bg-gray-50/80' : 'bg-white'}`}>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0">
                     <FrameChip n={h.frameNum} />
                     <span className="font-bold text-gray-700 w-4 tabular-nums flex-shrink-0">{h.horseNum}</span>
-                    <span className="font-semibold text-gray-900 truncate max-w-[72px]" title={h.horseName}>
+                    <span className="font-semibold text-gray-900 break-words leading-tight min-w-0">
                       {h.horseName}
                     </span>
                   </div>
-                  <div className="text-[10px] text-gray-400 ml-10 mt-0.5 truncate">
+                  <div className="text-[10px] text-gray-400 ml-10 mt-0.5">
                     {h.jockeyName}
                   </div>
-                </td>
-
-                {/* テン指数 */}
-                <td className="px-3 py-2.5 text-center">
-                  <IndexBar value={h.tenIndex} color="text-blue-500" />
-                </td>
-
-                {/* 上がり指数 */}
-                <td className="px-3 py-2.5 text-center border-r border-gray-200">
-                  <IndexBar value={h.agariIndex} color="text-purple-500" />
                 </td>
 
                 {/* 過去5走 */}
@@ -796,8 +816,6 @@ function ProHorseTable({
 
       {/* 凡例フッター */}
       <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50 flex flex-wrap gap-4 text-[10px] text-gray-400 rounded-b-xl">
-        <span><span className="text-blue-500 font-bold">テン</span> — 序盤位置取り指数（高=前付け）</span>
-        <span><span className="text-purple-500 font-bold">上がり</span> — 終盤加速指数（高=速い）</span>
         <span><span className="text-amber-600 font-bold">1着</span> <span className="text-blue-600 font-bold">2-3着</span> で着色</span>
         <span>上 = 上がり3F秒</span>
       </div>
@@ -848,6 +866,112 @@ function RaceDetailSkeleton() {
   )
 }
 
+// ── 調教パネル ────────────────────────────────────────────────────────────────
+
+function TrainingPanel({
+  trainingData,
+  horses,
+  selectedHorse,
+  onSelectHorse,
+}: {
+  trainingData: RaceTrainingResponse
+  horses: HorseData[]
+  selectedHorse: string | null
+  onSelectHorse: (id: string | null) => void
+}) {
+  const nameMap = new Map(horses.map(h => [h.id, h.horseName]))
+
+  const summaryRows = trainingData.horses.map((hs: HorseTrainingSummary) => ({
+    horse_id: hs.horse_id,
+    latest: hs.sessions[0] ?? null,
+    sessions: hs.sessions,
+  }))
+
+  const selected = trainingData.horses.find(h => h.horse_id === selectedHorse) ?? null
+
+  return (
+    <div className="space-y-4">
+      {/* サマリーテーブル */}
+      <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-100 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          直近調教サマリー（最終追い切り）
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 text-xs text-gray-500">
+                <th className="px-3 py-2 text-left">馬名</th>
+                <th className="px-3 py-2 text-left">日付</th>
+                <th className="px-3 py-2 text-left">会場</th>
+                <th className="px-3 py-2 text-right">タイム</th>
+                <th className="px-3 py-2 text-right">上がり1F</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.map(row => (
+                <tr
+                  key={row.horse_id}
+                  onClick={() => onSelectHorse(selectedHorse === row.horse_id ? null : row.horse_id)}
+                  className={`border-t border-gray-100 cursor-pointer transition-colors ${
+                    selectedHorse === row.horse_id
+                      ? 'bg-emerald-50'
+                      : 'hover:bg-gray-50'
+                  }`}
+                >
+                  <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">
+                    {nameMap.get(row.horse_id) ?? row.horse_id}
+                  </td>
+                  {row.latest ? (
+                    <>
+                      <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{row.latest.training_date}</td>
+                      <td className="px-3 py-2 text-gray-600 whitespace-nowrap text-xs">{formatVenue(row.latest)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-800">{formatTotalTime(row.latest.time_total)}</td>
+                      <td className="px-3 py-2 text-right font-mono font-medium text-blue-600">{formatTotalTime(row.latest.lap_1)}</td>
+                    </>
+                  ) : (
+                    <td colSpan={4} className="px-3 py-2 text-gray-400 text-center text-xs">データなし</td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* 選択馬の全セッション詳細 */}
+      {selected && (
+        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            {nameMap.get(selected.horse_id) ?? selected.horse_id} — 直近2週間の調教
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-xs text-gray-500">
+                  <th className="px-3 py-2 text-left">日付</th>
+                  <th className="px-3 py-2 text-left">会場</th>
+                  <th className="px-3 py-2 text-right">タイム</th>
+                  <th className="px-3 py-2 text-right">ラップ（末4F）</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selected.sessions.map((s, i) => (
+                  <tr key={i} className="border-t border-gray-100">
+                    <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{s.training_date}</td>
+                    <td className="px-3 py-2 text-gray-600 whitespace-nowrap text-xs">{formatVenue(s)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-gray-800">{formatTotalTime(s.time_total)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-gray-600 whitespace-nowrap">{formatLaps(s)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── メインコンポーネント ──────────────────────────────────────────────────────
 
 export default function RaceDetailView({ raceId, onBack }: { raceId?: string; onBack?: () => void }) {
@@ -855,14 +979,17 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
   const [story,     setStory]     = useState<RaceStoryResult | null>(null)
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'standard' | 'pro' | 'story'>('standard')
+  const [activeTab, setActiveTab] = useState<'standard' | 'pro' | 'story' | 'training'>('standard')
+  const [trainingData,         setTrainingData]         = useState<RaceTrainingResponse | null>(null)
+  const [trainingLoading,      setTrainingLoading]      = useState(false)
+  const [selectedTrainingHorse, setSelectedTrainingHorse] = useState<string | null>(null)
   const [raceLevelModal, setRaceLevelModal] = useState<{ raceId: string; selfHorseId: string; selfRaceData: SelfRaceData | null } | null>(null)
 
   useEffect(() => {
     setLoading(true)
     setError(null)
     const id = raceId ?? '202606070511'
-    fetchRaceDetail(id)
+    fetchPublicRaceDetail(id)
       .then(raw => {
         const raceData = transformRaceData(raw)
         setRace(raceData)
@@ -871,6 +998,16 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
       .catch(() => setError('レースデータの取得に失敗しました'))
       .finally(() => setLoading(false))
   }, [raceId])
+
+  useEffect(() => {
+    if (activeTab !== 'training' || trainingData) return
+    const id = raceId ?? '202606070511'
+    setTrainingLoading(true)
+    fetchRaceTraining(id)
+      .then(data => setTrainingData(data))
+      .catch(() => {})
+      .finally(() => setTrainingLoading(false))
+  }, [activeTab, raceId, trainingData])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -893,7 +1030,7 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
             <button
               onClick={() => {
                 setLoading(true)
-                fetchRaceDetail(raceId ?? '202606070511')
+                fetchPublicRaceDetail(raceId ?? '202606070511')
                   .then(raw => {
                     const d = transformRaceData(raw)
                     setRace(d)
@@ -914,16 +1051,14 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
             {/* レースヘッダー */}
             <RaceHeaderPanel race={race} />
 
-            {/* 展開予想 / バイアス（常時表示） */}
-            <RaceSummaryPanel race={race} />
-
             {/* タブ切り替え */}
             <div className="flex border-b border-gray-200 bg-white rounded-t-xl px-1 pt-1 shadow-sm overflow-x-auto">
               {(
                 [
-                  { id: 'standard', label: '📊 AI出馬表' },
-                  { id: 'pro',      label: '📰 プロ馬柱' },
-                  { id: 'story',    label: '🗺️ 展開ストーリー' },
+                  { id: 'standard',  label: '📊 AI出馬表' },
+                  { id: 'pro',       label: '📰 プロ馬柱' },
+                  { id: 'story',     label: '🗺️ 展開ストーリー' },
+                  { id: 'training',  label: '🏃 調教・追い切り' },
                 ] as const
               ).map(tab => (
                 <button
@@ -943,44 +1078,47 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
             {/* ── Standard タブ ── */}
             {activeTab === 'standard' && (
               <>
-                {/* 隊列図 + 展開ストーリーリンク */}
-                {race.positioningMap && (
-                  <div className="space-y-2">
-                    <PositioningMapPanel
-                      positioningMap={race.positioningMap}
-                      horses={race.horses}
-                    />
-                    <button
-                      onClick={() => setActiveTab('story')}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg
-                                 border border-blue-200 bg-blue-50 hover:bg-blue-100 transition-colors
-                                 text-sm font-medium text-blue-600"
-                    >
-                      🗺️ 展開ストーリー・不利予測を見る →
-                    </button>
-                  </div>
-                )}
-
-                {/* 出馬表タイトル */}
+                {/* 1. AI出馬表 */}
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-semibold text-gray-700">AI出馬表</h2>
                   <span className="text-xs text-gray-400">AIポテンシャル順</span>
                 </div>
-
-                {/* PC テーブル */}
                 <HorseTable horses={race.horses} />
-
-                {/* モバイル アコーディオン */}
                 <HorseList horses={race.horses} />
+
+                {/* 2. AI隊列予想（出馬表の直下） */}
+                {race.positioningMap && (
+                  <PositioningMapPanel
+                    positioningMap={race.positioningMap}
+                    horses={race.horses}
+                  />
+                )}
+
+                {/* 3. 展開予想 / トラックバイアス予想 */}
+                <RaceSummaryPanel race={race} />
+
               </>
             )}
 
-            {/* ── Pro タブ ── */}
+            {/* ── Pro タブ（非認証ユーザー向けにブラー+CTA） ── */}
             {activeTab === 'pro' && (
-              <ProHorseTable
-                horses={race.horses}
-                onOpenModal={(raceId, selfHorseId, selfRaceData) => setRaceLevelModal({ raceId, selfHorseId, selfRaceData })}
-              />
+              <div className="relative overflow-hidden rounded-xl min-h-[320px]">
+                <div className="blur-sm pointer-events-none select-none opacity-40">
+                  <ProHorseTable
+                    horses={race.horses}
+                    onOpenModal={() => {}}
+                  />
+                </div>
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-white/70 backdrop-blur-sm">
+                  <p className="text-base font-bold text-gray-800">プロ馬柱はプレミアム会員向けです</p>
+                  <p className="text-sm text-gray-500 text-center max-w-xs">
+                    過去5走の詳細データ・EMP指数・調教評価など<br />すべての機能をご利用いただけます
+                  </p>
+                  <button className="px-6 py-2.5 rounded-lg text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-md transition-colors">
+                    ログインして全機能を使う
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* ── 展開ストーリータブ ── */}
@@ -989,6 +1127,22 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
             )}
             {activeTab === 'story' && !story && (
               <div className="py-8 text-center text-gray-400 text-sm">展開データ処理中...</div>
+            )}
+
+            {/* ── 調教・追い切りタブ ── */}
+            {activeTab === 'training' && trainingLoading && (
+              <div className="py-8 text-center text-gray-400 text-sm">調教データ取得中...</div>
+            )}
+            {activeTab === 'training' && !trainingLoading && !trainingData && (
+              <div className="py-8 text-center text-gray-400 text-sm">調教データがありません</div>
+            )}
+            {activeTab === 'training' && !trainingLoading && trainingData && (
+              <TrainingPanel
+                trainingData={trainingData}
+                horses={race.horses}
+                selectedHorse={selectedTrainingHorse}
+                onSelectHorse={setSelectedTrainingHorse}
+              />
             )}
           </>
         )}

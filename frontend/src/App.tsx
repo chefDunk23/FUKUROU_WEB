@@ -11,6 +11,7 @@ import DevView           from './views/DevView'
 import UserHomeView      from './views/UserHomeView'
 import RaceListView      from './views/race/RaceListView'
 import RaceDetailView    from './views/race/RaceDetailView'
+import AnalysisPage      from './views/analysis/AnalysisPage'
 
 // ── 開発者向けビュー（ユーザー向けとは完全独立） ──────────────────────────────
 import DevRaceDetailView from './views/dev/DevRaceDetailView'
@@ -27,6 +28,7 @@ function getRoute(): Route {
   if (p.startsWith('/race-level/'))  return 'race-level'
   if (p.startsWith('/race/') || p === '/race') return 'race'
   if (p.startsWith('/races'))        return 'races'
+  if (p.startsWith('/analysis'))     return 'analysis'
   if (p.startsWith('/datalab'))      return 'datalab'
   if (p.startsWith('/myai'))         return 'myai'
   return 'home'
@@ -142,6 +144,7 @@ export default function App() {
       {route === 'races'      && <RaceListView />}
       {route === 'race'       && <RaceDetailView raceId={raceId ?? undefined} onBack={() => navigate('/')} />}
       {route === 'race-level' && <RaceLevelView raceId={raceLevelId ?? undefined} onBack={() => window.history.back()} />}
+      {route === 'analysis'   && <AnalysisPage />}
       {route === 'datalab'    && <ComingSoonView title="データラボ" />}
       {route === 'myai'       && <ComingSoonView title="MyAI作成" />}
     </div>

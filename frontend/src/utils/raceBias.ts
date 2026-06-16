@@ -24,13 +24,28 @@ import type { RaceLevelOpponent } from '../api/raceDetail'
 export type FinishBias = '前残り' | '差し決着' | '中間' | null
 export type GateBias   = '内枠有利' | '外枠有利' | '均等' | null
 
+export interface UpsetHorseEntry {
+  horseId:      string
+  horseName:    string | null
+  thisRank:     number
+  nextRaceRank: number
+  gateNum:      number | null
+}
+
+export interface UpsetBiasResult {
+  upsetHorses: UpsetHorseEntry[]
+  upsetCount:  number
+  note:        string | null
+}
+
 export interface RaceBiasResult {
-  finishBias:     FinishBias    // 前残り/差し決着
-  gateBias:       GateBias      // 内枠/外枠有利
-  finishBiasNote: string | null // 詳細テキスト
-  gateBiasNote:   string | null // 詳細テキスト
-  topNUsed:       number        // 分析に使った上位頭数
-  sampleSize:     number        // 全対象頭数
+  finishBias:     FinishBias         // 前残り/差し決着
+  gateBias:       GateBias           // 内枠/外枠有利
+  finishBiasNote: string | null      // 詳細テキスト
+  gateBiasNote:   string | null      // 詳細テキスト
+  upsetBias:      UpsetBiasResult | null  // 補助シグナル: 上位馬の次走失速
+  topNUsed:       number             // 分析に使った上位頭数
+  sampleSize:     number             // 全対象頭数
 }
 
 // ── 内部定数 ──────────────────────────────────────────────────────────────────
@@ -57,7 +72,7 @@ export function analyzeRaceBias(
   const n = opponents.length
 
   if (n < MIN_SAMPLE) {
-    return { finishBias: null, gateBias: null, finishBiasNote: null, gateBiasNote: null, topNUsed: 0, sampleSize: n }
+    return { finishBias: null, gateBias: null, finishBiasNote: null, gateBiasNote: null, upsetBias: null, topNUsed: 0, sampleSize: n }
   }
 
   const k = topN ?? Math.min(3, Math.floor(n / 2))
@@ -115,5 +130,30 @@ export function analyzeRaceBias(
     }
   }
 
-  return { finishBias, gateBias, finishBiasNote, gateBiasNote, topNUsed: k, sampleSize: n }
+  // ── 補助シグナル: アップセット馬（3着以内→次走5着以下）────────────────────
+  // 上位馬が次走で大きく順位を落とした場合、このレースの展開・条件が
+  // その馬の能力以上の結果を引き出した可能性を示す補助的シグナル。
+  const upsetEntries: UpsetHorseEntry[] = opponents
+    .filter(o => o.thisRank <= 3 && o.nextRaceRank != null && o.nextRaceRank >= 5)
+    .map(o => ({
+      horseId:      o.horseId,
+      horseName:    o.horseName ?? null,
+      thisRank:     o.thisRank,
+      nextRaceRank: o.nextRaceRank!,
+      gateNum:      o.gateNum ?? null,
+    }))
+
+  let upsetBias: UpsetBiasResult | null = null
+  if (upsetEntries.length > 0) {
+    const noteItems = upsetEntries
+      .map(h => `${h.horseName ?? h.horseId}（${h.thisRank}着→次走${h.nextRaceRank}着${h.gateNum != null ? `・枠${h.gateNum}` : ''}）`)
+      .join('、')
+    upsetBias = {
+      upsetHorses: upsetEntries,
+      upsetCount:  upsetEntries.length,
+      note:        `上位馬が次走で失速 → 展開恩恵の疑い: ${noteItems}`,
+    }
+  }
+
+  return { finishBias, gateBias, finishBiasNote, gateBiasNote, upsetBias, topNUsed: k, sampleSize: n }
 }

@@ -218,6 +218,46 @@ export function getThisWeekend(): { sat: string; sun: string } {
   return { sat: fmt(sat), sun: fmt(sun) }
 }
 
+/** 今週末を基点に offset 週分ずれた週末の土日を返す（offset=-1 で先週、+1 で来週）。 */
+export function getWeekendForOffset(offset: number): { sat: string; sun: string } {
+  const { sat: thisSat } = getThisWeekend()
+  const base = new Date(thisSat + 'T00:00:00')
+  base.setDate(base.getDate() + offset * 7)
+  const sun = new Date(base)
+  sun.setDate(base.getDate() + 1)
+  const fmt = (d: Date): string =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return { sat: fmt(base), sun: fmt(sun) }
+}
+
+/** 指定オフセット週のレース一覧を取得。offset=0 は今週末専用エンドポイントを使用。 */
+export async function fetchWeekRaces(weekOffset: number): Promise<WeekendRacesResponse> {
+  if (weekOffset === 0) return fetchWeekendRaces()
+
+  const { sat, sun } = getWeekendForOffset(weekOffset)
+  try {
+    const [satRaces, sunRaces] = await Promise.all([
+      fetchRacesByDate(sat),
+      fetchRacesByDate(sun),
+    ])
+    const races_by_date: Record<string, RaceSummary[]> = {}
+    const available_dates: string[] = []
+    if (satRaces.length > 0) { races_by_date[sat] = satRaces; available_dates.push(sat) }
+    if (sunRaces.length > 0) { races_by_date[sun] = sunRaces; available_dates.push(sun) }
+    if (available_dates.length === 0) {
+      races_by_date[sat] = []
+      available_dates.push(sat, sun)
+    }
+    return { available_dates, races_by_date }
+  } catch (err) {
+    if (import.meta.env.DEV) {
+      console.warn('[races] fetchWeekRaces failed — using mock fallback (dev only)', err)
+      return _buildMockWeekendRaces()
+    }
+    throw err
+  }
+}
+
 // ── マトリクス変換 ───────────────────────────────────────────────────────────
 export interface VenueColumn {
   keibajo_code:    string

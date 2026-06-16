@@ -6,8 +6,10 @@
  * APIが落ちていればモックデータにフォールバック。
  */
 import { useEffect, useState } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import {
-  fetchWeekendRaces,
+  fetchWeekRaces,
+  getWeekendForOffset,
   surfaceLabel,
   classBadgeStyle,
   shortClassLabel,
@@ -187,17 +189,18 @@ function ClassLegend() {
 
 // ── メインコンポーネント ──────────────────────────────────────────────────────
 export default function RaceListView() {
+  const [weekOffset, setWeekOffset] = useState(0)
   const [activeDate, setActiveDate] = useState('')
   const [cache, setCache]     = useState<Record<string, RaceSummary[]>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string | null>(null)
 
-  // /api/v2/races/weekend で土日を一括取得。APIが落ちていればモックにフォールバック済み。
-  function doLoad() {
+  function doLoad(offset: number) {
     setLoading(true)
     setError(null)
+    setCache({})
 
-    fetchWeekendRaces()
+    fetchWeekRaces(offset)
       .then(({ available_dates, races_by_date }) => {
         const newCache: Record<string, RaceSummary[]> = {}
         for (const d of available_dates) {
@@ -213,7 +216,7 @@ export default function RaceListView() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { doLoad() }, [])
+  useEffect(() => { doLoad(weekOffset) }, [weekOffset])
 
   // データドリブンなタブ: キャッシュにレースがある日付のみ生成
   const DAYS = Object.keys(cache)
@@ -225,6 +228,13 @@ export default function RaceListView() {
   const cs      = resolveCellStyle(venues.length > 0 ? venues.length : 2)
   const hasCondition = venues.some(v => v.tenko_code || v.shiba_baba_code || v.dirt_baba_code)
 
+  // 週ナビゲーション用ラベル
+  const { sat: wSat, sun: wSun } = getWeekendForOffset(weekOffset)
+  const wSatD = new Date(wSat + 'T00:00:00')
+  const wSunD = new Date(wSun + 'T00:00:00')
+  const weekName = weekOffset === 0 ? '今週' : weekOffset === -1 ? '先週' : weekOffset === 1 ? '来週' : `${weekOffset > 0 ? '+' : ''}${weekOffset}週`
+  const weekDateRange = `${wSatD.getMonth() + 1}/${wSatD.getDate()}–${wSunD.getDate()}`
+
   return (
     <div className="min-h-screen bg-gray-50">
 
@@ -232,8 +242,36 @@ export default function RaceListView() {
       <div className="bg-white border-b border-gray-200">
         <div className="max-w-screen-xl mx-auto px-6 pt-5 pb-0">
           <div className="flex items-baseline gap-4 mb-3 flex-wrap">
-            <h1 className="text-lg font-bold text-gray-900">本日のレース一覧</h1>
+            <h1 className="text-lg font-bold text-gray-900">レース一覧</h1>
             <ClassLegend />
+          </div>
+          {/* 週ナビゲーション */}
+          <div className="flex items-center gap-1 mb-3">
+            <button
+              onClick={() => setWeekOffset(o => o - 1)}
+              className="flex items-center gap-0.5 px-2.5 py-1.5 text-sm text-gray-500 hover:text-gray-800 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              <ChevronLeft className="w-4 h-4" />
+              先週
+            </button>
+            <span className="px-3 py-1 text-sm font-semibold text-gray-700">
+              {weekName} <span className="text-gray-400 font-normal text-xs ml-1">{weekDateRange}</span>
+            </span>
+            <button
+              onClick={() => setWeekOffset(o => o + 1)}
+              className="flex items-center gap-0.5 px-2.5 py-1.5 text-sm text-gray-500 hover:text-gray-800 rounded-md hover:bg-gray-100 transition-colors"
+            >
+              来週
+              <ChevronRight className="w-4 h-4" />
+            </button>
+            {weekOffset !== 0 && (
+              <button
+                onClick={() => setWeekOffset(0)}
+                className="ml-2 text-xs text-emerald-600 hover:text-emerald-700 underline"
+              >
+                今週に戻る
+              </button>
+            )}
           </div>
           {/* ローディング中はスケルトンタブ、完了後はデータドリブンタブ */}
           <div className="flex">
@@ -265,8 +303,12 @@ export default function RaceListView() {
           <ErrorMessage message={error} onRetry={doLoad} />
         )}
 
-        {!loading && !error && races.length === 0 && DAYS.length === 0 && (
-          <EmptyMessage date={activeDate} />
+        {!loading && !error && DAYS.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-16 gap-3 text-center text-gray-500">
+            <div className="text-4xl">🏇</div>
+            <p className="text-sm">レース情報はまだありません</p>
+            <p className="text-xs text-gray-400">開催がない週か、まだデータが取得されていない可能性があります</p>
+          </div>
         )}
 
         {(!error && (loading || (races && races.length > 0))) && (
@@ -339,7 +381,7 @@ export default function RaceListView() {
                 <span className="text-xs text-gray-400">
                   {venues.length}場開催　{races?.length ?? 0}レース
                 </span>
-                <span className="text-xs text-gray-300">source: /api/v2/races</span>
+                <span className="text-xs text-gray-300">source: /api/v2/races · {weekName}</span>
               </div>
             )}
           </div>

@@ -380,7 +380,7 @@ const GATE_BIAS_CLS: Record<string, { bg: string; text: string; ring: string; ic
 }
 
 function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
-  const hasAny = bias.finishBias != null || bias.gateBias != null
+  const hasAny = bias.finishBias != null || bias.gateBias != null || bias.upsetBias != null
   if (!hasAny) return null
 
   return (
@@ -418,8 +418,20 @@ function RaceBiasPanel({ bias }: { bias: RaceBiasResult }) {
           )
         })()}
 
-        {bias.finishBias === '中間' && bias.gateBias === '均等' && (
+        {bias.finishBias === '中間' && bias.gateBias === '均等' && !bias.upsetBias && (
           <p className="text-[11px] text-gray-400 py-1">枠番・決着ともに偏りなし（平均的なレース）</p>
+        )}
+
+        {bias.upsetBias && (
+          <div className="w-full rounded-lg px-3 py-2.5 ring-1 bg-amber-50 ring-amber-200">
+            <div className="flex items-center gap-1.5 font-bold text-sm text-amber-700">
+              <span>&#9888;</span>
+              <span>補助シグナル: 展開恩恵疑い（上位{bias.upsetBias.upsetCount}頭が次走失速）</span>
+            </div>
+            {bias.upsetBias.note && (
+              <p className="text-[10px] text-gray-500 mt-1 leading-snug">{bias.upsetBias.note}</p>
+            )}
+          </div>
         )}
       </div>
     </div>

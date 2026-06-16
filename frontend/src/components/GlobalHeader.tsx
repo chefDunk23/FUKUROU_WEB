@@ -1,13 +1,14 @@
 import type { MouseEvent } from 'react'
 
 // ── 型 / 定数 ─────────────────────────────────────────────────────────────────
-export type AppRoute = 'home' | 'races' | 'datalab' | 'myai'
+export type AppRoute = 'home' | 'races' | 'analysis' | 'datalab' | 'myai'
 
 const NAV_ITEMS: { id: AppRoute; label: string; href: string }[] = [
-  { id: 'home',    label: 'ホーム',      href: '/' },
-  { id: 'races',   label: 'レース一覧',  href: '/races' },
-  { id: 'datalab', label: 'データラボ',  href: '/datalab' },
-  { id: 'myai',    label: 'MyAI作成',   href: '/myai' },
+  { id: 'home',     label: 'ホーム',       href: '/' },
+  { id: 'races',    label: 'レース一覧',   href: '/races' },
+  { id: 'analysis', label: 'データ分析',   href: '/analysis' },
+  { id: 'datalab',  label: 'データラボ',   href: '/datalab' },
+  { id: 'myai',     label: 'MyAI作成',    href: '/myai' },
 ]
 
 interface GlobalHeaderProps {
