@@ -32,6 +32,7 @@ from api_v2.deps import rate_limit_predict
 from shared.config import PATHS
 from shared.db.jvdata import get_conn as get_v2_conn
 from shared.db.jvdl import get_conn as get_jvdl_conn
+from shared.services.model_version import get_model_version
 from src.features.ability_features_v3 import (
     ABILITY_V3_COLS,
     create_ability_features_v3,
@@ -378,6 +379,10 @@ SELECT
     r.race_name_hondai, r.distance, r.track_code, r.course_kubun,
     r.grade_code, r.tenko_code, r.shiba_baba_code, r.dirt_baba_code,
     r.zen_3f, r.go_3f, r.lap_time_array,
+    NULLIF(TRIM(r.joken_code_2), '000') AS jyoken_cd_2,
+    NULLIF(TRIM(r.joken_code_3), '000') AS jyoken_cd_3,
+    NULLIF(TRIM(r.joken_code_4), '000') AS jyoken_cd_4,
+    NULLIF(TRIM(r.joken_code_5), '000') AS jyoken_cd_5,
     e.umaban, e.horse_id, e.horse_name, e.trainer_cd, e.jockey_cd,
     e.horse_weight, e.weight_diff, e.basis_weight,
     e.tan_odds, e.ninki, e.kakutei_chakujun,
@@ -401,6 +406,10 @@ SELECT
     r.race_date,
     e.kakutei_chakujun,
     r.grade_code,
+    NULLIF(TRIM(r.joken_code_2), '000') AS jyoken_cd_2,
+    NULLIF(TRIM(r.joken_code_3), '000') AS jyoken_cd_3,
+    NULLIF(TRIM(r.joken_code_4), '000') AS jyoken_cd_4,
+    NULLIF(TRIM(r.joken_code_5), '000') AS jyoken_cd_5,
     e.umaban,
     e.corner_1,
     e.corner_2,
@@ -435,7 +444,8 @@ def _fetch_horse_history(horse_ids: list[str], race_date) -> pd.DataFrame:
 
 _HIST_COLS = [
     "horse_id", "race_id", "race_date", "kakutei_chakujun",
-    "grade_code", "umaban", "corner_1", "corner_2", "corner_3", "corner_4",
+    "grade_code", "jyoken_cd_2", "jyoken_cd_3", "jyoken_cd_4", "jyoken_cd_5",
+    "umaban", "corner_1", "corner_2", "corner_3", "corner_4",
     "go_3f_time", "distance", "track_code", "keibajo_code", "horse_weight", "field_size",
 ]
 
@@ -455,7 +465,10 @@ def _compute_rolling_features(
         hist = _fetch_horse_history(horse_ids, race_date)
 
         # current-race stub: 結果列を NaN にしてリーク防止
-        stub = df[["horse_id", "race_date", "umaban", "distance", "track_code", "keibajo_code", "grade_code"]].copy()
+        _stub_cols = ["horse_id", "race_date", "umaban", "distance", "track_code",
+                      "keibajo_code", "grade_code",
+                      "jyoken_cd_2", "jyoken_cd_3", "jyoken_cd_4", "jyoken_cd_5"]
+        stub = df[[c for c in _stub_cols if c in df.columns]].copy()
         stub["horse_id"] = stub["horse_id"].astype(str)
         stub["race_id"] = str(target_race_id)
         stub["kakutei_chakujun"] = np.nan
@@ -603,7 +616,9 @@ def _fill_lineage_from_jvdl(df: pd.DataFrame, horse_ids: list[str]) -> pd.DataFr
             if jvdl_col in df.columns:
                 df[col] = df.get(col, pd.Series("1", index=df.index)).combine_first(df[jvdl_col])
                 df = df.drop(columns=[jvdl_col])
-        df["horse_sex"] = df.get("sex", pd.Series("1", index=df.index)).astype(str).fillna("1")
+        df["horse_sex"] = pd.to_numeric(
+            df.get("sex", pd.Series(1, index=df.index)), errors="coerce"
+        ).fillna(1).astype(int)
     except Exception as exc:
         logger.warning("[Lineage] jvdl lineage lookup failed: %s", exc)
     return df
@@ -1038,31 +1053,66 @@ def _build_features(
 
 # ── エンドポイント ────────────────────────────────────────────────────────────
 
-@router.get("/predict/{race_id}", response_model=RacePredictionResponse)
-def predict_race(
+# ── DBキャッシュ（race_predictions テーブル） ────────────────────────────────
+
+_SQL_CACHE_SELECT = """
+    SELECT payload FROM race_predictions
+    WHERE race_id = %s AND model_version = %s
+"""
+_SQL_CACHE_UPSERT = """
+    INSERT INTO race_predictions (race_id, model_version, predicted_at, payload)
+    VALUES (%s, %s, now(), %s)
+    ON CONFLICT (race_id) DO UPDATE
+      SET model_version = EXCLUDED.model_version,
+          predicted_at  = EXCLUDED.predicted_at,
+          payload       = EXCLUDED.payload
+"""
+
+
+def _get_cached_prediction(race_id: str) -> "RacePredictionResponse | None":
+    """race_predictions からモデルバージョン一致のキャッシュを取得する。障害時は None を返す。"""
+    model_ver = get_model_version()
+    try:
+        with get_jvdl_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(_SQL_CACHE_SELECT, (race_id, model_ver))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return RacePredictionResponse.model_validate(row["payload"])
+    except Exception:
+        logger.exception("[V2Predict] キャッシュ読み取り失敗 race_id=%s", race_id)
+        return None
+
+
+def _save_prediction_cache(resp: "RacePredictionResponse") -> None:
+    """race_predictions テーブルに予測結果を UPSERT する。障害時はログのみ（予測は返す）。"""
+    model_ver = get_model_version()
+    try:
+        with get_jvdl_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _SQL_CACHE_UPSERT,
+                    (resp.race_id, model_ver, psycopg2.extras.Json(resp.model_dump(mode="json"))),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("[V2Predict] キャッシュ保存失敗 race_id=%s", resp.race_id)
+
+
+# ── コア予測計算（エンドポイント・バッチ共用） ───────────────────────────────
+
+def _compute_prediction(
     race_id: str,
-    include_evidence: bool = Query(
-        False,
-        description="true にすると各馬の SHAP 貢献度・根拠特徴量を evidence フィールドに付与する",
-    ),
-    _: None = Depends(rate_limit_predict),
-) -> RacePredictionResponse:
-    logger.info("[V2Predict] race_id=%s include_evidence=%s", race_id, include_evidence)
+    include_evidence: bool = False,
+) -> "RacePredictionResponse | None":
+    """予測を計算して返す。モデル未ロードは FileNotFoundError を送出。レース未発見は None を返す。"""
+    dual_engine = _get_dual_engine()  # FileNotFoundError を呼び出し元に伝播
 
-    try:
-        dual_engine = _get_dual_engine()
-    except FileNotFoundError as e:
-        logger.error("[V2Predict] モデルファイル未検出: %s", e)
-        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
-
-    try:
-        raw_df, X_all, contrib_map = _build_features(race_id, include_contrib=include_evidence)
-    except Exception as e:
-        logger.exception("[V2Predict] 特徴量構築エラー: %s", e)
-        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
+    raw_df, X_all, contrib_map = _build_features(race_id, include_contrib=include_evidence)
 
     if raw_df.empty:
-        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
+        return None
 
     # サーフェス判定 → エンジン・特徴量列を選択
     track_code = str(raw_df["track_code"].iloc[0]) if "track_code" in raw_df.columns else "10"
@@ -1160,3 +1210,38 @@ def predict_race(
         used_model_type=used_model_type,
         ai_description=ai_description,
     )
+
+
+@router.get("/predict/{race_id}", response_model=RacePredictionResponse)
+def predict_race(
+    race_id: str,
+    include_evidence: bool = Query(
+        False,
+        description="true にすると各馬の SHAP 貢献度・根拠特徴量を evidence フィールドに付与する",
+    ),
+    _: None = Depends(rate_limit_predict),
+) -> RacePredictionResponse:
+    logger.info("[V2Predict] race_id=%s include_evidence=%s", race_id, include_evidence)
+
+    if not include_evidence:
+        cached = _get_cached_prediction(race_id)
+        if cached is not None:
+            logger.info("[V2Predict] cache hit: %s", race_id)
+            return cached
+
+    try:
+        resp = _compute_prediction(race_id, include_evidence=include_evidence)
+    except FileNotFoundError as e:
+        logger.error("[V2Predict] モデルファイル未検出: %s", e)
+        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
+    except Exception as e:
+        logger.exception("[V2Predict] 特徴量構築エラー: %s", e)
+        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
+
+    if resp is None:
+        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
+
+    if not include_evidence:
+        _save_prediction_cache(resp)
+
+    return resp

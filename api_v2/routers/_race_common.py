@@ -30,11 +30,28 @@ _GRADE_TO_LABEL: dict[str, str] = {
     # Tier 6 フォールバックでのみ明示的に扱う（_compute_class_label 参照）
 }
 
+# JV-Data 公式コード表2003（グレードコード）準拠のラベル変換。
+# jvdl_parser 経由で取り込んだデータに使う。keiba_v2 独自符号化の _GRADE_TO_LABEL とは別物。
+# 公式定義: A=G1 / B=G2 / C=G3 / D=グレードなし重賞 / E=特別競走 / F=障害G1 / G=障害G2 / H=障害G3 / L=Listed
+# E=特別 は意図的に除外 — jyoken_cd(Tier2)で "1勝クラス"/"3勝クラス"等に細分化するため。
+# E に grade_code=='E' の意味は is_special フラグで別途保持する。
+JV_GRADE_TO_LABEL: dict[str, str] = {
+    "A": "G1",
+    "B": "G2",
+    "C": "G3",
+    "D": "重賞",
+    "F": "J・G1",
+    "G": "J・G2",
+    "H": "J・G3",
+    "L": "Listed",
+}
+
 # jyoken_cd → 条件名 (jvdl DB — パーサーのバイト位置修正後に確認済みの実測値)
 # 701: 新馬 / 703: 未勝利 / 005: 1勝クラス(旧500万下) / 010: 2勝クラス(旧1000万下)
 # 016: 3勝クラス(旧1600万下) / 999: オープン
 _JYOKEN_TO_CLASS: dict[str, str] = {
     "701": "新馬",
+    "702": "未出走",
     "703": "未勝利",
     "005": "1勝クラス",
     "010": "2勝クラス",
@@ -48,15 +65,58 @@ _RACE_TYPE_TO_AGE: dict[str, str] = {
     "14": "4歳以上", "15": "4歳以上", "17": "障害",
 }
 
-# grade_code → class_score 点数表（75点満点スケール）
+# grade_code → class_score 点数表（75点満点スケール、旧 keiba_v2 スキーマ用）
 _GRADE_CLASS_SCORE: dict[str, float] = {
     "A": 15.0, "G": 15.0, "A01": 15.0,   # G1
     "B": 13.0, "F": 13.0, "A02": 13.0,   # G2
     "C": 11.0, "D": 11.0, "A03": 11.0,   # G3
     "L": 9.0,  "A04": 9.0,               # Listed / OP
-    "H": 7.0,                             # 2勝クラス
-    "E": 5.0,                             # 1勝クラス
+    "H": 7.0,                             # 2勝クラス (旧スキーマ)
+    "E": 5.0,                             # 1勝クラス (旧スキーマ)
 }
+
+# JV-Data 公式グレードコード → class_score（75点満点スケール）
+# E は jyoken_cd から導出するため含まない — compute_jv_class_score() を使うこと。
+# 障害重賞 (F/G/H) は平地同格扱い（F=G1相当=15点、G=G2相当=13点、H=G3相当=11点）。
+JV_GRADE_CLASS_SCORE: dict[str, float] = {
+    "A": 15.0, "F": 15.0,  # G1 / 障害G1
+    "B": 13.0, "G": 13.0,  # G2 / 障害G2
+    "C": 11.0, "H": 11.0,  # G3 / 障害G3
+    "L": 9.0,              # Listed
+    "D": 10.0,             # 格なし重賞
+}
+
+# jyoken_cd → class_score (E grade の細分化用)
+_JYOKEN_TO_CLASS_SCORE: dict[str, float] = {
+    "701": 3.0,  # 新馬
+    "702": 3.0,  # 未出走
+    "703": 3.0,  # 未勝利
+    "005": 5.0,  # 1勝クラス
+    "010": 7.0,  # 2勝クラス
+    "016": 8.0,  # 3勝クラス
+    "999": 9.0,  # オープン
+}
+
+
+def compute_jv_class_score(
+    grade_code: str | None,
+    jyoken_cds: tuple[str | None, ...] = (),
+) -> float:
+    """JV-Data grade_code + jyoken_cd から 0〜15 のクラス補正スコアを返す。
+    grade_code が JV_GRADE_CLASS_SCORE に存在しない（E など）場合は
+    jyoken_cds の最初の有効値から _JYOKEN_TO_CLASS_SCORE を引く。
+    """
+    g = (grade_code or "").strip()
+    score = JV_GRADE_CLASS_SCORE.get(g)
+    if score is not None:
+        return score
+    for jy_raw in jyoken_cds:
+        jy = (jy_raw or "").strip()
+        if jy and jy != "000":
+            s = _JYOKEN_TO_CLASS_SCORE.get(jy)
+            if s is not None:
+                return s
+    return 3.0  # 不明 → 新馬/未勝利相当
 
 # ── 重賞ルックアップテーブル ──────────────────────────────────────────────────
 # race_name に含まれる文字列 → グレードラベル（G1/G2/G3）
@@ -173,7 +233,7 @@ _CLASS_REGEX: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 # 天候・馬場コード変換
-_TENKO_LABEL: dict[str, str] = {"1": "晴", "2": "曇", "3": "雨", "4": "小雨"}
+_TENKO_LABEL: dict[str, str] = {"1": "晴", "2": "曇", "3": "雨", "4": "小雨", "5": "雪", "6": "小雪"}
 _BABA_LABEL:  dict[str, str] = {"1": "良", "2": "稍重", "3": "重",  "4": "不良"}
 
 # ── 純粋ユーティリティ ────────────────────────────────────────────────────────

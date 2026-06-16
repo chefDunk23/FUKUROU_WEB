@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -26,17 +26,13 @@ import psycopg2.extras
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
-try:
-    import redis as _redis_mod
-    _REDIS_AVAILABLE = True
-except ImportError:
-    _REDIS_AVAILABLE = False
-
 from api_v2.deps import rate_limit_predict
-from shared.config import REDIS_HOST, REDIS_PORT
+from shared.cache import RACE_DETAIL_CACHE_PFX, get_redis_client
 from shared.db.jvdl import get_conn as get_jvdl_conn
 from shared.db.jvdata import get_conn as get_v2_conn
+from shared.services.model_version import get_model_version
 from ._race_common import (
+    JV_GRADE_TO_LABEL,
     _BABA_LABEL,
     _CLASS_REGEX,
     _GRADE_CLASS_SCORE,
@@ -209,6 +205,7 @@ class RaceSummary(BaseModel):
     syusso_tosu: int | None
     hassou_time: str | None = None      # "HH:MM" 形式
     class_label: str | None = None      # "G1", "3歳未勝利", "2歳新馬" 等
+    is_special: bool = False            # JV-Data grade_code=='E'（特別競走）フラグ
     tenko_code: str | None = None
     shiba_baba_code: str | None = None
     dirt_baba_code: str | None = None
@@ -280,6 +277,7 @@ def _build_from_jvdl(rows: list) -> list[RaceSummary]:
             syusso_tosu  = int(row["syusso_tosu"]) if row["syusso_tosu"] else None,
             hassou_time  = _fmt_time(row.get("start_time")),
             class_label  = lbl,
+            is_special   = (grade == "E"),
         ))
     return summaries
 
@@ -500,11 +498,13 @@ class RaceDetailResponse(BaseModel):
     track_code:      str
     grade_code:      str | None = None
     class_label:     str | None = None   # "G1", "3歳未勝利", "2歳新馬" 等
+    is_special:      bool = False        # JV-Data grade_code=='E'（特別競走）フラグ
     syusso_tosu:     int
     weather:         str
     track_condition: str
     race_info:       RaceInfo
     horses:          list[RaceDetailHorse]
+    computed_at:     str | None = None   # ISO8601 UTC — キャッシュ生成タイムスタンプ
 
 
 class TrainingSession(BaseModel):
@@ -542,44 +542,55 @@ from api_v2.routers.prediction import (  # noqa: E402
 )
 
 # ── Redis キャッシュ（fail-open: 未起動でもエンドポイントは正常動作）────────────
+# 接続ロジック本体は shared/cache.py に共通化済み（get_redis_client）。
 
-_CACHE_TTL  = 300           # 5 分: リアルタイムオッズ・馬体重の変化を反映
-_CACHE_PFX  = "keiba:race_detail:"
-
-_redis_client       = None
-_REDIS_CIRCUIT_OPEN = False   # True になると以降の接続試行を即座にスキップ
+_CACHE_TTL = 300           # 5 分: リアルタイムオッズ・馬体重の変化を反映
+_CACHE_PFX = RACE_DETAIL_CACHE_PFX
 
 
-def _get_redis():
-    """Redis クライアントを返す。
+# ── DB 永続キャッシュ（race_detail_cache テーブル）────────────────────────────
 
-    サーキットブレーカー付き fail-open 設計:
-    - 初回接続失敗で _REDIS_CIRCUIT_OPEN = True にセット
-    - 以降のリクエストはフラグ確認のみで即 None を返す（ブロッキングなし）
-    - Redis が復帰したい場合はサーバー再起動でフラグがリセットされる
-    """
-    global _redis_client, _REDIS_CIRCUIT_OPEN
+_SQL_DETAIL_SELECT = """
+    SELECT payload FROM race_detail_cache
+    WHERE race_id = %s AND model_version = %s
+"""
+_SQL_DETAIL_UPSERT = """
+    INSERT INTO race_detail_cache (race_id, model_version, computed_at, payload)
+    VALUES (%s, %s, now(), %s)
+    ON CONFLICT (race_id) DO UPDATE
+      SET model_version = EXCLUDED.model_version,
+          computed_at   = EXCLUDED.computed_at,
+          payload       = EXCLUDED.payload
+"""
 
-    if not _REDIS_AVAILABLE or _REDIS_CIRCUIT_OPEN:
+
+def _get_cached_detail(race_id: str, model_version: str) -> "RaceDetailResponse | None":
+    """race_detail_cache からモデルバージョン一致のキャッシュを取得する。障害時は None を返す。"""
+    try:
+        with get_jvdl_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(_SQL_DETAIL_SELECT, (race_id, model_version))
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return RaceDetailResponse.model_validate(row["payload"])
+    except Exception:
+        logger.exception("[Cache/DB] detail cache 読み取り失敗 race_id=%s", race_id)
         return None
 
-    if _redis_client is not None:
-        return _redis_client
 
-    # 初回のみ接続試行
+def _save_detail_cache(resp: "RaceDetailResponse", model_version: str) -> None:
+    """race_detail_cache テーブルに詳細データを UPSERT する。障害時はログのみ。"""
     try:
-        _redis_client = _redis_mod.Redis(
-            host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
-            socket_connect_timeout=0.3, socket_timeout=0.3,
-        )
-        _redis_client.ping()
-        logger.info("[Cache] Redis connected (localhost:6379)")
-    except Exception as e:
-        logger.info("[Cache] Redis unavailable (%s) — circuit open, caching disabled", e)
-        _redis_client       = None
-        _REDIS_CIRCUIT_OPEN = True   # 以降の接続試行を完全遮断
-
-    return _redis_client
+        with get_jvdl_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    _SQL_DETAIL_UPSERT,
+                    (resp.race_id, model_version, psycopg2.extras.Json(resp.model_dump(mode="json"))),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("[Cache/DB] detail cache 保存失敗 race_id=%s", resp.race_id)
 
 
 # ── 展開予想（pace simulation）────────────────────────────────────────────────
@@ -1491,86 +1502,37 @@ def get_race_training(race_id: str) -> RaceTrainingResponse:
     )
 
 
-@router.get("/races/{race_id}", response_model=RaceDetailResponse)
-def get_race_detail(
-    race_id: str,
-    _: None = Depends(rate_limit_predict),
-) -> Response | RaceDetailResponse:
+def _compute_detail(race_id: str) -> "RaceDetailResponse | None":
+    """DB + LightGBM 推論による完全計算。
+
+    戻り値:
+        RaceDetailResponse — 計算成功（computed_at に UTC ISO8601 を付与）
+        None               — レース未発見（raw_df.empty）
+    送出:
+        FileNotFoundError  — モデルファイル未ロード
+        Exception          — その他エラー（呼び出し元でハンドリング）
     """
-    レース詳細を返す。
-    Redisキャッシュ（TTL 5分）→ DB + LightGBM 推論 の順に処理する。
-    各ステップの処理時間は [Timing] プレフィックスで logger.info に出力される。
-    """
-    t_total_start = time.perf_counter()
-    logger.info("[V2RaceDetail] race_id=%s", race_id)
-
-    # ── Step1: Redisキャッシュ確認 ──────────────────────────────────────────
-    t_s1 = time.perf_counter()
-    cache_key  = f"{_CACHE_PFX}{race_id}"
-    r          = _get_redis()
-    redis_status = "Offline" if r is None else "MISS"
-
-    if r:
-        try:
-            cached = r.get(cache_key)
-            if cached:
-                elapsed_s1 = time.perf_counter() - t_s1
-                elapsed_total = time.perf_counter() - t_total_start
-                logger.info(
-                    "[Timing] race_id=%s\n"
-                    "[Timing]   S1  Redis                     HIT       %6.3fs\n"
-                    "[Timing]   ----------------------------------------------\n"
-                    "[Timing]   TOTAL (cache hit)                       %6.3fs",
-                    race_id, elapsed_s1, elapsed_total,
-                )
-                return Response(
-                    content=cached,
-                    media_type="application/json",
-                    headers={"X-Cache": "HIT"},
-                )
-        except Exception as e:
-            logger.warning("[Cache] get失敗（処理継続）: %s", e)
-            redis_status = "Error"
-
-    elapsed_s1 = time.perf_counter() - t_s1
-
-    # ── Step2: _build_features（DB取得 + 特徴量計算 + 6サブモデル推論）───────
+    # Step2: _build_features（DB取得 + 特徴量計算 + 6サブモデル推論）
     t_s2 = time.perf_counter()
-    try:
-        raw_df, X, *_ = _build_features(race_id)
-    except FileNotFoundError as e:
-        logger.error("[V2RaceDetail] AIモデルファイル未検出: %s", e)
-        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
-    except Exception as e:
-        logger.exception("[V2RaceDetail] 特徴量構築エラー: %s", e)
-        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
-
+    raw_df, X, *_ = _build_features(race_id)
     elapsed_s2 = time.perf_counter() - t_s2
 
     if raw_df.empty:
-        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
+        return None
 
-    # ── Step3: メインアンサンブル推論（LightGBM）────────────────────────────
+    # Step3: メインアンサンブル推論（LightGBM）
     t_s3 = time.perf_counter()
-    try:
-        dual_engine = _get_dual_engine()
-        tc      = str(raw_df["track_code"].iloc[0]).strip()
-        surface = _detect_surface(tc)
-        engine  = dual_engine.dirt if surface == "dirt" else dual_engine.turf
-        active  = _DIRT_SUBMODEL_SCORES if surface == "dirt" else _TURF_SUBMODEL_SCORES
+    dual_engine = _get_dual_engine()
+    tc      = str(raw_df["track_code"].iloc[0]).strip()
+    surface = _detect_surface(tc)
+    engine  = dual_engine.dirt if surface == "dirt" else dual_engine.turf
+    active  = _DIRT_SUBMODEL_SCORES if surface == "dirt" else _TURF_SUBMODEL_SCORES
 
-        X_in = X[active].copy()
-        for feat in engine.feature_names:
-            if feat not in X_in.columns:
-                X_in[feat] = np.nan
-        scores = engine.predict(X_in[engine.feature_names])
-    except FileNotFoundError as e:
-        logger.error("[V2RaceDetail] メインモデルファイル未検出: %s", e)
-        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
-    except Exception as e:
-        logger.exception("[V2RaceDetail] メインアンサンブル推論エラー: %s", e)
-        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
-
+    X_in = X[active].copy()
+    for feat in engine.feature_names:
+        if feat not in X_in.columns:
+            X_in[feat] = np.nan
+    scores = engine.predict(X_in[engine.feature_names])
     elapsed_s3 = time.perf_counter() - t_s3
 
     # ai_rank は生スコアの順序で確定（T-score 変換前）
@@ -1581,7 +1543,7 @@ def get_race_detail(
         .tolist()
     )
 
-    # ── Step4: T-score変換 + 補完クエリ + Pydanticマッピング ─────────────────
+    # Step4: T-score変換 + 補完クエリ + Pydanticマッピング
     t_s4 = time.perf_counter()
 
     # EMP T-score 変換（係数25: z≈+1.5σ の馬が87付近 → Sランク）
@@ -1763,7 +1725,21 @@ def get_race_detail(
 
     horses_out.sort(key=lambda h: h.ai_rank)
 
-    response = RaceDetailResponse(
+    elapsed_s4 = time.perf_counter() - t_s4
+    logger.info(
+        "[Timing/compute_detail] race_id=%s horses=%d S2=%.3fs S3=%.3fs S4=%.3fs",
+        race_id, len(horses_out), elapsed_s2, elapsed_s3, elapsed_s4,
+    )
+
+    # is_special: jyoken_cd の有無で JV-Data スキーマ(E=特別競走) か
+    # 旧 keiba_v2 スキーマ(E=1勝クラス) かを区別する。
+    _has_jyoken = any(
+        (str(first.get(f) or "").strip() not in ("", "000"))
+        for f in ("jyoken_cd_2", "jyoken_cd_3", "jyoken_cd_4", "jyoken_cd_5")
+    )
+    is_special_flag = grade_str == "E" and _has_jyoken
+
+    return RaceDetailResponse(
         race_id         = race_id,
         race_date       = str(pd.Timestamp(race_date).date()),
         keibajo_name    = _KEIBAJO_NAME.get(kc, kc),
@@ -1773,6 +1749,7 @@ def get_race_detail(
         track_code      = str(first.get("track_code", "10")).strip().zfill(2),
         grade_code      = grade_str,
         class_label     = class_label_str,
+        is_special      = is_special_flag,
         syusso_tosu     = len(horses_out),
         weather         = weather,
         track_condition = track_condition,
@@ -1782,37 +1759,92 @@ def get_race_detail(
             positioning_map = positioning_map,
             track_bias      = track_bias_result,
         ),
-        horses = horses_out,
+        horses      = horses_out,
+        computed_at = datetime.now(timezone.utc).isoformat(),
     )
 
-    elapsed_s4    = time.perf_counter() - t_s4
-    elapsed_total = time.perf_counter() - t_total_start
 
-    # ── タイミングサマリーログ ───────────────────────────────────────────────
-    logger.info(
-        "[Timing] race_id=%s  horses=%d\n"
-        "[Timing]   S1  Redis %-7s                    %6.3fs\n"
-        "[Timing]   S2  _build_features (DB+6submodel) %6.3fs\n"
-        "[Timing]   S3  Main LightGBM ensemble          %6.3fs\n"
-        "[Timing]   S4  T-score + queries + Pydantic    %6.3fs\n"
-        "[Timing]   -----------------------------------------------\n"
-        "[Timing]   TOTAL                               %6.3fs",
-        race_id,
-        len(horses_out),
-        redis_status,
-        elapsed_s1,
-        elapsed_s2,
-        elapsed_s3,
-        elapsed_s4,
-        elapsed_total,
-    )
+@router.get("/races/{race_id}", response_model=RaceDetailResponse)
+def get_race_detail(
+    race_id: str,
+    _: None = Depends(rate_limit_predict),
+) -> Response | RaceDetailResponse:
+    """
+    レース詳細を返す。
+    Redis（TTL 5分）→ DB 永続キャッシュ（model_version 一致）→ live計算 の3段で処理する。
+    live計算後は DB + Redis 両方に保存する。
+    """
+    t_total_start = time.perf_counter()
+    logger.info("[V2RaceDetail] race_id=%s", race_id)
+    model_ver = get_model_version()
 
-    # ── キャッシュ保存 ──────────────────────────────────────────────────────
+    # ── Step1: Redis キャッシュ ──────────────────────────────────────────────
+    t_s1 = time.perf_counter()
+    cache_key    = f"{_CACHE_PFX}{race_id}"
+    r            = get_redis_client()
+    redis_status = "Offline" if r is None else "MISS"
+
     if r:
         try:
-            r.setex(cache_key, _CACHE_TTL, response.model_dump_json())
-            logger.info("[Cache] SET race_id=%s TTL=%ds", race_id, _CACHE_TTL)
+            cached = r.get(cache_key)
+            if cached:
+                elapsed_s1 = time.perf_counter() - t_s1
+                logger.info(
+                    "[Timing] race_id=%s Redis HIT %.3fs / TOTAL %.3fs",
+                    race_id, elapsed_s1, time.perf_counter() - t_total_start,
+                )
+                return Response(content=cached, media_type="application/json",
+                                headers={"X-Cache": "HIT"})
         except Exception as e:
-            logger.warning("[Cache] set失敗（処理継続）: %s", e)
+            logger.warning("[Cache] Redis get失敗（処理継続）: %s", e)
+            redis_status = "Error"
 
+    elapsed_s1 = time.perf_counter() - t_s1
+
+    # ── Step2: DB 永続キャッシュ ─────────────────────────────────────────────
+    t_s2 = time.perf_counter()
+    cached_detail = _get_cached_detail(race_id, model_ver)
+    elapsed_s2 = time.perf_counter() - t_s2
+
+    if cached_detail is not None:
+        json_str = cached_detail.model_dump_json()
+        if r:
+            try:
+                r.setex(cache_key, _CACHE_TTL, json_str)
+            except Exception:
+                pass
+        logger.info(
+            "[Timing] race_id=%s Redis=%s DB HIT %.3fs / TOTAL %.3fs",
+            race_id, redis_status, elapsed_s2, time.perf_counter() - t_total_start,
+        )
+        return Response(content=json_str, media_type="application/json",
+                        headers={"X-Cache": "DB-HIT"})
+
+    # ── Step3: live 計算 ──────────────────────────────────────────────────────
+    try:
+        response = _compute_detail(race_id)
+    except FileNotFoundError as e:
+        logger.error("[V2RaceDetail] AIモデルファイル未検出: %s", e)
+        raise HTTPException(status_code=503, detail="AIモデルが未ロードです。管理者に連絡してください。")
+    except Exception as e:
+        logger.exception("[V2RaceDetail] 計算エラー: %s", e)
+        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
+
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
+
+    # ── キャッシュ保存（DB + Redis）──────────────────────────────────────────
+    _save_detail_cache(response, model_ver)
+    json_str = response.model_dump_json()
+    if r:
+        try:
+            r.setex(cache_key, _CACHE_TTL, json_str)
+            logger.info("[Cache] Redis SET race_id=%s TTL=%ds", race_id, _CACHE_TTL)
+        except Exception as e:
+            logger.warning("[Cache] Redis set失敗（処理継続）: %s", e)
+
+    logger.info(
+        "[Timing] race_id=%s Redis=%s DB MISS → live TOTAL %.3fs",
+        race_id, redis_status, time.perf_counter() - t_total_start,
+    )
     return response
