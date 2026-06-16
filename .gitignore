@@ -35,6 +35,13 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# ── admin_frontend ────────────────────────────────────────────────────────────
+admin_frontend/node_modules/
+admin_frontend/dist/
+admin_frontend/.vite/
+admin_frontend/.env.local
+admin_frontend/.env.production
+
 # ── OS / エディタ ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
