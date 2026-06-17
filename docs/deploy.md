@@ -13,8 +13,11 @@ cp .env.example .env
 | `API_KEY` | **本番必須** | ランダムな hex 文字列（例: `openssl rand -hex 32`）。未設定のまま `DEV_MODE=false` で起動すると `RuntimeError` で即座に落ちます |
 | `DEV_MODE` | 開発用 | `true` にすると認証スキップ・`/docs` エンドポイント公開。本番では `false` |
 | `VITE_API_KEY` | フロント必須 | `frontend/.env.local` に設定。バックエンドの `API_KEY` と同じ値 |
-| `RAW_DATA_DIR` | バッチ任意 | JRA-VAN 生データ（`raw_DIFN.txt` 等）の置き場所。未設定時は `<project_root>/data/input/` を使用。`scripts/bulk_ingest_v2.py` が参照 |
+| `RAW_DATA_DIR` | バッチ任意 | JRA-VAN 生データ（`raw_DIFN.txt` 等）の置き場所。未設定時は `<project_root>/data/input/` を使用。`scripts/bulk_ingest_v2.py` と `jvdl_client/sync_jvdata.py` が参照 |
 | `DISCORD_WEBHOOK_URL` | 通知任意 | Discord Webhook URL。未設定時は通知をスキップ（fail-open）。ヘルスチェック・フィーチャーストア更新完了通知に使用 |
+| `JVLINK_SID` | JV-Link必須 | JRA-VAN Data Lab. から発行されるソフトウェア ID。`jvdl_client/jvlink.py` の `JVInit()` に渡す。Windows 環境でのみ必要 |
+| `ADMIN_API_BASE` | バッチ任意 | api_admin の URL。デフォルト `http://127.0.0.1:8003`。`sync_jvdata.py` がジョブ投入に使用 |
+| `ADMIN_API_KEY` | バッチ任意 | api_admin への認証キー（`API_KEY` と同じ値）。`sync_jvdata.py` の `X-API-Key` ヘッダに設定 |
 
 ```bash
 # frontend/.env.local

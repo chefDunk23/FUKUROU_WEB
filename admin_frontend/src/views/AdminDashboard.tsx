@@ -99,6 +99,11 @@ export default function AdminDashboard() {
   const [syncRunning,     setSyncRunning]     = useState(false)
   const [activeSyncJob,   setActiveSyncJob]   = useState<Job | null>(null)
   const [syncMsg,         setSyncMsg]         = useState<string | null>(null)
+  // JV-Data 同期 (sync_jvdata)
+  const [jvSyncRunning,   setJvSyncRunning]   = useState(false)
+  const [activeJvSyncJob, setActiveJvSyncJob] = useState<Job | null>(null)
+  const [jvSyncMsg,       setJvSyncMsg]       = useState<string | null>(null)
+  const jvSyncMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const storeMsgTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
   const submitMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const syncMsgTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -118,6 +123,11 @@ export default function AdminDashboard() {
     setSyncMsg(msg)
     if (syncMsgTimer.current) clearTimeout(syncMsgTimer.current)
     syncMsgTimer.current = setTimeout(() => setSyncMsg(null), ms)
+  }
+  function showJvSyncMsg(msg: string, ms = 6000) {
+    setJvSyncMsg(msg)
+    if (jvSyncMsgTimer.current) clearTimeout(jvSyncMsgTimer.current)
+    jvSyncMsgTimer.current = setTimeout(() => setJvSyncMsg(null), ms)
   }
 
   async function load() {
@@ -152,6 +162,11 @@ export default function AdminDashboard() {
              (j.status === 'running' || j.status === 'queued'),
       ) ?? null
       setActiveSyncJob(activeSync)
+      const activeJvSync = jobs.find(
+        j => j.job_type === 'sync_jvdata' &&
+             (j.status === 'running' || j.status === 'queued'),
+      ) ?? null
+      setActiveJvSyncJob(activeJvSync)
     }
     setLoading(false)
   }
@@ -225,6 +240,26 @@ export default function AdminDashboard() {
       showSyncMsg(`エラー: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSyncRunning(false)
+    }
+  }
+
+  // ── JV-Data 同期ハンドラ (sync_jvdata) ────────────────────────────────────
+
+  async function handleJvSync(fullSetup = false) {
+    if (jvSyncRunning || activeJvSyncJob) return
+    setJvSyncRunning(true)
+    setJvSyncMsg(null)
+    try {
+      const params = fullSetup
+        ? { run_stores: true, full_setup: true }
+        : { run_stores: true, run_recompute: false }
+      const job = await submitJob('sync_jvdata', params)
+      showJvSyncMsg(`✓ JV-Data 同期ジョブ #${job.id} を投入しました`)
+      void load()
+    } catch (e) {
+      showJvSyncMsg(`エラー: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setJvSyncRunning(false)
     }
   }
 
@@ -478,6 +513,22 @@ export default function AdminDashboard() {
           クイックアクション
         </h2>
         <div className="flex gap-3 flex-wrap">
+          {/* JV-Data 同期 */}
+          {activeJvSyncJob ? (
+            <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-2 rounded-lg">
+              <RefreshCwIcon size={12} className="animate-spin" />
+              JV-Data 同期 #{activeJvSyncJob.id} 実行中 {activeJvSyncJob.progress}%
+            </span>
+          ) : (
+            <button
+              onClick={() => void handleJvSync(false)}
+              disabled={jvSyncRunning || !!activeJvSyncJob}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+            >
+              <DatabaseIcon size={14} />
+              JV-Data 同期
+            </button>
+          )}
           <button
             onClick={() => void handleQuickRecompute('weekend')}
             disabled={submitting}
@@ -495,6 +546,11 @@ export default function AdminDashboard() {
             今日のレースを再計算
           </button>
         </div>
+        {jvSyncMsg && (
+          <p className={`mt-2 text-sm ${jvSyncMsg.startsWith('エラー') ? 'text-red-600' : 'text-green-600'}`}>
+            {jvSyncMsg}
+          </p>
+        )}
         {submitMsg && (
           <p className={`mt-2 text-sm ${submitMsg.startsWith('エラー') ? 'text-red-600' : 'text-green-600'}`}>
             {submitMsg}

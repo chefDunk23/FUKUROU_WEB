@@ -494,6 +494,63 @@ def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
         v2_conn.close()
 
 
+@register("sync_jvdata")
+def _handle_sync_jvdata(params: dict, ctx: JobContext) -> None:
+    """JV-Link から差分取得し、DB 投入 → ストア更新 → 予測再計算を実行する。
+
+    params:
+        dataspecs:    list[str] | None — 省略時は ["RACE", "DIFF", "SLOP", "WOOD"]
+        from_time:    str | None — "YYYYMMDDHHmmss"。省略時は sync_watermark から取得
+        run_stores:   bool — デフォルト True
+        run_recompute: bool — デフォルト False
+        full_setup:   bool — True なら JVOpen option=4 で全量再取得
+    """
+    dataspecs: list[str] | None = params.get("dataspecs")
+    from_time: str | None = params.get("from_time")
+    run_stores: bool = bool(params.get("run_stores", True))
+    run_recompute: bool = bool(params.get("run_recompute", False))
+    full_setup: bool = bool(params.get("full_setup", False))
+
+    ctx.append_log(
+        f"[sync_jvdata] dataspecs={dataspecs or 'default'} "
+        f"from_time={from_time!r} stores={run_stores} recompute={run_recompute} "
+        f"full_setup={full_setup}"
+    )
+    ctx.report_progress(5)
+
+    try:
+        from jvdl_client.jvlink import ComImportError
+        from jvdl_client.sync_jvdata import sync_from_jvlink
+    except ComImportError as e:
+        msg = f"JV-LinkはWindows環境でのみ実行可能: {e}"
+        logger.error("[sync_jvdata] %s", msg)
+        ctx.append_log(msg)
+        raise RuntimeError(msg) from e
+
+    results = sync_from_jvlink(
+        dataspecs=dataspecs,
+        from_time=from_time,
+        run_ingest=True,
+        run_stores=run_stores,
+        run_recompute=run_recompute,
+        full_setup=full_setup,
+    )
+
+    ctx.report_progress(90)
+
+    ok_count  = sum(1 for v in results.values() if v == "ok")
+    err_count = sum(1 for v in results.values() if v.startswith("ERROR"))
+    summary   = f"完了: {ok_count}/{len(results)} 成功 / {err_count} 失敗"
+    ctx.append_log(f"[sync_jvdata] {summary}")
+    for ds, status in results.items():
+        ctx.append_log(f"  {ds}: {status}")
+
+    ctx.report_progress(100)
+    if err_count > 0:
+        failed = [ds for ds, v in results.items() if v.startswith("ERROR")]
+        raise RuntimeError(f"一部 dataspec 失敗: {failed}")
+
+
 @register("recompute_predictions")
 def _handle_recompute_predictions(params: dict, ctx: JobContext) -> None:
     """今週末（または指定 race_ids）の予測キャッシュを再計算する。

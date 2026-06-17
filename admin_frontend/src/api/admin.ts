@@ -59,6 +59,12 @@ export const JOB_TYPES: JobType[] = [
     defaultParams: {},
   },
   {
+    id: 'sync_jvdata',
+    label: 'JV-Data 同期',
+    implemented: true,
+    defaultParams: { dataspecs: ['RACE', 'DIFF', 'SLOP', 'WOOD'], run_stores: true, run_recompute: false },
+  },
+  {
     id: 'import_bloodline_masters',
     label: '血統マスタ取込',
     implemented: false,
