@@ -1,7 +1,5 @@
 # ── モデルファイル（LightGBM バイナリ・数百MB） ───────────────────────────
-models/v1/
-models/v2/ensemble/
-models/v2/submodels/
+models/
 *.lgb
 *.pkl
 *.joblib
@@ -10,10 +8,19 @@ models/v2/submodels/
 # ── 学習・推論データ（Parquet・数GB） ─────────────────────────────────────
 data/parquet/
 data/outputs/
+data/output/
+data/input/
+data/jobs/
+data/predictions/
 *.parquet
 
 # ── 中間出力（CSV・JSON 一時ファイル） ────────────────────────────────────
 outputs/
+reports/
+logs/
+scripts/backtest_*results*.csv
+scripts/backtest_v*.csv
+_tmp_*.csv
 
 # ── 環境変数・秘密情報 ────────────────────────────────────────────────────
 .env
@@ -42,11 +49,34 @@ admin_frontend/.vite/
 admin_frontend/.env.local
 admin_frontend/.env.production
 
+# ── owl_video ─────────────────────────────────────────────────────────────────
+owl_video/node_modules/
+owl_video/out/
+owl_video/public/dynamic_data/
+
 # ── OS / エディタ ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 .vscode/settings.json
 *.swp
+
+# ── Claude Code ローカル設定（共有しない） ────────────────────────────────
+.claude/
+
+# ── アーカイブ・旧コード ──────────────────────────────────────────────────
+archive/
+_archive/
+
+# ── デバッグ・一時スクリプト ──────────────────────────────────────────────
+_check_*.py
+_explain_*.py
+_tmp_*
+fable_audit_prompt.md
+
+# ── フロントエンド デバッグスクリプト ────────────────────────────────────
+frontend/_test_*.mjs
+frontend/_tmp_shot*.mjs
+frontend/screenshot.mjs
 
 # ── 除外しない（git で明示管理するもの） ──────────────────────────────────
 # course_physical_master.csv は人間精査済みマスタなので必ず管理対象にする
