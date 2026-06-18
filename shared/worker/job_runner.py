@@ -123,14 +123,16 @@ class JobContext:
 # ── フィーチャーストア名 → バッチ識別子マップ ─────────────────────────────────
 
 _STORE_KEY_MAP: dict[str, str] = {
-    "training":    "training",
-    "condition":   "condition",
-    "jockey":      "jockey",
-    "trainer":     "trainer",
-    "sire":        "sire",
+    "training":     "training",
+    "condition":    "condition",
+    "chokyo":       "chokyo",
+    "jockey":       "jockey",
+    "trainer":      "trainer",
+    "sire":         "sire",
     "horse_rating": "horse_rating",
-    "synergy":     "synergy",
-    "course":      "course",
+    "synergy":      "synergy",
+    "course":       "course",
+    "aptitude":     "aptitude",
 }
 
 
@@ -150,6 +152,8 @@ def _handle_update_feature_stores(params: dict, ctx: JobContext) -> None:
     from ml.db import engine as _engine
     from ml.batch.training_feature_batch import TrainingFeatureBatch
     from ml.batch.condition_match_batch import ConditionMatchBatch
+    from ml.batch.chokyo_score_batch import run as _run_chokyo
+    from ml.batch.aptitude_score_batch import run as _run_aptitude
     from ml.batch.external_factor_store import ExternalFactorStoreBatch
     from ml.batch.horse_rating_batch import HorseRatingBatch
     from ml.batch.synergy_store_batch import SynergyStoreBatch
@@ -176,40 +180,54 @@ def _handle_update_feature_stores(params: dict, ctx: JobContext) -> None:
     # ── Step 1: training（condition より先に実行必須）────────────────────────
     _training_n: int = 0
     if "training" in requested_set:
-        ctx.append_log("[1/6] training_feature_batch 開始")
+        ctx.append_log("[1/8] training_feature_batch 開始")
         try:
             _training_n = TrainingFeatureBatch(engine=_engine).run(target_date=target_date)
             results["training"] = "ok"
-            ctx.append_log(f"[1/6] training 完了: {_training_n} 行 UPSERT")
+            ctx.append_log(f"[1/8] training 完了: {_training_n} 行 UPSERT")
         except Exception as e:
             results["training"] = f"ERROR: {e}"
-            ctx.append_log(f"[1/6] training 失敗: {e}")
+            ctx.append_log(f"[1/8] training 失敗: {e}")
     else:
         results["training"] = "skip"
 
-    ctx.report_progress(20)
+    ctx.report_progress(15)
 
     # ── Step 2: condition（training 依存）───────────────────────────────────
     if "condition" in requested_set:
         if _training_n == 0:
-            # training データが空なら condition も意味がないのでスキップ
             results["condition"] = "skip"
-            ctx.append_log("[2/6] condition スキップ (training 0行 → 対象データなし)")
+            ctx.append_log("[2/8] condition スキップ (training 0行 -> 対象データなし)")
         else:
-            ctx.append_log("[2/6] condition_match_batch 開始")
+            ctx.append_log("[2/8] condition_match_batch 開始")
             try:
                 n = ConditionMatchBatch(engine=_engine).run(target_date=target_date)
                 results["condition"] = "ok"
-                ctx.append_log(f"[2/6] condition 完了: {n} 行 UPSERT")
+                ctx.append_log(f"[2/8] condition 完了: {n} 行 UPSERT")
             except Exception as e:
                 results["condition"] = f"ERROR: {e}"
-                ctx.append_log(f"[2/6] condition 失敗: {e}")
+                ctx.append_log(f"[2/8] condition 失敗: {e}")
     else:
         results["condition"] = "skip"
 
-    ctx.report_progress(35)
+    ctx.report_progress(25)
 
-    # ── Step 3-6: 独立バッチ（直列実行、並列化は将来課題）─────────────────
+    # ── Step 3: chokyo（training 後、調教rawデータが必要）──────────────────
+    if "chokyo" in requested_set:
+        ctx.append_log("[3/8] chokyo_score_batch 開始")
+        try:
+            n = _run_chokyo(from_year=2015)
+            results["chokyo"] = "ok"
+            ctx.append_log(f"[3/8] chokyo 完了: {n} 行 UPSERT")
+        except Exception as e:
+            results["chokyo"] = f"ERROR: {e}"
+            ctx.append_log(f"[3/8] chokyo 失敗: {e}")
+    else:
+        results["chokyo"] = "skip"
+
+    ctx.report_progress(40)
+
+    # ── Step 4-8: 独立バッチ（直列実行、並列化は将来課題）─────────────────
 
     # horse_rating は差分更新（全期間再計算を避ける）
     def _horse_rating_run() -> int:
@@ -229,22 +247,24 @@ def _handle_update_feature_stores(params: dict, ctx: JobContext) -> None:
          lambda: SynergyStoreBatch(engine=_engine).run(target_date=target_date)),
         ("course", "course",
          lambda: CourseProfileStoreBatch(target_date=target_date, engine=_engine).run()),
+        ("aptitude", "aptitude",
+         lambda: _run_aptitude(from_year=2015)),
     ]
 
-    pct_step = 15
-    for idx, (label, key, run_fn) in enumerate(independent, start=3):
+    pct_step = 10
+    for idx, (label, key, run_fn) in enumerate(independent, start=4):
         if key in requested_set or any(s in requested_set for s in ("jockey", "trainer", "sire") if key == "external"):
-            ctx.append_log(f"[{idx}/6] {label} 開始")
+            ctx.append_log(f"[{idx}/8] {label} 開始")
             try:
                 n = run_fn()
                 results[key] = "ok"
-                ctx.append_log(f"[{idx}/6] {label} 完了: {n} 行 UPSERT")
+                ctx.append_log(f"[{idx}/8] {label} 完了: {n} 行 UPSERT")
             except Exception as e:
                 results[key] = f"ERROR: {e}"
-                ctx.append_log(f"[{idx}/6] {label} 失敗: {e}")
+                ctx.append_log(f"[{idx}/8] {label} 失敗: {e}")
         else:
             results[key] = "skip"
-        ctx.report_progress(35 + idx * pct_step)
+        ctx.report_progress(40 + idx * pct_step)
 
     # ── 集計 ─────────────────────────────────────────────────────────────────
     ok_count    = sum(1 for v in results.values() if v == "ok")
@@ -510,11 +530,12 @@ def _handle_sync_jvdata(params: dict, ctx: JobContext) -> None:
     run_stores: bool = bool(params.get("run_stores", True))
     run_recompute: bool = bool(params.get("run_recompute", False))
     full_setup: bool = bool(params.get("full_setup", False))
+    weekly: bool = bool(params.get("weekly", False))
 
     ctx.append_log(
         f"[sync_jvdata] dataspecs={dataspecs or 'default'} "
         f"from_time={from_time!r} stores={run_stores} recompute={run_recompute} "
-        f"full_setup={full_setup}"
+        f"full_setup={full_setup} weekly={weekly}"
     )
     ctx.report_progress(5)
 
@@ -534,6 +555,7 @@ def _handle_sync_jvdata(params: dict, ctx: JobContext) -> None:
         run_stores=run_stores,
         run_recompute=run_recompute,
         full_setup=full_setup,
+        weekly=weekly,
     )
 
     ctx.report_progress(90)

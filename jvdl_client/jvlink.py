@@ -31,6 +31,7 @@ _PY_32BIT = "-3.13-32"
 # JVOpen option 引数 (loader.py に準拠)
 OPT_STORED      = 1  # 蓄積系: from_time 以降の全データ
 OPT_STORED_DIFF = 1  # alias — loader.py の慣例に合わせて 1 を使用
+OPT_WEEKLY      = 2  # 今週分: 当週月曜以降のデータ (木曜・金曜出馬確定用)
 OPT_SETUP       = 4  # セットアップ: 全量再取得
 
 
@@ -57,6 +58,37 @@ class JVLinkClient:
         logger.info("[JVLink] 32-bit bridge 初期化: launcher=%s", _PY_LAUNCHER)
 
     # ── メイン API ────────────────────────────────────────────────────────────
+
+    def dry_run(
+        self,
+        dataspec: str,
+        from_time: str,
+        option: int = OPT_STORED_DIFF,
+    ) -> dict:
+        """JVOpen のみ実行して readcount / downloadcount を返す。ファイル書き込みなし。
+
+        Returns:
+            {"ret": int, "readcount": int, "downloadcount": int, "lastfile_ts": str}
+        """
+        cmd = [
+            str(_PY_LAUNCHER), _PY_32BIT,
+            "-m", "jvdl_client._downloader_32bit",
+            dataspec, from_time, str(option), "--dry-run",
+        ]
+        env = {**os.environ, "PYTHONPATH": str(_ROOT)}
+        result = subprocess.run(cmd, env=env, capture_output=False,
+                                stdout=subprocess.PIPE, timeout=120)
+        output = result.stdout.decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            if line.startswith("DRY_RUN:"):
+                parts = line.split(":")
+                return {
+                    "ret":           int(parts[1]),
+                    "readcount":     int(parts[2]),
+                    "downloadcount": int(parts[3]),
+                    "lastfile_ts":   parts[4] if len(parts) > 4 else "",
+                }
+        raise RuntimeError(f"dry_run: DRY_RUN line not found in output:\n{output}")
 
     def fetch_stored(
         self,

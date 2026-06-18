@@ -56,6 +56,8 @@ def sync_from_jvlink(
     run_stores: bool = True,
     run_recompute: bool = False,
     full_setup: bool = False,
+    weekly: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, str]:
     """JV-Link から差分取得し、DB 投入 → ストア更新 → 予測再計算を実行する。
 
@@ -67,11 +69,15 @@ def sync_from_jvlink(
         run_stores:   True なら update_feature_stores ジョブを投入する。
         run_recompute: True なら recompute_predictions ジョブを投入する。
         full_setup:   True なら JVOpen option=4 で全量再取得する。
+        weekly:       True なら JVOpen option=2 で今週分のみ取得する（木/金出馬確定用）。
+                      full_setup=True の場合は full_setup が優先。
+        dry_run:      True なら JVOpen のみ実行して readcount/downloadcount を確認。
+                      ファイル書き込み・DB 投入・ジョブ投入を一切行わない。
 
     Returns:
-        {dataspec: "ok" | "skip" | "ERROR: ..."} の辞書。
+        {dataspec: "ok" | "skip" | "dry-run: ..." | "ERROR: ..."} の辞書。
     """
-    from jvdl_client.jvlink import JVLinkClient, ComImportError, OPT_SETUP, OPT_STORED_DIFF
+    from jvdl_client.jvlink import JVLinkClient, ComImportError, OPT_SETUP, OPT_STORED_DIFF, OPT_WEEKLY
 
     if dataspecs is None:
         dataspecs = list(_DEFAULT_DATASPECS)
@@ -79,10 +85,51 @@ def sync_from_jvlink(
     raw_dir = Path(output_dir) if output_dir else _RAW_DIR
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    option = OPT_SETUP if full_setup else OPT_STORED_DIFF
+    if full_setup:
+        option = OPT_SETUP
+    elif weekly:
+        option = OPT_WEEKLY
+    else:
+        option = OPT_STORED_DIFF
     now_str = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
     results: dict[str, str] = {}
+
+    # ── dry-run: JVOpen のみ、ファイル書き込み・DB 投入なし ───────────────────
+    if dry_run:
+        conn = psycopg2.connect(**DB_JVDL, connect_timeout=10)
+        try:
+            try:
+                jv = JVLinkClient()
+            except (ComImportError, ValueError) as e:
+                logger.error("[sync_jvdata] %s", e)
+                for ds in dataspecs:
+                    results[ds] = f"ERROR: {e}"
+                return results
+
+            print(f"[dry-run] option={option} ({'full-setup' if full_setup else 'diff'})")
+            print(f"{'dataspec':<8}  {'from_time':<14}  {'ret':>4}  {'readcount':>10}  {'downloadcount':>13}  lastfile_ts")
+            print("-" * 75)
+            with jv:
+                for ds in dataspecs:
+                    wm = JVLinkClient.get_watermark(conn, ds, _DEFAULT_FROM_TIME)
+                    effective_from = from_time or wm
+                    try:
+                        info = jv.dry_run(ds, effective_from, option)
+                        print(
+                            f"{ds:<8}  {effective_from:<14}  {info['ret']:>4}  "
+                            f"{info['readcount']:>10}  {info['downloadcount']:>13}  {info['lastfile_ts']}"
+                        )
+                        results[ds] = (
+                            f"dry-run: readcount={info['readcount']} "
+                            f"downloadcount={info['downloadcount']}"
+                        )
+                    except Exception as e:
+                        logger.exception("[sync_jvdata] dry_run %s 失敗: %s", ds, e)
+                        results[ds] = f"ERROR: {e}"
+        finally:
+            conn.close()
+        return results
 
     # ── Step 1: JV-Link から各 dataspec を取得 ────────────────────────────────
     conn = psycopg2.connect(**DB_JVDL, connect_timeout=10)
@@ -214,6 +261,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="JVOpen option=4 で全量再取得 (初回セットアップ用)",
     )
     p.add_argument(
+        "--weekly",
+        action="store_true",
+        help="JVOpen option=2 で今週分のみ取得 (木/金出馬確定用)",
+    )
+    p.add_argument(
         "--no-ingest",
         action="store_true",
         help="DB 投入をスキップ (raw ファイル生成のみ)",
@@ -227,6 +279,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--recompute",
         action="store_true",
         help="ストア更新後に予測再計算ジョブを投入する",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="JVOpen のみ実行して readcount/downloadcount を確認。ファイル書き込み・DB 投入なし",
     )
     return p
 
@@ -248,10 +305,12 @@ def main() -> None:
         dataspecs=dataspecs,
         from_time=args.from_time,
         output_dir=args.output_dir,
-        run_ingest=not args.no_ingest,
-        run_stores=not args.no_stores,
-        run_recompute=args.recompute,
+        run_ingest=not args.no_ingest and not args.dry_run,
+        run_stores=not args.no_stores and not args.dry_run,
+        run_recompute=args.recompute and not args.dry_run,
         full_setup=args.full_setup,
+        weekly=args.weekly,
+        dry_run=args.dry_run,
     )
 
     err_count = sum(1 for v in results.values() if v.startswith("ERROR"))
