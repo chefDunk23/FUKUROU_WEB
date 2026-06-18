@@ -1,61 +1,45 @@
 """
 jvdl_client/jvlink.py
 ======================
-JVDTLab.JVLink COM コンポーネントの最小ラッパー。
+JV-Link COM コンポーネントへの 64-bit → 32-bit ブリッジ。
+
+JV-Link (JVDTLab.JVLink) は 32-bit COM コンポーネントのため、
+64-bit Python から直接 CreateObject すると REGDB_E_CLASSNOTREG が発生する。
+
+代わりに py -3.13-32 サブプロセス (jvdl_client._downloader_32bit) を起動し、
+COM 呼び出しを委譲する。データ交換はファイル経由で行う。
 
 動作要件:
-  - Windows OS (JV-Link は Windows 専用 COM コンポーネント)
-  - comtypes: pip install comtypes
-  - 環境変数 JVLINK_SID にソフトウェア ID を設定
-
-Linux では import 時点で ComImportError が発生するが、それは想定通り。
-テスト環境では tests/test_jvdl_client.py がモックを使用する。
+  - Windows OS + JV-Link インストール済み
+  - C:\\Users\\kaise\\AppData\\Local\\Programs\\Python\\Launcher\\py.exe (Python Launcher)
+  - py -3.13-32 (32-bit Python 3.13) + comtypes インストール済み
 """
 from __future__ import annotations
 
 import logging
 import os
-import time
+import subprocess
 from collections.abc import Iterator
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# ── SDK 定数 ──────────────────────────────────────────────────────────────────
+_ROOT = Path(__file__).parent.parent
+_PY_LAUNCHER = Path(r"C:\Users\kaise\AppData\Local\Programs\Python\Launcher\py.exe")
+_PY_32BIT = "-3.13-32"
 
-_BUF_SIZE = 110_000   # SDK 推奨バッファサイズ (bytes)
+# JVOpen option 引数 (loader.py に準拠)
+OPT_STORED      = 1  # 蓄積系: from_time 以降の全データ
+OPT_STORED_DIFF = 1  # alias — loader.py の慣例に合わせて 1 を使用
+OPT_SETUP       = 4  # セットアップ: 全量再取得
 
-# JVOpen option 引数
-OPT_STORED      = 1  # 蓄積系 (全データ)
-OPT_STORED_DIFF = 2  # 蓄積系 (差分取得)
-OPT_REALTIME    = 3  # 速報系 (ダイアログなし)
-OPT_SETUP       = 4  # セットアップ (全量再取得)
-
-# JVOpen / JVRead リターンコード
-_RC_OK           =  0   # データあり / 正常終了
-_RC_FILE_SWITCH  = -1   # ファイル切替 (続行)
-_RC_DOWNLOADING  = -3   # ダウンロード中 (retry)
-_RC_EOF          =  1   # データなし (正常終了)
-
-_DOWNLOAD_WAIT_SEC = 2.0
-_DOWNLOAD_MAX_RETRY = 300   # 最大 10 分待機
-
-# ── COM インポート（Windows 専用） ────────────────────────────────────────────
-
-try:
-    import comtypes.client as _cc
-    _COM_AVAILABLE = True
-except ImportError:
-    _COM_AVAILABLE = False
-    # Linux / CI 環境。ComImportError は呼び出し側でハンドル。
 
 class ComImportError(RuntimeError):
-    """comtypes が利用できない環境で JVLinkClient を使おうとした場合に送出。"""
+    """32-bit Python launcher が見つからず JV-Link にアクセスできない場合に送出。"""
 
-
-# ── JVLinkClient ──────────────────────────────────────────────────────────────
 
 class JVLinkClient:
-    """JVDTLab.JVLink COM コンポーネントのラッパー。
+    """JV-Link COM への 64-bit → 32-bit ブリッジ。
 
     使い方:
         with JVLinkClient() as jv:
@@ -64,24 +48,13 @@ class JVLinkClient:
     """
 
     def __init__(self) -> None:
-        if not _COM_AVAILABLE:
+        if not _PY_LAUNCHER.exists():
             raise ComImportError(
-                "comtypes が利用できません。"
-                "JV-Link は Windows 環境専用です。pip install comtypes を実行するか、"
-                "Windows 環境で実行してください。"
+                f"32-bit Python launcher が見つかりません: {_PY_LAUNCHER}\n"
+                "Python Launcher (py.exe) をインストールし、"
+                f"py {_PY_32BIT} + comtypes を用意してください。"
             )
-        sid = os.environ.get("JVLINK_SID", "")
-        if not sid:
-            raise ValueError(
-                "環境変数 JVLINK_SID が設定されていません。"
-                "JRA-VAN Data Lab. から取得したソフトウェア ID を設定してください。"
-            )
-
-        self._jv = _cc.CreateObject("JVDTLab.JVLink")
-        rc = self._jv.JVInit(sid)
-        if rc != 0:
-            raise RuntimeError(f"JVInit 失敗: return_code={rc}")
-        logger.info("[JVLink] JVInit 完了")
+        logger.info("[JVLink] 32-bit bridge 初期化: launcher=%s", _PY_LAUNCHER)
 
     # ── メイン API ────────────────────────────────────────────────────────────
 
@@ -90,87 +63,55 @@ class JVLinkClient:
         dataspec: str,
         from_time: str,
         option: int = OPT_STORED_DIFF,
+        _tmp_dir: str | None = None,
     ) -> Iterator[bytes]:
-        """JVOpen → JVRead ループで生レコード(bytes)を yield する。
+        """py -3.13-32 サブプロセス経由で JVGets を呼び出し、生レコードを yield する。
 
         Args:
             dataspec:  "RACE" / "DIFF" / "SLOP" / "WOOD" 等
-            from_time: "YYYYMMDDHHmmss" — この時点以降の差分を取得
-            option:    OPT_STORED_DIFF(2) が差分取得のデフォルト
+            from_time: "YYYYMMDDHHmmss" — この時点以降のデータを取得
+            option:    OPT_STORED(1) が差分取得のデフォルト、OPT_SETUP(4) が全量
+            _tmp_dir:  テスト用一時ディレクトリ（省略時は data/input/）
         """
-        last_file = ""
-        total_count, rc = 0, 0
-        rc = self._jv.JVOpen(dataspec, from_time, option, 0, 0, "")
-        if rc < 0:
-            raise RuntimeError(f"JVOpen 失敗: dataspec={dataspec} rc={rc}")
+        tmp_dir = Path(_tmp_dir) if _tmp_dir else _ROOT / "data" / "input"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_file = tmp_dir / f"_tmp_raw_{dataspec}_{os.getpid()}.txt"
 
-        logger.info("[JVLink] JVOpen: dataspec=%s from_time=%s option=%d", dataspec, from_time, option)
-
-        retry = 0
         try:
-            while True:
-                buf, filename, rc = self._jv.JVRead("", _BUF_SIZE, "")
+            cmd = [
+                str(_PY_LAUNCHER), _PY_32BIT,
+                "-m", "jvdl_client._downloader_32bit",
+                dataspec, from_time, str(option), str(tmp_file),
+            ]
+            env = {**os.environ, "PYTHONPATH": str(_ROOT)}
+            logger.info("[JVLink] 32-bit downloader 起動: %s %s option=%d", dataspec, from_time, option)
 
-                if rc == _RC_FILE_SWITCH:
-                    if filename != last_file:
-                        logger.debug("[JVLink] ファイル切替: %s", filename)
-                        last_file = filename
-                    continue
+            result = subprocess.run(cmd, env=env, timeout=3600)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"32-bit downloader 失敗 (returncode={result.returncode}): dataspec={dataspec}"
+                )
 
-                if rc == _RC_DOWNLOADING:
-                    retry += 1
-                    if retry > _DOWNLOAD_MAX_RETRY:
-                        raise RuntimeError("JVRead: ダウンロードタイムアウト")
-                    if retry % 10 == 1:
-                        logger.info("[JVLink] ダウンロード中 (retry=%d)...", retry)
-                    time.sleep(_DOWNLOAD_WAIT_SEC)
-                    continue
+            if not tmp_file.exists():
+                logger.warning("[JVLink] 出力ファイルが見つかりません: %s", tmp_file)
+                return
 
-                retry = 0
+            count = 0
+            with open(tmp_file, "rb") as f:
+                for line in f:
+                    stripped = line.rstrip(b"\n")
+                    if stripped:
+                        yield stripped
+                        count += 1
 
-                if rc == _RC_EOF or rc > 0:
-                    logger.info("[JVLink] JVRead 終了: dataspec=%s records=%d", dataspec, total_count)
-                    break
-
-                if rc == _RC_OK and buf:
-                    data = buf if isinstance(buf, bytes) else buf.encode("cp932", errors="replace")
-                    yield data
-                    total_count += 1
-                    continue
-
-                if rc < 0:
-                    raise RuntimeError(f"JVRead エラー: rc={rc}")
+            logger.info("[JVLink] %s: %d レコード読み込み完了", dataspec, count)
 
         finally:
-            self._jv.JVClose()
-            logger.info("[JVLink] JVClose: dataspec=%s", dataspec)
-
-    def fetch_realtime(self, dataspec: str) -> Iterator[bytes]:
-        """JVRTOpen → JVRead ループ。速報系(0B11 / 0B14 / 0B31 等)用。"""
-        rc = self._jv.JVRTOpen(dataspec, "")
-        if rc < 0:
-            raise RuntimeError(f"JVRTOpen 失敗: dataspec={dataspec} rc={rc}")
-
-        logger.info("[JVLink] JVRTOpen: dataspec=%s", dataspec)
-        try:
-            while True:
-                buf, filename, rc = self._jv.JVRead("", _BUF_SIZE, "")
-
-                if rc == _RC_FILE_SWITCH:
-                    continue
-                if rc == _RC_DOWNLOADING:
-                    time.sleep(_DOWNLOAD_WAIT_SEC)
-                    continue
-                if rc == _RC_EOF or rc > 0:
-                    break
-                if rc == _RC_OK and buf:
-                    data = buf if isinstance(buf, bytes) else buf.encode("cp932", errors="replace")
-                    yield data
-                    continue
-                if rc < 0:
-                    raise RuntimeError(f"JVRead (RT) エラー: rc={rc}")
-        finally:
-            self._jv.JVClose()
+            if tmp_file.exists():
+                try:
+                    tmp_file.unlink()
+                except Exception:
+                    pass
 
     # ── ウォーターマーク管理 ─────────────────────────────────────────────────
 
@@ -207,13 +148,4 @@ class JVLinkClient:
         return self
 
     def __exit__(self, *_) -> None:
-        try:
-            self._jv.JVClose()
-        except Exception:
-            pass
-        try:
-            import comtypes
-            comtypes.CoUninitialize()
-        except Exception:
-            pass
-        logger.info("[JVLink] COM 解放完了")
+        logger.info("[JVLink] ブリッジ終了")

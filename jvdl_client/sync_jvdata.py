@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # ── デフォルト設定 ──────────────────────────────────────────────────────────
 
-_DEFAULT_DATASPECS = ["RACE", "DIFF", "SLOP", "WOOD"]
+_DEFAULT_DATASPECS = ["RACE", "SLOP", "WOOD"]  # DIFF は無効な dataspec (JVOpen rc=-1)
 _DEFAULT_FROM_TIME = "20220101000000"  # 初回(ウォーターマークなし)の場合
 _RAW_DIR = Path(os.getenv("RAW_DATA_DIR", str(_ROOT / "data" / "input")))
 _ADMIN_API_BASE = os.getenv("ADMIN_API_BASE", "http://127.0.0.1:8003")
@@ -89,7 +89,7 @@ def sync_from_jvlink(
     try:
         try:
             jv = JVLinkClient()
-        except ComImportError as e:
+        except (ComImportError, ValueError) as e:
             logger.error("[sync_jvdata] %s", e)
             for ds in dataspecs:
                 results[ds] = f"ERROR: {e}"
@@ -112,9 +112,13 @@ def sync_from_jvlink(
                                 fout.write(b"\n")
                             byte_count += len(record)
 
-                    logger.info("[sync_jvdata] %s: %.1f KB 書き出し完了", ds, byte_count / 1024)
-                    JVLinkClient.set_watermark(conn, ds, now_str)
-                    results[ds] = "ok"
+                    if byte_count == 0:
+                        logger.info("[sync_jvdata] %s: 新規データなし (skip)", ds)
+                        results[ds] = "skip"
+                    else:
+                        logger.info("[sync_jvdata] %s: %.1f KB 書き出し完了", ds, byte_count / 1024)
+                        JVLinkClient.set_watermark(conn, ds, now_str)
+                        results[ds] = "ok"
                 except Exception as e:
                     logger.exception("[sync_jvdata] %s 取得失敗: %s", ds, e)
                     results[ds] = f"ERROR: {e}"
