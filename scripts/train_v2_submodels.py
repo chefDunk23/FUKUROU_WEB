@@ -8,11 +8,12 @@ OOF スコアを race_id × horse_id キーで Parquet に保存する。
 
 Usage:
     py -3.13 scripts/train_v2_submodels.py
-    py -3.13 scripts/train_v2_submodels.py --parquet outputs/rich_features_2022plus.parquet
+    py -3.13 scripts/train_v2_submodels.py --parquet outputs/bloodline_features_v1_2022plus.parquet
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -27,6 +28,9 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+_FEATURE_SELECTION_CONFIG = _ROOT / "config" / "selected_features.json"
+
+from src.features.pace_simulation_v1 import create_pace_simulation_features
 from src.models.submodel_registry import SubmodelManager
 from src.models.v2.config import (
     CV_FOLDS,
@@ -45,8 +49,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_DEFAULT_PARQUET = Path("outputs/rich_features_2022plus.parquet")
-_SUBMODEL_BASE   = Path("models/submodels/v2")
+_DEFAULT_PARQUET = Path("outputs/bloodline_features_v1_2022plus.parquet")
+_SUBMODEL_BASE   = Path("models/v2/submodels")
 
 # ── サブモデル定義 ────────────────────────────────────────────────────────────
 #   name: 保存ディレクトリ名 & スコアカラム名 (score_{name})
@@ -55,27 +59,77 @@ _SUBMODEL_BASE   = Path("models/submodels/v2")
 SUBMODEL_DEFS: list[dict] = [
     {
         "name": "ability_v2",
-        "description": "馬の基礎能力（レーティング + 過去戦績）",
+        "description": "馬の基礎能力（過去戦績 + 直近フォーム + クラス補正 + 瞬発力 + 馬体・属性）※オッズプロキシ除外",
         "features": [
-            "pre_race_rating",
+            # ── 累積過去戦績（feature_store 由来） ──────────
+            # pre_race_rating は除外: オッズと強相関するプロキシのため
             "feature_past_starts",
             "feature_past_wins",
             "feature_past_top3",
             "feature_past_win_rate",
             "feature_past_fukusho_rate",
+            # ── Phase 1: 直近フォーム（ability_features_v3）─
+            "prev1_rank",
+            "avg_rank_3",
+            "avg_rank_5",
+            "recent_win_rate_5",
+            "recent_fukusho_rate_5",
+            # ── Phase 2: クラス補正（ability_features_v3）───
+            "max_grade_won",
+            "class_win_rate",
+            "prev1_rank_class_adj",
+            # ── 瞬発力（物理的ポテンシャル: pace_v2 から移管）
+            "avg_go3f_rank_5_turf",
+            "go3f_rank_std_5_turf",
+            "avg_go3f_rank_5_dirt",
+            "go3f_rank_std_5_dirt",
+            # ── 馬体・属性 ────────────────────────────────
+            "horse_weight",
+            "weight_diff",
+            "basis_weight",
+            "horse_age",
+            "horse_sex",
+            "grade_code",
         ],
     },
     {
         "name": "course_v2",
-        "description": "コース適性（コース物理特性 + 適性スコア）",
+        "description": "コース適性（コース物理特性 + 適性スコア + 経験回数 + EG × 地形 + ローテーション）※着順ベース重複特徴量除外",
         "features": [
+            # ── コース物理特性 ─────────────────────────────
             "straight_dist",
             "dist_to_corner1",
             "elevation_diff",
             "last_straight_hill_flag",
+            # ── 適性スコア ────────────────────────────────
             "apt_distance_shift",
             "apt_bias_fit",
             "apt_seasonal",
+            # ── 競馬場経験回数のみ（着順・勝率は ability_v2 と重複のため除外）
+            "apt_venue_starts",
+            # apt_venue_win_rate_5 / avg_rank_5 / fukusho_rate_5 は除外:
+            # ability_v2 の avg_rank_* と高相関のためサブモデル独立性を破壊
+            # ── course_v3: Expectation Gap × 物理特性（Phase 2）─
+            "eg_flat_avg10",
+            "eg_steep_avg10",
+            "eg_turn_L_avg10",
+            "eg_turn_R_avg10",
+            "eg_steep_minus_flat",
+            "agari_flat_avg10",
+            "agari_steep_avg10",
+            # ── course_v3: ローテーション条件替わり（Phase 3）─
+            "rot_straight_delta",
+            "rot_turn_switch",
+            "rot_slope_shift",
+            "rot_distance_delta",
+            "rot_is_new_venue",
+            # ── レース条件 ────────────────────────────────
+            "distance",
+            "keibajo_code",
+            "track_code",
+            "tenko_code",
+            "shiba_baba_code",
+            "dirt_baba_code",
         ],
     },
     {
@@ -108,27 +162,67 @@ SUBMODEL_DEFS: list[dict] = [
     },
     {
         "name": "pace_v2",
-        "description": "ペース・展開適性（コース内ペース指数 + ラップ分散）",
+        "description": (
+            "脚質適性（頭数正規化コーナー通過順位 + 距離区分別脚質 +"
+            " 展開シミュレーション — 事前入手可能な過去走データのみ）"
+        ),
         "features": [
-            "pace_index",
-            "lap_variance",
-            "lap_std",
+            # ── 頭数正規化ベース（pace_features_v4 / shift(1)済み過去走集計）────
+            # NOTE: pace_index/lap_variance/lap_std/pace_type は当走の事後データ。
+            #       pace_x_front/pace_x_late も pace_index（事後）を使う。
+            #       → これらは DATA LEAK のため永久に除外。
+            "avg_c1_norm_5",
+            "avg_c4_norm_5",
+            "avg_pos_advance_norm_5",
+            "running_style_std_norm_5",
+            # ── 距離区分別脚質（pace_features_v4） ────────────────────────────
+            "avg_c1_norm_5_sprint",          "avg_c4_norm_5_sprint",          "avg_pos_advance_norm_5_sprint",
+            "avg_c1_norm_5_mile",            "avg_c4_norm_5_mile",            "avg_pos_advance_norm_5_mile",
+            "avg_c1_norm_5_mid",             "avg_c4_norm_5_mid",             "avg_pos_advance_norm_5_mid",
+            "avg_c1_norm_5_long",            "avg_c4_norm_5_long",            "avg_pos_advance_norm_5_long",
+            # ── 展開シミュレーション（pace_simulation_v1 / 完全事前データ）─────
+            # WARNING: DO NOT REMOVE — calculated from pre-race data only.
+            # 警告: 削除厳禁 — 過去走データ＋今回枠順のみから計算。リークなし。
+            "predicted_position_norm",  # 枠順×他馬の先行傾向を考慮した推定ポジション
+            "predicted_field_pace",     # フィールド全体の推定ペース指数
+            "pace_harmony_pre",         # 脚質×ペース合致度（展開利不利スコア）
         ],
     },
     {
-        "name": "condition_v2",
-        "description": "レース条件・馬体条件（距離・馬場・馬体重・クラス）",
+        "name": "pedigree_v1",
+        "description": "血統適性（父・母父の馬場面別・距離区分別・競馬場別勝率 + 道悪・成長曲線・性別・馬体重クロス + P1-P5 PIT血統特徴量）",
         "features": [
-            "horse_weight",
-            "weight_diff",
-            "basis_weight",
-            "distance",
-            "keibajo_code",
-            "track_code",
-            "tenko_code",
-            "shiba_baba_code",
-            "dirt_baba_code",
-            "grade_code",
+            # ── 旧 sire_feature_store ベース ──────────────────────────────────
+            # 基本
+            "sire_total_win_rate",    "sire_total_top3_rate",    "sire_count",
+            "bms_total_win_rate",     "bms_total_top3_rate",     "bms_count",
+            # 適性判定（コンテキスト適応）
+            "sire_surface_win_rate",  "sire_surface_top3_rate",
+            "sire_dist_win_rate",     "sire_venue_win_rate",
+            "bms_surface_win_rate",   "bms_surface_top3_rate",
+            "bms_dist_win_rate",      "bms_venue_win_rate",
+            # 道悪適性
+            "sire_heavy_win_rate",    "bms_heavy_win_rate",
+            # 成長曲線
+            "sire_age_win_rate",      "bms_age_win_rate",
+            "sire_growth_factor",     "bms_growth_factor",
+            # 性別・馬体重クロス
+            "sire_sex_win_rate",      "bms_sex_win_rate",
+            "sire_weight_gap",        "bms_weight_gap",
+            # ── P1: 父 Point-in-Time 成績（bloodline_feature_store）────────────
+            "sire_wr", "sire_turf_wr", "sire_dirt_wr",
+            "sire_sprint_wr", "sire_mile_wr", "sire_middle_wr", "sire_long_wr",
+            "sire_heavy_wr", "sire_growth_delta", "sire_n_starts",
+            # ── P2: 母父 Point-in-Time 成績 ─────────────────────────────────
+            "bms_wr", "bms_turf_wr", "bms_dirt_wr",
+            "bms_sprint_wr", "bms_mile_wr", "bms_middle_wr", "bms_long_wr",
+            "bms_heavy_wr", "bms_growth_delta", "bms_n_starts",
+            # ── P3: 個体クロス ───────────────────────────────────────────────
+            "sire_sex_wr",    "p3_weight_gap",
+            # ── P4: 突然変異スコア（祖先と父の適性乖離）─────────────────────
+            "p4_mutation_turf", "p4_mutation_dirt", "p4_n_ancestors",
+            # ── P5: 自己主張度（BMS 分散）────────────────────────────────────
+            "p5_dominance_score", "p5_n_bms_groups",
         ],
     },
 ]
@@ -250,22 +344,87 @@ def _train_one_submodel(
     return oof_df
 
 
-def train_all(parquet_path: Path) -> None:
+def _load_feature_selection(only: str | None) -> dict[str, list[str]] | None:
+    """
+    config/selected_features.json を読み込み、{submodel_name: [features]} を返す。
+    ファイルが存在しない場合は None を返す。
+    """
+    if not _FEATURE_SELECTION_CONFIG.exists():
+        log.error(
+            "selected_features.json が見つかりません: %s\n"
+            "先に py -3.13 scripts/feature_selection_main.py を実行してください。",
+            _FEATURE_SELECTION_CONFIG,
+        )
+        sys.exit(1)
+
+    cfg = json.loads(_FEATURE_SELECTION_CONFIG.read_text(encoding="utf-8"))
+    result: dict[str, list[str]] = {}
+    for name, info in cfg.get("submodels", {}).items():
+        if only is None or name == only:
+            result[name] = info["features"]
+            log.info(
+                "[FeatureSelection] %s: %d 特徴量 (最適戦略: %s, Baseline→Best AUC: %.4f→%.4f)",
+                name, len(info["features"]), info["optimal_cutoff"],
+                info["baseline_auc"], info["best_auc"],
+            )
+    return result
+
+
+def train_all(
+    parquet_path: Path,
+    only: str | None = None,
+    use_feature_selection: bool = False,
+) -> None:
     df = _load_parquet(parquet_path)
 
+    # 展開シミュレーション特徴量を注入（完全事前データ — DATA LEAK なし）
+    # WARNING: DO NOT REPLACE with pace_type / pace_index / zen_3f / go_3f.
+    # 警告: pace_type/pace_index/zen_3f/go_3f への置き換え厳禁（事後データ）。
+    df = create_pace_simulation_features(df)
+
+    # --use-feature-selection: config から特徴量を上書きする
+    fs_overrides: dict[str, list[str]] | None = None
+    if use_feature_selection:
+        fs_overrides = _load_feature_selection(only)
+        log.info("=== Feature Selection モード: %d サブモデルの特徴量を上書き ===",
+                 len(fs_overrides))
+
+    targets = SUBMODEL_DEFS
+    if only is not None:
+        targets = [d for d in SUBMODEL_DEFS if d["name"] == only]
+        if not targets:
+            log.error("--submodel %r は SUBMODEL_DEFS に存在しません。利用可能: %s",
+                      only, [d["name"] for d in SUBMODEL_DEFS])
+            sys.exit(1)
+
+    # 特徴量選択の上書きを適用
+    if fs_overrides:
+        targets = [
+            {**d, "features": fs_overrides[d["name"]]}
+            if d["name"] in fs_overrides else d
+            for d in targets
+        ]
+
     all_oof: list[pd.DataFrame] = []
-    for feat_def in SUBMODEL_DEFS:
+    for feat_def in targets:
         oof = _train_one_submodel(df, feat_def)
         all_oof.append(oof)
 
-    # OOF スコアを結合して 1 ファイルに保存
-    merged = all_oof[0][["race_id", "horse_id", "is_win"]].copy()
-    for oof in all_oof:
-        score_col = [c for c in oof.columns if c.startswith("score_")][0]
-        merged[score_col] = oof[score_col].values
-
     out_path = _SUBMODEL_BASE / "oof_scores_v2.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 単一サブモデル再訓練時は既存 OOF の該当列だけを差し替える
+    if only is not None and out_path.exists():
+        merged = pd.read_parquet(out_path)
+        for oof in all_oof:
+            score_col = [c for c in oof.columns if c.startswith("score_")][0]
+            merged[score_col] = oof[score_col].values
+    else:
+        merged = all_oof[0][["race_id", "horse_id", "is_win"]].copy()
+        for oof in all_oof:
+            score_col = [c for c in oof.columns if c.startswith("score_")][0]
+            merged[score_col] = oof[score_col].values
+
     merged.to_parquet(out_path, index=False)
     log.info("OOF スコア保存: %s  shape=%s", out_path, merged.shape)
 
@@ -276,7 +435,7 @@ def train_all(parquet_path: Path) -> None:
         nan_count = merged[col].isna().sum()
         log.info("  %-30s  NaN=%d", col, nan_count)
 
-    log.info("次のステップ: py -3.13 scripts/merge_v2_submodel_scores.py")
+    log.info("次のステップ: py -3.13 scripts/merge_v2_submodel_scores.py --parquet %s", parquet_path)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -287,6 +446,22 @@ def _parse_args() -> argparse.Namespace:
         default=_DEFAULT_PARQUET,
         help=f"学習に使う Parquet（デフォルト: {_DEFAULT_PARQUET}）",
     )
+    p.add_argument(
+        "--submodel",
+        type=str,
+        default=None,
+        help="特定サブモデルだけ再訓練する（例: course_v2）。省略時は全6本を訓練。",
+    )
+    p.add_argument(
+        "--use-feature-selection",
+        action="store_true",
+        default=False,
+        dest="use_feature_selection",
+        help=(
+            "config/selected_features.json の最適特徴量で学習する。"
+            "OFF 時は SUBMODEL_DEFS のデフォルト特徴量を使用（いつでも元に戻せる）。"
+        ),
+    )
     return p.parse_args()
 
 
@@ -295,4 +470,4 @@ if __name__ == "__main__":
     if not args.parquet.exists():
         log.error("Parquet が見つかりません: %s", args.parquet)
         sys.exit(1)
-    train_all(args.parquet)
+    train_all(args.parquet, only=args.submodel, use_feature_selection=args.use_feature_selection)

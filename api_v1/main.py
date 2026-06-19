@@ -28,7 +28,7 @@ if str(_ROOT) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api_v1.routers import script, video
+from api_v1.routers import classic_video, data, pipeline, script, video
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +53,9 @@ app.add_middleware(
 
 app.include_router(video.router)
 app.include_router(script.router)
+app.include_router(pipeline.router)
+app.include_router(classic_video.router)
+app.include_router(data.router)
 
 
 @app.get("/healthz", tags=["system"])

@@ -5,8 +5,8 @@ V2 サブモデル OOF スコア（6列）を rich_features Parquet にマージ
 スタックアンサンブル学習用の新 Parquet を出力する。
 
 入力:
-    outputs/rich_features_2022plus.parquet       — 元の学習データ
-    models/submodels/v2/oof_scores_v2.parquet    — train_v2_submodels.py の出力
+    outputs/bloodline_features_v1_2022plus.parquet — 元の学習データ（最終エンリッチ済み）
+    models/v2/submodels/oof_scores_v2.parquet      — train_v2_submodels.py の出力
 
 出力:
     outputs/v2_stacked_features.parquet          — 6 サブモデルスコア列を追加したもの
@@ -33,8 +33,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_SRC_PARQUET  = Path("outputs/rich_features_2022plus.parquet")
-_OOF_PARQUET  = Path("models/submodels/v2/oof_scores_v2.parquet")
+_SRC_PARQUET  = Path("outputs/bloodline_features_v1_2022plus.parquet")
+_OOF_PARQUET  = Path("models/v2/submodels/oof_scores_v2.parquet")
 _OUT_PARQUET  = Path("outputs/v2_stacked_features.parquet")
 
 _SCORE_COLS = [
@@ -43,7 +43,7 @@ _SCORE_COLS = [
     "score_team_v2",
     "score_training_v2",
     "score_pace_v2",
-    "score_condition_v2",
+    "score_pedigree_v1",
 ]
 
 

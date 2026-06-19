@@ -655,6 +655,23 @@ def _derive_db_race_id(race_date, keibajo_code: str, race_num: int) -> str:
     return pd.Timestamp(race_date).strftime("%Y%m%d") + str(keibajo_code).zfill(2) + str(race_num).zfill(2)
 
 
+def _coerce_numeric(df: pd.DataFrame, exclude: list[str] | None = None) -> pd.DataFrame:
+    """object列をfloat64にcoerceする。
+
+    feature_store 系の DataFrame は psycopg2 の RealDictCursor.fetchall() を
+    そのまま pd.DataFrame() に渡して構築している。対象レースの全行で
+    ある列が NULL の場合、pandas は型推定の手がかり(non-null float)が無いため
+    その列を float64 ではなく object にしてしまい、LightGBM の predict() が
+    "pandas dtypes must be int, float or bool" で落ちる。
+    ID列等(文字列であるべき列)は exclude で除外すること。
+    """
+    exclude_set = set(exclude or [])
+    for col in df.columns:
+        if col not in exclude_set and df[col].dtype == object:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def _fetch_feature_stores(
     db_race_id: str,
     horse_ids: list[str],
@@ -672,7 +689,7 @@ def _fetch_feature_stores(
                 "FROM horse_rating_store WHERE race_id = %s",
                 (db_race_id,),
             )
-            hr = pd.DataFrame(cur.fetchall())
+            hr = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["race_id", "horse_id"])
 
             cur.execute(
                 "SELECT race_id, ketto_toroku_bango AS horse_id, "
@@ -680,7 +697,7 @@ def _fetch_feature_stores(
                 "FROM chokyo_scores WHERE race_id = %s",
                 (db_race_id,),
             )
-            cs = pd.DataFrame(cur.fetchall())
+            cs = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["race_id", "horse_id"])
 
             cur.execute(
                 "SELECT race_id, ketto_toroku_bango AS horse_id, "
@@ -688,7 +705,7 @@ def _fetch_feature_stores(
                 "FROM aptitude_scores WHERE race_id = %s",
                 (db_race_id,),
             )
-            apt = pd.DataFrame(cur.fetchall())
+            apt = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["race_id", "horse_id"])
 
             # jockey/trainer/sire は「race_date 以前の最新 target_date」で取得
             # フィーチャーストアが今週分まで更新されていない場合でも直前週のデータを使う
@@ -709,7 +726,7 @@ def _fetch_feature_stores(
                 "WHERE kishu_code = ANY(%s) AND target_date = %s",
                 (jockey_cds, jf_date),
             )
-            jf = pd.DataFrame(cur.fetchall())
+            jf = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["jockey_cd"])
             logger.debug("[FeatureStore] jockey date=%s rows=%d", jf_date, len(jf))
 
             cur.execute(
@@ -727,7 +744,7 @@ def _fetch_feature_stores(
                 "WHERE chokyoshi_code = ANY(%s) AND target_date = %s",
                 (trainer_cds, tf_date),
             )
-            tf = pd.DataFrame(cur.fetchall())
+            tf = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["trainer_cd"])
             logger.debug("[FeatureStore] trainer date=%s rows=%d", tf_date, len(tf))
 
             cur.execute(
@@ -743,7 +760,7 @@ def _fetch_feature_stores(
                 "WHERE horse_id = ANY(%s) AND target_date = %s",
                 (horse_ids, trf_date),
             )
-            trf = pd.DataFrame(cur.fetchall())
+            trf = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["horse_id"])
             logger.debug("[FeatureStore] training date=%s rows=%d", trf_date, len(trf))
 
             # ── sire_feature_store: 父・母父の血統統計 ──────────────────────────
@@ -775,7 +792,7 @@ def _fetch_feature_stores(
                     "WHERE sire_id = ANY(%s) AND target_date = %s",
                     (all_sire_ids, sf_date),
                 )
-                sire_store = pd.DataFrame(cur.fetchall())
+                sire_store = _coerce_numeric(pd.DataFrame(cur.fetchall()), exclude=["sire_id"])
                 logger.debug("[FeatureStore] sire date=%s rows=%d", sf_date, len(sire_store))
 
     return {"hr": hr, "cs": cs, "apt": apt, "jf": jf, "tf": tf, "trf": trf, "sire_store": sire_store}

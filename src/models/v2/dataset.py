@@ -32,13 +32,22 @@ class Dataset(NamedTuple):
     raw: pd.DataFrame     # 数値変換済み全カラム（evaluate.py で tan_odds 等を参照）
 
 
-def _resolve_feature_cols(df: pd.DataFrame) -> list[str]:
+def _resolve_feature_cols(
+    df: pd.DataFrame,
+    feature_override: list[str] | None = None,
+) -> list[str]:
     """利用可能な特徴量カラムを動的解決する。
 
     V2 スタック Parquet（v2_stacked_features.parquet）には score_* 列が存在するため、
     その場合はサブモデルスコア 6 列のみを特徴量として使う（stacking モード）。
     それ以外は従来の flat モードで動作する（下位互換）。
+
+    feature_override が指定されている場合はそのリストを優先する（サブモデル選択など）。
     """
+    # 明示的な上書きが指定されている場合（例: training_v2/pedigree_v1 除外）
+    if feature_override is not None:
+        return [c for c in feature_override if c in df.columns]
+
     # stacking モード: 6 サブモデルスコア列がすべて揃っている場合
     if all(c in df.columns for c in FEATURES_SUBMODEL):
         return list(FEATURES_SUBMODEL)
@@ -84,7 +93,8 @@ def _prepare_numerics(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # その他のobject/str型数値列（basis_weight, tan_odds は元データでobject）
-    for col in ["basis_weight", "tan_odds", "zen_3f", "go_3f"]:
+    for col in ["basis_weight", "tan_odds", "zen_3f", "go_3f",
+                "horse_sex", "horse_age", "pace_type"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -101,7 +111,11 @@ def _to_relevance(chakujun: pd.Series) -> pd.Series:
     return rel
 
 
-def load(parquet_path: str | Path, mode: str = "rank") -> Dataset:
+def load(
+    parquet_path: str | Path,
+    mode: str = "rank",
+    feature_override: list[str] | None = None,
+) -> Dataset:
     """
     Args:
         parquet_path: generate_pace_features.py が出力したParquetのパス
@@ -119,7 +133,7 @@ def load(parquet_path: str | Path, mode: str = "rank") -> Dataset:
     # 数値変換（全必要カラムを一括処理）
     df = _prepare_numerics(df)
 
-    feature_cols = _resolve_feature_cols(df)
+    feature_cols = _resolve_feature_cols(df, feature_override=feature_override)
     missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         raise KeyError(f"Parquetに存在しない特徴量カラム: {missing}")

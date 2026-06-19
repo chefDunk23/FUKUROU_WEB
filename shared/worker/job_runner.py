@@ -633,6 +633,59 @@ def _handle_recompute_predictions(params: dict, ctx: JobContext) -> None:
     )
 
 
+@register("run_tipster_evaluation")
+def _handle_run_tipster_evaluation(params: dict, ctx: JobContext) -> None:
+    """予想家(Tipster)戦略を評価し、HTMLレポートを生成する。
+
+    params:
+        race_ids:      list[str] | None — 省略時は今週末の全レース
+        strategy:      str — 戦略名 (tipster/strategies/*.json、デフォルト "honmei_v1")
+        output_format: "html" — 現状 html のみ対応
+    """
+    from datetime import date as _date
+
+    from tipster.engine import evaluate_race
+    from tipster.renderer import render_race_html, render_weekend_html
+
+    strategy: str = params.get("strategy", "honmei_v1")
+    race_ids: list[str] | None = params.get("race_ids")
+
+    ctx.append_log(f"[run_tipster_evaluation] strategy={strategy} 開始")
+    ctx.report_progress(5)
+
+    if not race_ids:
+        from api_v2.services.batch_predictor import get_weekend_race_ids
+        race_ids = get_weekend_race_ids()
+
+    ctx.append_log(f"対象 race_ids: {len(race_ids)} 件")
+    if not race_ids:
+        ctx.append_log("対象レースなし — 完了")
+        return
+
+    strategy_dir = Path("data/output/tipster") / strategy
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+
+    evaluations = []
+    failed = 0
+    for i, rid in enumerate(race_ids):
+        try:
+            ev = evaluate_race(rid, strategy)
+            render_race_html(ev, strategy_dir / f"{rid}.html")
+            evaluations.append(ev)
+        except Exception as e:
+            failed += 1
+            ctx.append_log(f"  race_id={rid} 失敗: {e}")
+        ctx.report_progress(5 + int(90 * (i + 1) / len(race_ids)))
+
+    summary_path = Path("data/output/tipster") / f"{strategy}_{_date.today().isoformat()}.html"
+    render_weekend_html(evaluations, summary_path, link_prefix=f"{strategy}/")
+    ctx.set_artifact(str(summary_path))
+    ctx.report_progress(100)
+    ctx.append_log(
+        f"[run_tipster_evaluation] 完了: 成功={len(evaluations)} / 失敗={failed} / 出力={summary_path}"
+    )
+
+
 # ── ワーカーループ ─────────────────────────────────────────────────────────────
 
 _SQL_DEQUEUE = """

@@ -48,7 +48,11 @@ def _group_sizes(groups: "pd.Series") -> np.ndarray:
     return np.diff(boundaries).astype(np.int32)
 
 
-def train(parquet_path: str | Path, mode: str = "rank") -> None:
+def train(
+    parquet_path: str | Path,
+    mode: str = "rank",
+    feature_override: list[str] | None = None,
+) -> None:
     """
     GroupKFold CV でLightGBMを学習し、各foldのモデルと評価結果を outputs/v2/ に保存する。
 
@@ -59,7 +63,7 @@ def train(parquet_path: str | Path, mode: str = "rank") -> None:
     _MODEL_DIR.mkdir(parents=True, exist_ok=True)
     _EVAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    ds = load(parquet_path, mode=mode)
+    ds = load(parquet_path, mode=mode, feature_override=feature_override)
     log.info("データ読み込み完了: %d行 / %dレース / %d特徴量",
              len(ds.X), ds.groups.nunique(), ds.X.shape[1])
     log.info("使用特徴量: %s", ds.X.columns.tolist())

@@ -34,6 +34,7 @@ _KNOWN_JOB_TYPES = frozenset({
     "classic_video_generate_prompt",
     "classic_video_render",
     "import_bloodline_masters",
+    "run_tipster_evaluation",
 })
 
 

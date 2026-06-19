@@ -3,11 +3,9 @@ from __future__ import annotations
 
 # ── 特徴量グループ ──────────────────────────────────────────────────────────
 
-# グループ1: 競馬場の物理展開ファクター（コース物理マスタ由来）
+# グループ1: コース物理特性（コース物理マスタ由来）
+# NOTE: pace_index / lap_variance / lap_std は事後データのため V2 では永久除外
 FEATURES_PHYSICAL: list[str] = [
-    "pace_index",
-    "lap_variance",
-    "lap_std",
     "straight_dist",
     "dist_to_corner1",
     "elevation_diff",
@@ -89,6 +87,7 @@ NUMERIC_CODE_COLS: list[str] = [
     "tenko_code",
     "shiba_baba_code",
     "dirt_baba_code",
+    "horse_sex",
 ]
 
 # grade_code は英字コードのため固定マッピングで整数エンコード
@@ -115,7 +114,7 @@ FEATURES_SUBMODEL: list[str] = [
     "score_team_v2",
     "score_training_v2",
     "score_pace_v2",
-    "score_condition_v2",
+    "score_pedigree_v1",
 ]
 
 # 目的変数・グループキー

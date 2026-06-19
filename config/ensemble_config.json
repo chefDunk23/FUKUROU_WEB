@@ -1,0 +1,20 @@
+{
+  "active_submodel_scores": [
+    "score_ability_v2",
+    "score_course_v2",
+    "score_team_v2",
+    "score_training_v2",
+    "score_pace_v2",
+    "score_pedigree_v1"
+  ],
+  "excluded_submodel_scores": [],
+  "all_submodel_scores": [
+    "score_ability_v2",
+    "score_course_v2",
+    "score_team_v2",
+    "score_training_v2",
+    "score_pace_v2",
+    "score_pedigree_v1"
+  ],
+  "_note": "turf=all 6, dirt=ability/course/team/pace (training_v2 and pedigree_v1 excluded)"
+}

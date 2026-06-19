@@ -1,0 +1,17 @@
+# archive — コールドスリープ済みプロジェクト。コンテキストに読み込まない
+archive/
+
+# 生成データ・出力ファイル（コードではない）
+data/output/
+data/input/
+data/predictions/
+owl_video/out/
+owl_video/public/audio/
+
+# Python キャッシュ
+**/__pycache__/
+**/*.pyc
+
+# モデルバイナリ
+models/
+outputs/
