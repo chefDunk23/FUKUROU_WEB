@@ -33,6 +33,8 @@ class RankingConfig(BaseModel):
     primary: str = "condition_clear_count"
     secondary: str = "ai_score"
     max_selections: int = 3
+    min_total_score: float | None = None         # 本命の合計スコア下限（未満は本命なし扱い）
+    max_candidates_for_honmei: int | None = None  # 足切り後の候補数がこれを超えたら本命なし扱い
 
 
 class Strategy(BaseModel):
@@ -87,6 +89,9 @@ class PastRaceInfo:
     member_level_score: float | None
     opponents_next_races: list[PastRaceOpponent] = field(default_factory=list)
     grade_code: str | None = None   # races.grade_code (DB補完。A=G1/B=G2/C=G3...)
+    place_code: str | None = None   # races.place_code（course_fitness/海外帰り判定用）
+    jyoken_cd_3: str | None = None  # races.jyoken_cd_3（class_direction の細分化用）
+    class_level: int | None = None  # 新馬=1〜G1=10 の序列（conditions._class_level_from_codes）
 
 
 @dataclass
@@ -119,6 +124,9 @@ class HorseContext:
     jockey_change_step1_same_race: bool = False     # 前走騎手が同レース内の別馬に騎乗
     jockey_change_step2_other_venue: bool = False    # 前走騎手が同日別会場で騎乗
     jockey_change_affinity: dict[str, Any] | None = None  # synergy_store (新騎手×厩舎)
+    jockey_venue_win_rate: float | None = None      # 今回の競馬場での騎手勝率 (jockey_feature_store)
+    jockey_overall_win_rate: float | None = None    # 騎手の全体勝率（コース巧者判定の基準値）
+    overseas_interim_place_code: str | None = None  # 前走(JRA)と今回の間に地方/海外出走があればそのplace_code
 
 
 @dataclass
@@ -137,6 +145,9 @@ class RaceContext:
     front_bias_pit: float | None = None     # >0: 前残り(前付け有利) / <0: 差し決着favored
     inner_bias_pit: float | None = None
     bias_source: str = "none"               # "track_bias_pit" | "course_profile_store" | "none"
+    jyoken_cd_3: str | None = None          # races.jyoken_cd_3（class_direction の細分化用）
+    class_level: int | None = None          # 新馬=1〜G1=10 の序列
+    pace_prediction: str | None = None      # "fast" | "medium" | "slow"（出走馬構成からの簡易予想）
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -172,3 +183,51 @@ class RaceEvaluation(BaseModel):
     candidates: list[HorseEvaluation] = Field(default_factory=list)
     eliminated_horses: list[HorseEvaluation] = Field(default_factory=list)
     eliminated_count: int = 0
+    honmei: HorseEvaluation | None = None    # select_honmei() による単一本命（min_total_score等のゲート適用後）
+    eligible_count: int = 0                   # 足切り後・max_selections適用前の候補馬数
+    confidence: str | None = None             # "S"/"A"/"B"/"C"（compute_confidence参照）
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# バックテスト結果
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class GradeStats(BaseModel):
+    """ある集計単位（全体/グレード別/距離区分別）の本命成績。"""
+    race_count: int = 0
+    win_count: int = 0
+    place_count: int = 0
+    win_rate: float = 0.0
+    place_rate: float = 0.0
+    avg_win_odds: float = 0.0
+    tan_return_rate: float = 0.0     # 単勝回収率（100円均一買い）
+    fuku_return_rate: float = 0.0    # 複勝回収率（概算。複勝オッズ未保存のため近似式を使用）
+
+
+class ConditionEffectiveness(BaseModel):
+    """条件1つを無効化した場合との比較（有効性分析）。"""
+    condition_id: str
+    applied_count: int = 0       # この条件が実際に評価されたレース数
+    eliminated_count: int = 0    # この条件で除外された馬の数（with_condition側）
+    with_condition: GradeStats = Field(default_factory=GradeStats)
+    without_condition: GradeStats = Field(default_factory=GradeStats)
+    lift: float = 1.0            # with.tan_return_rate / without.tan_return_rate
+
+
+class BacktestResult(BaseModel):
+    """run_backtest() の1期間分の結果。"""
+    strategy: str
+    strategy_version: str
+    from_date: str
+    to_date: str
+    period_label: str = ""
+    total_races: int = 0
+    skipped_races: int = 0
+    honmei_results: GradeStats = Field(default_factory=GradeStats)
+    grade_breakdown: dict[str, GradeStats] = Field(default_factory=dict)
+    distance_breakdown: dict[str, GradeStats] = Field(default_factory=dict)
+    surface_breakdown: dict[str, GradeStats] = Field(default_factory=dict)
+    confidence_breakdown: dict[str, GradeStats] = Field(default_factory=dict)  # "S"/"A"/"B"/"C" 別集計
+    condition_analysis: dict[str, ConditionEffectiveness] = Field(default_factory=dict)
+    generated_at: str = ""

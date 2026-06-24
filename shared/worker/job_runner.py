@@ -686,6 +686,54 @@ def _handle_run_tipster_evaluation(params: dict, ctx: JobContext) -> None:
     )
 
 
+@register("run_tipster_backtest")
+def _handle_run_tipster_backtest(params: dict, ctx: JobContext) -> None:
+    """予想家(Tipster)戦略を過去レースに遡って適用し、回収率等を集計する。
+
+    params:
+        strategy:         str — 戦略名 (デフォルト "honmei_v1")
+        reference_date:   str — 基準日 ("today" または "YYYY-MM-DD"、デフォルト "today")
+        periods:          list[str] — 集計期間 (デフォルト ["3m", "6m", "1y"])
+        grade_filter:      list[str] | None — グレードコード絞り込み (例: ["A","B","C"])
+        distance_filter:   list[str] | None — 距離区分絞り込み (例: ["sprint","mile"])
+
+    注意: race_detail_cache に依存しないDB直接クエリの軽量版を使うため _compute_detail は呼ばない。
+    1年規模の集計 + 条件別有効性分析は数分〜十数分かかる想定。
+    """
+    from tipster.backtest import run_backtest
+    from tipster.backtest_renderer import render_backtest_html
+
+    strategy: str = params.get("strategy", "honmei_v1")
+    reference_date: str = params.get("reference_date", "today")
+    periods: list[str] = params.get("periods") or ["3m", "6m", "1y"]
+    grade_filter = params.get("grade_filter")
+    distance_filter = params.get("distance_filter")
+
+    ctx.append_log(f"[run_tipster_backtest] strategy={strategy} reference_date={reference_date} periods={periods} 開始")
+    ctx.report_progress(5)
+
+    results = run_backtest(
+        strategy, reference_date=reference_date, periods=periods,
+        grade_filter=grade_filter, distance_filter=distance_filter,
+    )
+    ctx.report_progress(80)
+
+    for p, r in results.items():
+        hr = r.honmei_results
+        ctx.append_log(
+            f"  [{p}] {r.from_date}~{r.to_date}: 対象{r.total_races}レース(スキップ{r.skipped_races}) "
+            f"勝率={hr.win_rate:.1%} 複勝率={hr.place_rate:.1%} "
+            f"単勝回収率={hr.tan_return_rate:.1%} 複勝回収率={hr.fuku_return_rate:.1%}"
+        )
+
+    ref_str = reference_date if reference_date != "today" else __import__("datetime").date.today().isoformat()
+    output_path = Path("data/output/tipster") / f"backtest_{strategy}_{ref_str}.html"
+    render_backtest_html(results, output_path)
+    ctx.set_artifact(str(output_path))
+    ctx.report_progress(100)
+    ctx.append_log(f"[run_tipster_backtest] 完了: 出力={output_path}")
+
+
 # ── ワーカーループ ─────────────────────────────────────────────────────────────
 
 _SQL_DEQUEUE = """

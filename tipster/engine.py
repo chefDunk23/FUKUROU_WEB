@@ -12,12 +12,18 @@ evaluate_race(race_id, strategy_path) が:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import text
 
-from .conditions import CONDITION_REGISTRY
+from .conditions import (
+    CONDITION_REGISTRY,
+    _class_level_from_codes,
+    _class_level_from_label,
+    classify_pace_prediction,
+)
 from .models import (
     HorseContext,
     HorseEvaluation,
@@ -92,8 +98,8 @@ def _compute_payload_live(race_id: str) -> dict:
     return resp.model_dump(mode="json")
 
 
-def _collect_past_race_ids(horses_raw: list[dict], limit: int = 2) -> set[str]:
-    """race_level の前走/前々走判定に使う grade_code 取得対象の race_id（DB形式に変換済み）を集める。"""
+def _collect_past_race_ids(horses_raw: list[dict], limit: int = 5) -> set[str]:
+    """course_fitness（過去5走）/ race_level（過去2走）が使う補足情報の取得対象 race_id を集める。"""
     ids: set[str] = set()
     for h in horses_raw:
         extra = h.get("extra") or {}
@@ -104,20 +110,21 @@ def _collect_past_race_ids(horses_raw: list[dict], limit: int = 2) -> set[str]:
     return ids
 
 
-def _fetch_grade_codes(race_ids: set[str]) -> dict[str, str | None]:
+def _fetch_past_race_extra(race_ids: set[str]) -> dict[str, dict]:
+    """過去走の grade_code / place_code / jyoken_cd_3 をまとめて取得する。"""
     if not race_ids:
         return {}
     from ml.db import engine as _engine
 
     with _engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT id, grade_code FROM races WHERE id = ANY(:ids)"),
+            text("SELECT id, grade_code, place_code, jyoken_cd_3 FROM races WHERE id = ANY(:ids)"),
             {"ids": list(race_ids)},
         ).fetchall()
-    return {row[0]: row[1] for row in rows}
+    return {row[0]: {"grade_code": row[1], "place_code": row[2], "jyoken_cd_3": row[3]} for row in rows}
 
 
-def _parse_past_race(pr: dict, grade_map: dict[str, str | None]) -> PastRaceInfo:
+def _parse_past_race(pr: dict, extra_map: dict[str, dict]) -> PastRaceInfo:
     rs = pr.get("race_score") or {}
     opponents = [
         PastRaceOpponent(
@@ -129,7 +136,9 @@ def _parse_past_race(pr: dict, grade_map: dict[str, str | None]) -> PastRaceInfo
         for o in (pr.get("opponents_next_races") or [])
     ]
     raw_race_id = pr.get("race_id")
-    grade_code = grade_map.get(_to_db_race_id(raw_race_id)) if raw_race_id else None
+    db_extra = extra_map.get(_to_db_race_id(raw_race_id), {}) if raw_race_id else {}
+    grade_code = db_extra.get("grade_code")
+    jyoken_cd_3 = db_extra.get("jyoken_cd_3")
     return PastRaceInfo(
         race_id=raw_race_id,
         date=pr.get("date"),
@@ -143,6 +152,9 @@ def _parse_past_race(pr: dict, grade_map: dict[str, str | None]) -> PastRaceInfo
         member_level_score=rs.get("member_level_score"),
         opponents_next_races=opponents,
         grade_code=grade_code,
+        place_code=db_extra.get("place_code"),
+        jyoken_cd_3=jyoken_cd_3,
+        class_level=_class_level_from_codes(grade_code, jyoken_cd_3),
     )
 
 
@@ -151,12 +163,15 @@ def _fetch_race_meta(race_id: str) -> dict:
 
     with _engine.connect() as conn:
         row = conn.execute(
-            text("SELECT place_code, distance, course_type, date FROM races WHERE id = :rid"),
+            text("SELECT place_code, distance, course_type, date, jyoken_cd_3 FROM races WHERE id = :rid"),
             {"rid": race_id},
         ).fetchone()
     if row is None:
         return {}
-    return {"place_code": row[0], "distance": row[1], "course_type": row[2], "date": row[3]}
+    return {
+        "place_code": row[0], "distance": row[1], "course_type": row[2], "date": row[3],
+        "jyoken_cd_3": row[4],
+    }
 
 
 # course_profile_store.surface は英語表記("turf"/"dirt")。races.course_type は日本語("芝"/"ダート")。
@@ -281,6 +296,19 @@ def _fetch_supplementary(race_id: str, meta: dict, horses_raw: list[dict]) -> di
                 if jrow:
                     entry["jockey_yr_wins"], entry["jockey_career_wins"] = jrow[0], jrow[1]
 
+            if jockey_id and place_code and re.fullmatch(r"(0[1-9]|10)", str(place_code)):
+                venue_col = f"venue_{place_code}_win_rate"  # place_code は上の正規表現で検証済み
+                vrow = conn.execute(
+                    text(
+                        f"SELECT win_rate, {venue_col} FROM jockey_feature_store "
+                        "WHERE kishu_code=:jid AND target_date <= :rd "
+                        "ORDER BY target_date DESC LIMIT 1"
+                    ),
+                    {"jid": jockey_id, "rd": race_date},
+                ).fetchone()
+                if vrow:
+                    entry["jockey_overall_win_rate"], entry["jockey_venue_win_rate"] = vrow[0], vrow[1]
+
             out[hid] = entry
     return out
 
@@ -290,7 +318,7 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
     meta = _fetch_race_meta(race_id)
     bias = _fetch_track_bias(race_id, meta)
     supp = _fetch_supplementary(race_id, meta, horses_raw)
-    grade_map = _fetch_grade_codes(_collect_past_race_ids(horses_raw))
+    extra_map = _fetch_past_race_extra(_collect_past_race_ids(horses_raw))
 
     horses: list[HorseContext] = []
     for h in horses_raw:
@@ -315,7 +343,7 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
             prev_race_rank=extra.get("prev_race_rank"),
             prev_race_grade=extra.get("prev_race_grade"),
             prev_race_days_ago=extra.get("prev_race_days_ago"),
-            past_races=[_parse_past_race(pr, grade_map) for pr in (extra.get("past_races") or [])],
+            past_races=[_parse_past_race(pr, extra_map) for pr in (extra.get("past_races") or [])],
             tan_odds=h.get("tan_odds"),
             prev_burden_weight=s.get("prev_burden_weight"),
             prev_jockey_id=s.get("prev_jockey_id"),
@@ -324,7 +352,21 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
             jockey_change_step1_same_race=s.get("step1", False),
             jockey_change_step2_other_venue=s.get("step2", False),
             jockey_change_affinity=s.get("affinity"),
+            jockey_venue_win_rate=s.get("jockey_venue_win_rate"),
+            jockey_overall_win_rate=s.get("jockey_overall_win_rate"),
+            # 海外/地方帰り判定はバックテスト(軽量パス)限定の実装。ライブパスでは
+            # past_races[0].place_code（DB補完済み）による簡易判定に委ねる。
+            overseas_interim_place_code=None,
         ))
+
+    race_grade_code = payload.get("grade_code")
+    race_jyoken_cd_3 = meta.get("jyoken_cd_3")
+    race_class_label = payload.get("class_label")
+    # payload.grade_code は races.grade_code(A/B/C/L) とは別の数値エンコーディングのため
+    # class_level 判定には使えない。class_label（"G1"等の文字列、生成済みで信頼できる）を優先する。
+    race_class_level = _class_level_from_label(race_class_label)
+    if race_class_level is None:
+        race_class_level = _class_level_from_codes(race_grade_code, race_jyoken_cd_3)
 
     return RaceContext(
         race_id=race_id,
@@ -334,8 +376,11 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
         keibajo_name=payload.get("keibajo_name"),
         distance=payload.get("distance"),
         surface=meta.get("course_type"),
-        class_label=payload.get("class_label"),
-        grade_code=payload.get("grade_code"),
+        class_label=race_class_label,
+        grade_code=race_grade_code,
+        jyoken_cd_3=race_jyoken_cd_3,
+        class_level=race_class_level,
+        pace_prediction=classify_pace_prediction(horses),
         horses=horses,
         front_bias_pit=bias.get("front_bias_pit"),
         inner_bias_pit=bias.get("inner_bias_pit"),
@@ -348,15 +393,84 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def evaluate_race(race_id: str, strategy: str | Path | Strategy) -> RaceEvaluation:
-    """1レースに戦略を適用し、候補馬ランキングを返す。"""
-    strat = strategy if isinstance(strategy, Strategy) else load_strategy(strategy)
-    race_ctx = fetch_race_context(race_id)
+def _ranking_metric(ev: HorseEvaluation, name: str) -> float:
+    if name == "condition_clear_count":
+        return float(ev.clear_count)
+    if name == "ai_score":
+        return ev.ai_score
+    if name == "total_score":
+        return ev.total_score
+    return 0.0
 
+
+def select_honmei(
+    candidates: list[HorseEvaluation],
+    umaban_map: dict[str, int | None],
+    min_total_score: float | None = None,
+    max_candidates_for_honmei: int | None = None,
+) -> HorseEvaluation | None:
+    """本命選定ルール: 条件クリア数 → 合計スコア → AIスコア → 馬番(若い方)、の順で決定的に1頭選ぶ。
+
+    candidates は除外されていない馬の全件（max_selections による上位カット前）を渡すこと。
+    - max_candidates_for_honmei 指定時: 候補数がこれを超えるレースは「足切りが効いていない
+      = 自信度が低い」とみなし、本命なし(None)を返す。
+    - min_total_score 指定時: 合計スコアがこれ未満の馬は本命候補から除外する。
+      全馬が閾値未満なら本命なし(None)。
+    """
+    if max_candidates_for_honmei is not None and len(candidates) > max_candidates_for_honmei:
+        return None
+    pool = candidates
+    if min_total_score is not None:
+        pool = [c for c in candidates if c.total_score >= min_total_score]
+    if not pool:
+        return None
+    return min(
+        pool,
+        key=lambda c: (
+            -c.clear_count,
+            -c.total_score,
+            -c.ai_score,
+            umaban_map.get(c.horse_id) if umaban_map.get(c.horse_id) is not None else 9999,
+        ),
+    )
+
+
+def compute_confidence(honmei: HorseEvaluation | None, eligible_count: int) -> str:
+    """本命の自信度を S/A/B/C でラベル化する（AY-3）。
+
+    honmei が None（本命なし）の場合は常に "C"（様子見推奨）。
+    min_total_score/max_candidates_for_honmei によるゲートを適用した本命に対して計算すると、
+    ゲート自体がB/C相当のケースを既に除外しているため実質 S/A/C にしかならない
+    （バックテストでの閾値検証目的にはゲート無しの本命で計算すること）。
+    """
+    if honmei is None:
+        return "C"
+    score = honmei.total_score
+    if score >= 5.0 and eligible_count <= 5:
+        return "S"
+    if score >= 3.0 and eligible_count <= 8:
+        return "A"
+    if score >= 2.0:
+        return "B"
+    return "C"
+
+
+def evaluate_race_context(
+    race_ctx: RaceContext, strategy: Strategy, max_selections: int | None = None
+) -> RaceEvaluation:
+    """既に構築済みの RaceContext に戦略を適用する（DB アクセスなし・純粋関数）。
+
+    tipster/backtest.py の軽量コンテキスト（DB直接クエリ由来、_compute_detail不使用）にも
+    そのまま使えるよう、DB取得処理 (fetch_race_context) とは独立させている。
+
+    max_selections: 指定時は strategy.ranking.max_selections を上書きする。
+        バックテストで「除外されていない馬を全件取得し、本命選定ルールを別途適用したい」
+        ケース向け（例: len(race_ctx.horses) を渡して全件取得）。
+    """
     results: list[HorseEvaluation] = []
     for horse in race_ctx.horses:
         ev = HorseEvaluation(horse_id=horse.horse_id, horse_name=horse.horse_name, ai_score=horse.ai_score or 0.0)
-        for cond_cfg in strat.conditions:
+        for cond_cfg in strategy.conditions:
             if not cond_cfg.enabled:
                 continue
             fn = CONDITION_REGISTRY.get(cond_cfg.id)
@@ -373,29 +487,43 @@ def evaluate_race(race_id: str, strategy: str | Path | Strategy) -> RaceEvaluati
     candidates = [r for r in results if not r.eliminated]
     eliminated = [r for r in results if r.eliminated]
 
-    def _metric(ev: HorseEvaluation, name: str) -> float:
-        if name == "condition_clear_count":
-            return float(ev.clear_count)
-        if name == "ai_score":
-            return ev.ai_score
-        if name == "total_score":
-            return ev.total_score
-        return 0.0
-
     candidates.sort(
-        key=lambda ev: (-_metric(ev, strat.ranking.primary), -_metric(ev, strat.ranking.secondary))
+        key=lambda ev: (
+            -_ranking_metric(ev, strategy.ranking.primary),
+            -_ranking_metric(ev, strategy.ranking.secondary),
+        )
     )
 
+    eligible_count = len(candidates)
+    umaban_map = {h.horse_id: h.umaban for h in race_ctx.horses}
+    honmei = select_honmei(
+        candidates, umaban_map,
+        min_total_score=strategy.ranking.min_total_score,
+        max_candidates_for_honmei=strategy.ranking.max_candidates_for_honmei,
+    )
+    confidence = compute_confidence(honmei, eligible_count)
+
+    cap = max_selections if max_selections is not None else strategy.ranking.max_selections
     return RaceEvaluation(
-        race_id=race_id,
+        race_id=race_ctx.race_id,
         race_name=race_ctx.race_name,
-        strategy=strat.name,
-        strategy_version=strat.version,
+        strategy=strategy.name,
+        strategy_version=strategy.version,
         generated_at=datetime.now().isoformat(timespec="seconds"),
-        candidates=candidates[: strat.ranking.max_selections],
+        candidates=candidates[:cap],
         eliminated_horses=eliminated,
         eliminated_count=len(eliminated),
+        honmei=honmei,
+        eligible_count=eligible_count,
+        confidence=confidence,
     )
+
+
+def evaluate_race(race_id: str, strategy: str | Path | Strategy) -> RaceEvaluation:
+    """1レースに戦略を適用し、候補馬ランキングを返す（DB取得 + 評価）。"""
+    strat = strategy if isinstance(strategy, Strategy) else load_strategy(strategy)
+    race_ctx = fetch_race_context(race_id)
+    return evaluate_race_context(race_ctx, strat)
 
 
 # ─────────────────────────────────────────────────────────────────────────

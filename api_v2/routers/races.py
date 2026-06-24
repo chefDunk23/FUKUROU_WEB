@@ -1260,9 +1260,15 @@ def _fetch_daily_time_stats(
 
 def _fetch_opponents_next_races(
     race_ids: list[str],
+    as_of_date=None,
 ) -> dict[str, list[OpponentResult]]:
     """対象レースに出走した全馬の次走成績を 2クエリ + Python マッチングで取得。
     LATERAL JOIN を避けることで O(ms) を実現（idx_re_race / idx_re_horse 利用）。
+
+    as_of_date: 指定時、対戦相手の「次走」はこの日付より前に確定したものだけを採用する
+    （データリーク防止: 評価対象レースの発走日以降に確定した未来情報は使わない。
+    ライブ運用では常に当日推論のため通常は問題にならないが、過去レースへの遡及適用
+    （バックテスト等）では evaluation race の発走日を渡すこと）。
     Returns: {race_id: [OpponentResult, ...]} 着順昇順
     """
     if not race_ids:
@@ -1303,10 +1309,10 @@ def _fetch_opponents_next_races(
         past_dt  = row["race_date"]
         margin_raw = row.get("this_margin")
 
-        # horse の次走 = past_dt より後で最初のもの
+        # horse の次走 = past_dt より後で最初のもの（as_of_date 指定時はそれより前に確定済みのみ）
         next_rank: int | None = None
         for (future_dt, rank) in future_by_horse.get(hid, []):
-            if future_dt > past_dt:
+            if future_dt > past_dt and (as_of_date is None or future_dt < as_of_date):
                 next_rank = rank
                 break
 
@@ -1570,7 +1576,7 @@ def _compute_detail(race_id: str) -> "RaceDetailResponse | None":
     past5_map, past_race_ids, race_meta_map = _fetch_past_5_races(horse_ids, race_date)
 
     t_opp = time.perf_counter()
-    opponents_map = _fetch_opponents_next_races(past_race_ids)
+    opponents_map = _fetch_opponents_next_races(past_race_ids, as_of_date=race_date)
     logger.info("[RaceDetail] opponents_next_races: %d races, %.3fs",
                 len(past_race_ids), time.perf_counter() - t_opp)
 

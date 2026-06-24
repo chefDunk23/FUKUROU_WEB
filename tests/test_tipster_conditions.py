@@ -6,9 +6,14 @@ tipster/conditions.py の5条件関数の単体テスト（モックコンテキ
 from __future__ import annotations
 
 from tipster.conditions import (
+    check_class_direction,
+    check_course_fitness,
     check_jockey_change,
+    check_jockey_intent,
     check_min_odds,
+    check_pace_position,
     check_race_level,
+    check_rest_interval,
     check_time_gap,
     check_track_bias_fit,
     check_weight_change,
@@ -328,3 +333,241 @@ def test_min_odds_below_threshold_fails():
     horse = _horse(tan_odds=3.0)
     result = check_min_odds(horse, _race(), {"min_tan_odds": 10.0})
     assert result.passed is False and result.score == -1.0
+
+
+# ── course_fitness ───────────────────────────────────────────────────────────
+
+
+def test_course_fitness_no_data_holds_neutral():
+    horse = _horse(past_races=[])
+    result = check_course_fitness(horse, _race(place_code="05", distance=1600), {})
+    assert result.passed is True and result.score == 0.0
+
+
+def test_course_fitness_same_course_good_run():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=2, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code="05",
+    )
+    horse = _horse(past_races=[prev])
+    race = _race(place_code="05", distance=1700, surface="芝")
+    result = check_course_fitness(horse, race, {"distance_tolerance": 200})
+    assert result.score == 2.0
+    assert "好走歴" in result.reason
+
+
+def test_course_fitness_same_course_bad_run():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=10, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code="05",
+    )
+    horse = _horse(past_races=[prev])
+    race = _race(place_code="05", distance=1600, surface="芝")
+    result = check_course_fitness(horse, race, {"distance_tolerance": 200})
+    assert result.score == -1.0
+
+
+def test_course_fitness_similar_course_good_run():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=1, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code="06",
+    )
+    horse = _horse(past_races=[prev])
+    race = _race(place_code="05", distance=1600, surface="芝")
+    result = check_course_fitness(horse, race, {"distance_tolerance": 200, "similar_courses": {"05": ["06"]}})
+    assert result.score == 1.0
+    assert "類似コース" in result.reason
+
+
+def test_course_fitness_no_experience_neutral():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=1, distance=2400, surface="ダート",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code="08",
+    )
+    horse = _horse(past_races=[prev])
+    race = _race(place_code="05", distance=1600, surface="芝")
+    result = check_course_fitness(horse, race, {"distance_tolerance": 200, "similar_courses": {}})
+    assert result.score == 0.0
+
+
+# ── pace_position ────────────────────────────────────────────────────────────
+
+
+def test_pace_position_no_data_holds_neutral():
+    horse = _horse(position_tendency=None)
+    result = check_pace_position(horse, _race(pace_prediction=None), {})
+    assert result.passed is True and result.score == 0.0
+
+
+def test_pace_position_fast_closer_bonus():
+    horse = _horse(position_tendency=0.8)
+    result = check_pace_position(horse, _race(pace_prediction="fast"), {})
+    assert result.score == 2.0
+
+
+def test_pace_position_fast_front_penalty():
+    horse = _horse(position_tendency=0.1)
+    result = check_pace_position(horse, _race(pace_prediction="fast"), {})
+    assert result.score == -1.0
+
+
+def test_pace_position_slow_front_bonus():
+    horse = _horse(position_tendency=0.1)
+    result = check_pace_position(horse, _race(pace_prediction="slow"), {})
+    assert result.score == 2.0
+
+
+def test_pace_position_slow_closer_penalty():
+    horse = _horse(position_tendency=0.8)
+    result = check_pace_position(horse, _race(pace_prediction="slow"), {})
+    assert result.score == -1.0
+
+
+def test_pace_position_medium_neutral():
+    horse = _horse(position_tendency=0.5)
+    result = check_pace_position(horse, _race(pace_prediction="medium"), {})
+    assert result.score == 0.0
+
+
+# ── class_direction ──────────────────────────────────────────────────────────
+
+
+def test_class_direction_no_data_holds_neutral():
+    horse = _horse(past_races=[])
+    result = check_class_direction(horse, _race(class_level=None), {})
+    assert result.passed is True and result.score == 0.0
+
+
+def test_class_direction_downgrade():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=5, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], class_level=6,
+    )
+    horse = _horse(past_races=[prev])
+    result = check_class_direction(horse, _race(class_level=4), {})
+    assert result.score == 2.0
+
+
+def test_class_direction_same():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=5, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], class_level=4,
+    )
+    horse = _horse(past_races=[prev])
+    result = check_class_direction(horse, _race(class_level=4), {})
+    assert result.score == 1.0
+
+
+def test_class_direction_upgrade():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=1, distance=1600, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], class_level=4,
+    )
+    horse = _horse(past_races=[prev])
+    result = check_class_direction(horse, _race(class_level=6), {})
+    assert result.score == -1.0
+
+
+def test_class_direction_g1_to_g1():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=1, distance=2000, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], class_level=10,
+    )
+    horse = _horse(past_races=[prev])
+    result = check_class_direction(horse, _race(class_level=10), {})
+    assert result.score == 3.0
+
+
+# ── rest_interval ────────────────────────────────────────────────────────────
+
+
+def test_rest_interval_no_data_holds_neutral():
+    horse = _horse(prev_race_days_ago=None, past_races=[])
+    result = check_rest_interval(horse, _race(), {})
+    assert result.passed is True and result.score == 0.0
+
+
+def test_rest_interval_rentou_penalty():
+    horse = _horse(prev_race_days_ago=7, past_races=[])
+    result = check_rest_interval(horse, _race(), {})
+    assert result.score == -1.0
+
+
+def test_rest_interval_optimal_bonus():
+    horse = _horse(prev_race_days_ago=21, past_races=[])
+    result = check_rest_interval(horse, _race(), {"optimal_min": 15, "optimal_max": 35})
+    assert result.score == 1.0
+
+
+def test_rest_interval_slightly_short_neutral():
+    # _RENTOU_THRESHOLD_DAYS(14)より長いが、カスタムoptimal_min(20)未満の「やや短い」帯
+    horse = _horse(prev_race_days_ago=17, past_races=[])
+    result = check_rest_interval(horse, _race(), {"optimal_min": 20, "optimal_max": 35})
+    assert result.score == 0.0
+
+
+def test_rest_interval_slightly_long_neutral():
+    horse = _horse(prev_race_days_ago=50, past_races=[])
+    result = check_rest_interval(horse, _race(), {"optimal_min": 15, "optimal_max": 35, "long_rest_threshold": 71})
+    assert result.score == 0.0
+
+
+def test_rest_interval_long_rest_penalty():
+    horse = _horse(prev_race_days_ago=90, past_races=[])
+    result = check_rest_interval(horse, _race(), {"long_rest_threshold": 71})
+    assert result.score == -1.0
+
+
+def test_rest_interval_overseas_penalty_via_field():
+    horse = _horse(prev_race_days_ago=30, past_races=[], overseas_interim_place_code="A4")
+    result = check_rest_interval(horse, _race(), {"overseas_penalty": -2})
+    assert result.score == -2.0
+    assert "海外" in result.reason
+
+
+def test_rest_interval_overseas_penalty_via_past_race_place_code():
+    prev = PastRaceInfo(
+        race_id="P1", date="2026-01-01", rank=1, distance=2000, surface="芝",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code="B2",
+    )
+    horse = _horse(prev_race_days_ago=30, past_races=[prev])
+    result = check_rest_interval(horse, _race(), {"overseas_penalty": -2})
+    assert result.score == -2.0
+
+
+# ── jockey_intent ────────────────────────────────────────────────────────────
+
+
+def test_jockey_intent_delegates_to_jockey_change_base():
+    horse = _horse(jockey_id="J_NEW", prev_jockey_id="J_OLD", jockey_change_step1_same_race=True)
+    result = check_jockey_intent(horse, _race(), {})
+    assert result.score == -1.0  # check_jockey_change の Step1 ペナルティがそのまま伝播
+
+
+def test_jockey_intent_course_specialist_bonus():
+    horse = _horse(
+        jockey_id="J_NEW", prev_jockey_id="J_OLD",
+        jockey_venue_win_rate=0.20, jockey_overall_win_rate=0.10,
+    )
+    result = check_jockey_intent(horse, _race(), {"course_winrate_bonus_pct": 20})
+    # base(騎手変更中立 score=0.0) + コース巧者加点(+1.0)
+    assert result.score == 1.0
+    assert "コース巧者" in result.reason
+
+
+def test_jockey_intent_no_bonus_when_not_specialist():
+    horse = _horse(
+        jockey_id="J_NEW", prev_jockey_id="J_OLD",
+        jockey_venue_win_rate=0.11, jockey_overall_win_rate=0.10,
+    )
+    result = check_jockey_intent(horse, _race(), {"course_winrate_bonus_pct": 20})
+    assert result.score == 0.0

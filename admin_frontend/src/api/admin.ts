@@ -118,6 +118,12 @@ export const JOB_TYPES: JobType[] = [
     implemented: true,
     defaultParams: { strategy: 'honmei_v1', output_format: 'html' },
   },
+  {
+    id: 'run_tipster_backtest',
+    label: '予想家バックテスト',
+    implemented: true,
+    defaultParams: { strategy: 'honmei_v1', reference_date: 'today', periods: ['3m', '6m', '1y'] },
+  },
 ]
 
 // ── Z-3: ダッシュボード型定義 ─────────────────────────────────────────────────

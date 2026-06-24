@@ -34,6 +34,64 @@ def _grade_label(grade_code: str | None) -> str:
     return _GRADE_CODE_TO_LABEL.get((grade_code or "").strip(), "default")
 
 
+# クラス序列（class_direction 用）: 新馬=1 〜 G1=10
+_JYOKEN_TO_CLASS_LEVEL = {
+    "701": 1, "702": 1,  # 新馬・未出走
+    "703": 2,            # 未勝利
+    "005": 3,            # 1勝クラス
+    "010": 4,            # 2勝クラス
+    "016": 5,            # 3勝クラス
+    "999": 6,            # OP
+}
+_GRADE_CODE_TO_CLASS_LEVEL = {"L": 7, "C": 8, "B": 9, "A": 10}
+
+
+def _class_level_from_codes(grade_code: str | None, jyoken_cd_3: str | None) -> int | None:
+    """races.grade_code / jyoken_cd_3 から新馬=1〜G1=10のクラス序列を返す。判定不能なら None。
+
+    注意: race_detail_cache.payload.grade_code はこの A/B/C/L 表記とは別の
+    数値エンコーディング（JV-Data生コード）であり、ここには渡せない。
+    ライブパスでは _class_level_from_label（class_label文字列ベース）を使うこと。
+    """
+    g = (grade_code or "").strip()
+    level = _GRADE_CODE_TO_CLASS_LEVEL.get(g)
+    if level is not None:
+        return level
+    jy = (jyoken_cd_3 or "").strip()
+    return _JYOKEN_TO_CLASS_LEVEL.get(jy)
+
+
+_CLASS_LABEL_TO_LEVEL = {
+    "G1": 10, "G2": 9, "G3": 8, "Listed": 7, "L": 7,
+    "オープン": 6, "OP": 6,
+    "3勝クラス": 5, "2勝クラス": 4, "1勝クラス": 3,
+    "未勝利": 2, "未出走": 1, "新馬": 1,
+}
+
+
+def _class_level_from_label(class_label: str | None) -> int | None:
+    """payload.class_label（"G1"/"3勝クラス"等の人間可読文字列）からクラス序列を返す。"""
+    return _CLASS_LABEL_TO_LEVEL.get((class_label or "").strip())
+
+
+def classify_pace_prediction(horses: list[HorseContext]) -> str | None:
+    """出走馬の脚質構成（position_tendency）からペースを簡易予想する（"fast"/"medium"/"slow"）。
+
+    本物のペースシミュレーション(src/features/pace_simulation_v1.py)はAI推論を伴い
+    バックテスト全件には使えないため、「先行馬の割合が多いほど競り合いでハイペースに
+    なりやすい」という簡易ヒューリスティックで代用する。engine.py / backtest.py で共用。
+    """
+    tendencies = [h.position_tendency for h in horses if h.position_tendency is not None]
+    if len(tendencies) < 3:
+        return None
+    front_share = sum(1 for t in tendencies if t < 0.25) / len(tendencies)
+    if front_share >= 0.35:
+        return "fast"
+    if front_share <= 0.10:
+        return "slow"
+    return "medium"
+
+
 def register_condition(condition_id: str):
     def decorator(fn):
         CONDITION_REGISTRY[condition_id] = fn
@@ -283,3 +341,172 @@ def check_min_odds(horse: HorseContext, race_ctx: RaceContext, params: dict) -> 
     if horse.tan_odds >= min_tan_odds:
         return ConditionResult(passed=True, score=0.0, reason=f"単勝{horse.tan_odds:.1f}倍(基準{min_tan_odds}倍以上)")
     return ConditionResult(passed=False, score=-1.0, reason=f"単勝{horse.tan_odds:.1f}倍(基準{min_tan_odds}倍未満)")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 舞台適性: 同コース or 類似コースでの過去成績
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@register_condition("course_fitness")
+def check_course_fitness(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
+    """同コース（競馬場×距離帯×芝ダート）、無ければ類似コースでの過去の好走歴を見る。"""
+    distance_tolerance = params.get("distance_tolerance", 200)
+    similar_courses: dict[str, list[str]] = params.get("similar_courses", {})
+
+    if not horse.past_races or race_ctx.place_code is None or race_ctx.distance is None:
+        return ConditionResult(passed=True, score=0.0, reason="コース経験データ不足(判定保留)")
+
+    def _matches(pr, place_codes: set[str]) -> bool:
+        if pr.place_code not in place_codes or pr.surface != race_ctx.surface or pr.distance is None:
+            return False
+        return abs(pr.distance - race_ctx.distance) <= distance_tolerance
+
+    same_course = [pr for pr in horse.past_races if _matches(pr, {race_ctx.place_code})]
+    if same_course:
+        ranks = [pr.rank for pr in same_course if pr.rank is not None]
+        if ranks and min(ranks) <= 3:
+            return ConditionResult(
+                passed=True, score=2.0, reason=f"同コース好走歴あり({min(ranks)}着)",
+                detail={"races": len(same_course)},
+            )
+        return ConditionResult(passed=True, score=-1.0, reason="同コース惨敗歴のみ", detail={"races": len(same_course)})
+
+    similar_codes = set(similar_courses.get(race_ctx.place_code, []))
+    if similar_codes:
+        similar = [pr for pr in horse.past_races if _matches(pr, similar_codes)]
+        ranks = [pr.rank for pr in similar if pr.rank is not None]
+        if ranks and min(ranks) <= 3:
+            return ConditionResult(
+                passed=True, score=1.0, reason=f"類似コースで好走({min(ranks)}着)",
+                detail={"races": len(similar)},
+            )
+
+    return ConditionResult(passed=True, score=0.0, reason="コース経験なし(中立)")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ペース展開 × ポジション適性
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@register_condition("pace_position")
+def check_pace_position(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
+    """race_ctx.pace_prediction(今回のレース構成からの簡易予想) × horse.position_tendency(脚質)。
+
+    track_bias_fit は過去のコースバイアス統計、pace_position は今回の出走馬構成からの
+    動的なペース予想という違いがあるため、両条件は独立して併用する。
+    """
+    pace = race_ctx.pace_prediction
+    pos = horse.position_tendency
+    if pace is None or pos is None:
+        return ConditionResult(passed=True, score=0.0, reason="ペース/脚質データ不足(判定保留)")
+
+    style = "逃げ・先行" if pos < 0.25 else ("追込" if pos > 0.60 else "好位・差し")
+
+    if pace == "fast":
+        if style in ("好位・差し", "追込"):
+            return ConditionResult(passed=True, score=2.0, reason=f"ハイペースで{style}有利")
+        return ConditionResult(passed=True, score=-1.0, reason="ハイペースで前崩れリスク")
+    if pace == "slow":
+        if style == "逃げ・先行":
+            return ConditionResult(passed=True, score=2.0, reason="スローで先行有利")
+        if style == "追込":
+            return ConditionResult(passed=True, score=-1.0, reason="スローで届かないリスク")
+        return ConditionResult(passed=True, score=0.0, reason="スロー想定(好位・差しは中立)")
+    return ConditionResult(passed=True, score=0.0, reason="平均ペース想定(中立)")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# クラスの方向: 昇級/据え置き/降級
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@register_condition("class_direction")
+def check_class_direction(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
+    """前走クラスと今回クラスの序列(新馬=1〜G1=10)を比較し、昇級/据え置き/降級を判定する。"""
+    today_level = race_ctx.class_level
+    if today_level is None or not horse.past_races:
+        return ConditionResult(passed=True, score=0.0, reason="クラスデータ不足(判定保留)")
+
+    prev_level = horse.past_races[0].class_level
+    if prev_level is None:
+        return ConditionResult(passed=True, score=0.0, reason="前走クラスデータ不足(判定保留)")
+
+    if today_level == 10 and prev_level == 10:
+        return ConditionResult(passed=True, score=3.0, reason="G1からG1(最高峰据え置き)")
+    if today_level < prev_level:
+        return ConditionResult(
+            passed=True, score=2.0, reason=f"クラス降級(前走level{prev_level}→今回level{today_level})",
+        )
+    if today_level == prev_level:
+        return ConditionResult(passed=True, score=1.0, reason="クラス据え置き")
+    return ConditionResult(
+        passed=True, score=-1.0, reason=f"クラス昇級(前走level{prev_level}→今回level{today_level})",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 出走間隔適性 + 海外帰り判定
+# ─────────────────────────────────────────────────────────────────────────
+
+_JRA_PLACE_CODES = {f"{i:02d}" for i in range(1, 11)}
+_RENTOU_THRESHOLD_DAYS = 14  # これ以下は連闘とみなす（spec未パラメータ化の固定値）
+
+
+@register_condition("rest_interval")
+def check_rest_interval(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
+    """前走からの出走間隔の適性、および前走が海外/地方だった場合の減点を判定する。"""
+    optimal_min = params.get("optimal_min", 15)
+    optimal_max = params.get("optimal_max", 35)
+    long_rest_threshold = params.get("long_rest_threshold", 71)
+    overseas_penalty = params.get("overseas_penalty", -2)
+
+    # overseas_interim_place_code: 直近のJRA前走と今回の間に地方/海外出走が見つかった場合に設定される
+    # （バックテストのバルクロードはJRA限定のため、past_races[].place_code は常にJRAになる）。
+    prev_place = horse.overseas_interim_place_code or (
+        horse.past_races[0].place_code if horse.past_races else None
+    )
+    if prev_place is not None and prev_place not in _JRA_PLACE_CODES:
+        return ConditionResult(
+            passed=True, score=overseas_penalty, reason=f"前走が海外/地方(place_code={prev_place})",
+        )
+
+    days_ago = horse.prev_race_days_ago
+    if days_ago is None:
+        return ConditionResult(passed=True, score=0.0, reason="出走間隔データ不足(判定保留)")
+
+    if days_ago <= _RENTOU_THRESHOLD_DAYS:
+        return ConditionResult(passed=True, score=-1.0, reason=f"連闘(中{days_ago}日,消耗リスク)")
+    if days_ago < optimal_min:
+        return ConditionResult(passed=True, score=0.0, reason=f"間隔やや短い(中{days_ago}日,中立)")
+    if days_ago <= optimal_max:
+        return ConditionResult(passed=True, score=1.0, reason=f"適正間隔(中{days_ago}日)")
+    if days_ago < long_rest_threshold:
+        return ConditionResult(passed=True, score=0.0, reason=f"やや間隔空き(中{days_ago}日,中立)")
+    return ConditionResult(passed=True, score=-1.0, reason=f"休み明け(中{days_ago}日)")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 騎手の勝負気配(jockey_change拡張) + 当該コース巧者判定
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@register_condition("jockey_intent")
+def check_jockey_intent(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
+    """jockey_change の3段階判定を内包し、騎手の当該競馬場での巧者度による加点を追加する。"""
+    base = check_jockey_change(horse, race_ctx, params)
+
+    bonus_pct = params.get("course_winrate_bonus_pct", 20)
+    venue_rate = horse.jockey_venue_win_rate
+    overall_rate = horse.jockey_overall_win_rate
+    if venue_rate is not None and overall_rate is not None and overall_rate > 1e-9:
+        relative_gain = (venue_rate - overall_rate) / overall_rate * 100
+        if relative_gain >= bonus_pct:
+            return ConditionResult(
+                passed=base.passed,
+                score=base.score + 1.0,
+                reason=f"{base.reason} + コース巧者(当該場勝率{venue_rate:.1%}, 全体比+{relative_gain:.0f}%)",
+                detail={"base_reason": base.reason, "venue_win_rate": venue_rate, "overall_win_rate": overall_rate},
+            )
+    return base

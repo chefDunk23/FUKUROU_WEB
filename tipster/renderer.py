@@ -33,7 +33,23 @@ summary { cursor:pointer; color:#94a3b8; }
 footer { margin-top:30px; color:#64748b; font-size:0.8rem; }
 .race-link { color:#93c5fd; text-decoration:none; }
 .race-link:hover { text-decoration:underline; }
+.confidence-badge { display:inline-block; border-radius:6px; padding:2px 10px; font-weight:bold; margin-left:8px; font-size:0.85rem; }
+.confidence-S { background:#fbbf24; color:#1e293b; }
+.confidence-A { background:#3b82f6; color:#fff; }
+.confidence-B { background:#94a3b8; color:#1e293b; }
+.confidence-C { background:#475569; color:#cbd5e1; }
 """
+
+_CONFIDENCE_LABEL = {
+    "S": "S(最高)", "A": "A(高)", "B": "B(通常)", "C": "C(様子見推奨)",
+}
+
+
+def _confidence_badge(confidence: str | None) -> str:
+    if not confidence:
+        return ""
+    label = _CONFIDENCE_LABEL.get(confidence, confidence)
+    return f"<span class='confidence-badge confidence-{escape(confidence)}'>自信度 {escape(label)}</span>"
 
 
 def _condition_rows(conditions: list[ConditionResult]) -> str:
@@ -48,7 +64,7 @@ def _condition_rows(conditions: list[ConditionResult]) -> str:
     return "\n".join(rows)
 
 
-def _horse_card(rank: int | None, ev: HorseEvaluation) -> str:
+def _horse_card(rank: int | None, ev: HorseEvaluation, confidence_badge: str = "") -> str:
     badge = f"<span class='rank-badge'>{rank}</span>" if rank is not None else ""
     elim_cls = " eliminated" if ev.eliminated else ""
     elim_note = (
@@ -58,6 +74,7 @@ def _horse_card(rank: int | None, ev: HorseEvaluation) -> str:
 <div class="card{elim_cls}">
   <div>{badge}<span class="horse-name">{escape(ev.horse_name or ev.horse_id)}</span>
     <span class="ai-score">AIスコア {ev.ai_score:.3f} / クリア数 {ev.clear_count} / 合計点 {ev.total_score:+.1f}</span>
+    {confidence_badge}
   </div>
   {elim_note}
   <table class="cond">
@@ -73,11 +90,18 @@ def render_race_html(evaluation: RaceEvaluation, output_path: str | Path) -> Pat
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    honmei_id = evaluation.honmei.horse_id if evaluation.honmei else None
     candidate_cards = "\n".join(
-        _horse_card(i + 1, ev) for i, ev in enumerate(evaluation.candidates)
+        _horse_card(i + 1, ev, _confidence_badge(evaluation.confidence) if ev.horse_id == honmei_id else "")
+        for i, ev in enumerate(evaluation.candidates)
     ) or "<p class='neutral'>候補馬なし</p>"
 
     eliminated_rows = "\n".join(_horse_card(None, ev) for ev in evaluation.eliminated_horses)
+
+    header_badge = (
+        _confidence_badge(evaluation.confidence)
+        if evaluation.honmei else "<span class='confidence-badge confidence-C'>本命なし(様子見推奨)</span>"
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -87,9 +111,10 @@ def render_race_html(evaluation: RaceEvaluation, output_path: str | Path) -> Pat
 <style>{_STYLE}</style>
 </head>
 <body>
-  <h1>{escape(evaluation.race_name or evaluation.race_id)}</h1>
+  <h1>{escape(evaluation.race_name or evaluation.race_id)} {header_badge}</h1>
   <p class="meta">戦略: {escape(evaluation.strategy)} v{escape(evaluation.strategy_version)}
-    | race_id: {escape(evaluation.race_id)} | 生成: {escape(evaluation.generated_at)}</p>
+    | race_id: {escape(evaluation.race_id)} | 候補(足切り後) {evaluation.eligible_count}頭
+    | 生成: {escape(evaluation.generated_at)}</p>
 
   <h2>推奨馬 ({len(evaluation.candidates)}頭)</h2>
   {candidate_cards}
@@ -125,9 +150,13 @@ def render_weekend_html(
             for i, c in enumerate(ev.candidates)
         ) or "<li class='neutral'>候補馬なし</li>"
         href = f"{link_prefix}{ev.race_id}.html"
+        badge = (
+            _confidence_badge(ev.confidence) if ev.honmei
+            else "<span class='confidence-badge confidence-C'>本命なし</span>"
+        )
         race_blocks.append(f"""
 <div class="card">
-  <h2><a class="race-link" href="{escape(href)}">{escape(ev.race_name or ev.race_id)}</a></h2>
+  <h2><a class="race-link" href="{escape(href)}">{escape(ev.race_name or ev.race_id)}</a> {badge}</h2>
   <ul>{candidate_lines}</ul>
 </div>
 """)
