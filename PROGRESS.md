@@ -679,3 +679,140 @@ ALL_PASS
 - 全回収率出力に race_count / bet_count が同じ階層で出力される（Blocker）✓
 - サンプル数が少なくても return_rate を除外・null 化しない（Blocker）✓
   → `test_over_100_percent_return_not_suppressed` でテスト済み
+
+---
+
+## Evaluator評価 — BET-3 (2026-06-25)
+
+**評価対象:** BET-3 本命×相手 組み合わせ回収率検証（ブランチ: auto-harness-1）
+**評価結果: 不合格（BET-3 Blocker 1件: run_combo_backtest KeyError）**
+
+### 前提チェック
+
+- **PROGRESS.md「BET-0: 完了」の記録**: あり（1行目）✓ → データ基盤整備済みとして評価継続
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 517 passed 実測（前回482+35件） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json・engine.py の既存 evaluate_race/evaluate_race_context に変更なし。combo_backtest.py は新規ファイルで加算的追加 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし。combo_backtest.py は api_* から未参照 |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` L84-85 に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 存在確認。tipster/・scripts/ にランダムシャッフルゼロ件（前回評価継続合格） |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | 静的テスト（test_tipster_strategy_static.py）+ ユニットテスト（test_clear_count_beats_ai_score）全合格。戦略 JSON・engine.py に変更なし |
+| G5b | AI出力の外部公開禁止 | **PASS** | CLI 出力の入力は `evaluate_race_context()` フィルタ済み candidates 経由の `select_honmei()`/`select_aite()` 結果。AIスコア単体をランキング推奨として外部公開する新規経路なし |
+
+### BET-3 §5-3 Blocker確認 — 致命的バグ
+
+**実行結果:**
+```
+py -m tipster.combo_backtest --honmei-strategy honmei_v1 --aite-strategy anaba_v1 --periods 3m
+→ KeyError: 'sanrenfuku'
+```
+
+**根本原因（combo_backtest.py:387）:**
+
+```python
+# _COMBO_BET_TYPES = ("tansho", "fukusho", "umaren", "wide", "sanrenpuku")
+# → _new_acc() が生成する acc のキーは "sanrenpuku"（'p'）
+
+results[p] = ComboBacktestResult(
+    ...
+    sanrenfuku=_to_combo_stats(acc["sanrenfuku"]),  # ← BUG: acc に "sanrenfuku" は存在しない
+    ...
+)
+# acc のキーは "sanrenpuku"（_COMBO_BET_TYPES 由来）だが
+# "sanrenfuku"（モデルフィールド名）をアクセスしようとして KeyError
+```
+
+- `_COMBO_BET_TYPES` → `"sanrenpuku"` (payouts テーブルの bet_type と一致 / 'p')
+- `ComboBacktestResult.sanrenfuku` → フィールド名は 'f' 表記
+- `acc["sanrenfuku"]` → 存在しないキー → **KeyError**
+- ユニットテストは `run_combo_backtest()` を「DB接続が必要」として対象外にしているため、このバグをテストで検出できていない
+
+**判定: FAIL（Blocker）**
+
+この結果、以下の Done条件・Blocker が未達:
+1. BET-3 Done条件「5賭式それぞれの回収率が独立して出力されること」→ 実行前にクラッシュするため検証不可
+2. §5-3 Blocker「回収率100%超えの結果が1件でもあれば...目視確認」→ 実行不可のため目視確認不可能
+
+### BET-3 Done条件サマリ
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| 5賭式それぞれの回収率が独立して出力される | **FAIL** | run_combo_backtest がクラッシュするため出力なし |
+| 不的中 vs データ欠損の区別 | PASS（コードレベル） | _accumulate_stats のロジックは正しい（ユニットテスト確認済み） |
+| 全回収率出力に race_count / bet_count が同じ階層 | PASS（コードレベル） | ComboStats モデル・CLI print 文は正しく実装されている |
+| サンプル数が少なくても return_rate を除外しない | PASS（コードレベル） | test_over_100_percent_return_not_suppressed で確認済み |
+| 回収率100%超えの目視確認 | **不可** | 実行がクラッシュするため再現不可 |
+
+### 修正方針（次 Generator への指示）
+
+**[Fix 1] combo_backtest.py:387 の KeyError を修正（最優先）**
+
+```python
+# 修正前
+sanrenfuku=_to_combo_stats(acc["sanrenfuku"]),
+# 修正後
+sanrenfuku=_to_combo_stats(acc["sanrenpuku"]),
+```
+
+**[Fix 2] run_combo_backtest() の回帰テストを追加**
+
+- DB 接続を必要としない形でのスモークテスト（例: モック payout_map で空 period_ids を渡して例外が出ないことを確認）を追加する。
+- または、KeyError が再発しないことを保証するキー参照のユニットテストを `test_tipster_combo_backtest.py` に追加する。
+
+**[Fix 3] 修正後に実際に CLI を実行し、回収率100%超えの有無を目視確認する**
+
+- `py -m tipster.combo_backtest --honmei-strategy honmei_v1 --aite-strategy anaba_v1 --periods 3m` を実行
+- 回収率 > 100% の行が存在する場合: 表示された `レース数=N ベット数=M` の値が、実際に集計されたレース数・ベット数と一致することを確認（別途 DB クエリで突合せ）
+- 結果を PROGRESS.md に記録すること
+
+### 総合判定
+
+**不合格（Blocker 1件: BET-3 run_combo_backtest KeyError）**
+
+G1〜G5b は全合格。BET-3 の実行時バグ（`acc["sanrenfuku"]` → `acc["sanrenpuku"]` の typo）が Blocker。
+コードレベルの設計（ComboStats モデル、_accumulate_stats ロジック、CLI 出力フォーマット）は正しいため、1行修正 + 目視確認で合格ライン到達見込み。
+
+---
+
+## 作業ログ
+
+### BET-3 Blocker修正: KeyError + 回帰テスト + CLI目視確認 (2026-06-25)
+
+**対応 PLAN.md 項目:** BET-3（Evaluator指摘 Blocker — run_combo_backtest KeyError の解消）
+
+**実装内容:**
+
+1. **tipster/combo_backtest.py:387**
+   - `acc["sanrenfuku"]` → `acc["sanrenpuku"]` に修正（1字 typo 修正）
+   - `_COMBO_BET_TYPES = ("tansho", "fukusho", "umaren", "wide", "sanrenpuku")` のキー名と
+     `ComboBacktestResult.sanrenfuku` フィールド名が異なることで発生していた KeyError
+
+2. **tests/test_tipster_combo_backtest.py**
+   - `_COMBO_BET_TYPES` をインポートに追加
+   - `TestAccKeyMapping` クラスを追加（3件）:
+     - `test_new_acc_contains_sanrenpuku_not_sanrenfuku`: acc に "sanrenpuku" が存在し "sanrenfuku" が存在しないことを確認（typo 再発防止）
+     - `test_combo_bet_types_matches_new_acc_keys`: `_COMBO_BET_TYPES` の全要素が `_new_acc()` のキーとして存在することを確認
+     - `test_to_combo_stats_on_all_new_acc_keys`: 全キーに対して `_to_combo_stats()` が例外なく動作することを確認
+
+**テスト結果:** `pytest tests/` → 520 passed（前回 517 → +3件、既存517件全件継続合格）
+
+**CLI実行結果（Fix 3 目視確認）:**
+
+```
+py -m tipster.combo_backtest --honmei-strategy honmei_v1 --aite-strategy anaba_v1 --periods 3m
+
+[3m] 2026-03-27~2026-06-25 対象765レース(スキップ6)
+  単勝  : 回収率=81.9% レース数=759 ベット数=759  的中=85  N/A=0
+  複勝  : 回収率=73.4% レース数=759 ベット数=759  的中=249 N/A=0
+  馬連  : 回収率=6.3%  レース数=759 ベット数=3473 的中=24  N/A=0
+  ワイド: 回収率=7.2%  レース数=759 ベット数=3473 的中=104 N/A=0
+  三連複: 回収率=5.5%  レース数=744 ベット数=6535 的中=7   N/A=0
+```
+
+- 5賭式それぞれの回収率が独立して出力される ✓
+- 全出力に race_count / bet_count が同じ階層で出力される（Blocker）✓
+- 回収率100%超えの結果: **0件**（3ヶ月期間・honmei_v1 × anaba_v1では100%超えなし）
+- N/A=0 → バックフィル済み期間（直近 2026-06-14 まで）のみ対象のため欠損なし ✓

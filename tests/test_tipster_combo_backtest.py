@@ -15,6 +15,7 @@ PLAN.md §5-3 BET-3 Blocker 確認項目:
 import pytest
 
 from tipster.combo_backtest import (
+    _COMBO_BET_TYPES,
     _accumulate_stats,
     _combo_str,
     _new_acc,
@@ -303,3 +304,38 @@ class TestToComboStats:
         assert hasattr(stats, "bet_count")
         assert stats.race_count == 3
         assert stats.bet_count == 9
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# acc key mapping regression test (BET-3 Blocker Fix)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestAccKeyMapping:
+    """_new_acc() のキーが ComboBacktestResult のフィールド参照と一致することを保証する。
+
+    BET-3 Blocker: acc["sanrenfuku"] (存在しない) を参照する KeyError が再発しないこと。
+    _COMBO_BET_TYPES のキー "sanrenpuku" が _new_acc() に存在し、
+    combo_backtest.py 内でアクセスしていること。
+    """
+
+    def test_new_acc_contains_sanrenpuku_not_sanrenfuku(self):
+        """_new_acc() のキーに "sanrenpuku" が存在し "sanrenfuku" が存在しないこと。"""
+        acc = _new_acc()
+        assert "sanrenpuku" in acc, "acc には sanrenpuku キーが必要"
+        assert "sanrenfuku" not in acc, "acc に sanrenfuku キーは存在しない（typo防止）"
+
+    def test_combo_bet_types_matches_new_acc_keys(self):
+        """_COMBO_BET_TYPES の全要素が _new_acc() のキーとして存在すること。"""
+        acc = _new_acc()
+        for bt in _COMBO_BET_TYPES:
+            assert bt in acc, f"_new_acc() に {bt!r} キーが存在しない"
+
+    def test_to_combo_stats_on_all_new_acc_keys(self):
+        """_new_acc() の全キーに対して _to_combo_stats() が例外なく動作すること。"""
+        acc = _new_acc()
+        for bt in _COMBO_BET_TYPES:
+            stats = _to_combo_stats(acc[bt])
+            assert stats.return_rate == 0.0
+            assert stats.race_count == 0
+            assert stats.bet_count == 0

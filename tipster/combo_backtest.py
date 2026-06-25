@@ -384,7 +384,7 @@ def run_combo_backtest(
             fukusho=_to_combo_stats(acc["fukusho"]),
             umaren=_to_combo_stats(acc["umaren"]),
             wide=_to_combo_stats(acc["wide"]),
-            sanrenfuku=_to_combo_stats(acc["sanrenfuku"]),
+            sanrenfuku=_to_combo_stats(acc["sanrenpuku"]),
             generated_at=datetime.now().isoformat(timespec="seconds"),
         )
 
