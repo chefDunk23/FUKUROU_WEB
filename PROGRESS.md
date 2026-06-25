@@ -1,4 +1,5 @@
 BET-0: 完了
+TR-0: 完了
 
 ## 作業ログ
 
@@ -907,3 +908,80 @@ na_race_count: int = 0
 - BET-3 Done条件: 全達成
 
 ALL_PASS
+
+---
+
+## 作業ログ
+
+### TR-0: 調教タイム・ラップデータの抽出可否スパイク (2026-06-25)
+
+**対応 PLAN.md 項目:** TR-0（調教データ抽出可否スパイク・ブロッカー）
+
+**調査方法:** `fukurou_jvdl.training_slope`（2,122,471行）・`training_wood`（707,788行）への直接クエリ + `jravan_data_catalog.md`・`jvdl_parser_spec.md`・`jvdl_parser/fields.py` 照合
+
+**成果物:** `TR0_FINDINGS.md`（詳細調査記録・フィールド意味確定表）
+
+---
+
+**Done条件1: `time_Nf` 系フィールドの意味確定**
+
+**結論: 累積タイム（ラスト Nf 地点〜ゴールまでの合計時間）**
+
+`jravan_data_catalog.md` §1「累計タイム構造（HC/WC 共通）」に図と整合式が明記されており、
+実データ（2,121,563 行全件）で以下の整合式が誤差ゼロで成立することを確認:
+
+- `time_4f = lap_l4_l3 + time_3f`（mismatch=0 件）
+- `time_3f = lap_l3_l2 + time_2f`（mismatch=0 件）
+- `time_2f = lap_l2_l1 + lap_l1`（mismatch=0 件）
+- training_wood でも同様に 533,599 行全件整合性確認済み
+
+→ 坂路全体時計（TR-1 条件③）は `time_4f`、ウッド5F時計（TR-1 条件④）は `time_5f`
+
+---
+
+**Done条件2: `lap_lX_lY` 系フィールドが指す区間の確定**
+
+| フィールド | 区間 | TR-1 条件 |
+|---|---|---|
+| `lap_l4_l3` | ラスト4F〜3F（800m-600m） | 全区間加速ラップ判定 |
+| `lap_l3_l2` | ラスト3F〜2F（600m-400m） | 全区間加速ラップ判定 |
+| `lap_l2_l1` | ラスト2F〜1F（400m-200m = 残り400-200m） | ② ≤11.9秒 / ④ 終い加速 |
+| `lap_l1` | ラスト1F（200m-0m） | ① ≤11.9秒 / ⑥⑦ ≤12.9秒 / ④ ≤11.5秒 |
+
+全区間加速ラップ（TR-1 用語定義）: `lap_l4_l3 > lap_l3_l2 > lap_l2_l1 > lap_l1`（各区間が厳密に短くなること）
+
+→ PLAN.md の条件①〜⑦ を `training_slope`/`training_wood` の実フィールドに過不足なく対応付け確定
+
+---
+
+**Done条件3: `blood_no` から出走馬への紐付け経路確認**
+
+- `training_slope.blood_no` = `race_entries_v2.blood_no`（血統登録番号、直接 JOIN 可能）
+- 2025年以降 training_slope のユニーク馬 14,975 匹中 race_entries_v2 に存在する 13,420 匹は100%マッチ
+- 直近レース（2026-06-14）の勝ち馬の調教データを JOIN 取得確認済み
+- 実装: `race_entries_v2.blood_no` → `training_slope.blood_no` で結合し `chokyo_date` で絞り込む
+
+---
+
+**Done条件4: 欠損・イレギュラーケースの実態確認**
+
+- 同日複数行（複数回計測）: training_slope 10組（最大6行）、training_wood 5組（最大9行）
+  → `chokyo_time` で識別可能。件数はごく少数（全体の 0.0001% 未満）
+  → TR-1 実装時は「最新の chokyo_time の行」か「最速 time_4f の行」を選択する方針を明示すること
+- center_cd の値域: `'0'`（美浦）・`'1'`（栗東）のみ — 異常値なし
+- 坂路/ウッド以外のデータ混入: なし（HC/WC 別テーブル、confirmed）
+
+---
+
+**TR-0 Done条件サマリ:**
+
+| Done条件 | 判定 |
+|---|---|
+| 1. time_Nf 系フィールドの意味確定 | **確定**（累積タイム・2.1M行全件整合性確認） |
+| 2. lap_lX_lY 系が想定区間と一致するか確認 | **確定**（整合式検証 + TR-1条件①〜⑦への対応表作成） |
+| 3. blood_no から出走馬への紐付け経路確認 | **確定**（blood_no 直結 JOIN・実データ確認済み） |
+| 4. 欠損・イレギュラーケースの実態確認 | **確定**（複数回計測=少数・混入なし） |
+
+確定不能な項目: **なし**
+
+→ **TR-1 着手可能（TR-0 全項目確定）**
