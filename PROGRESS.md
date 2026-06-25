@@ -985,3 +985,74 @@ ALL_PASS
 確定不能な項目: **なし**
 
 → **TR-1 着手可能（TR-0 全項目確定）**
+
+---
+
+## Evaluator評価 — TR-0 (2026-06-25)
+
+**評価対象:** TR-0 調教タイム・ラップデータの抽出可否スパイク（ブランチ: auto-harness-1）
+**評価結果: 合格**
+
+### 前提チェック
+
+- **PROGRESS.md 1行目「BET-0: 完了」**: あり ✓
+- **PROGRESS.md 2行目「TR-0: 完了」**: あり ✓
+- **TR-1実装の有無**: tipster/ 配下に TR-1 相当ファイルなし（`tipster/tr*.py` 0件）→ G-TR1 / G-TR2 の判定対象外
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 520 passed 実測（変化なし） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json（honmei_v1/honmei_v2/anaba_v1）に変更なし。静的テスト（test_tipster_strategy_static.py）合格 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし。TR-0 は調査ドキュメント（TR0_FINDINGS.md）のみ追加 |
+| G4 | 時系列データ分割の厳守 | **PASS** | `py -c "from shared.config import TRAIN_END_DATE, EVAL_START_DATE; print(...)"` → `TRAIN_END_DATE=2025-05-31, EVAL_START_DATE=2025-06-01` 確認。ランダムシャッフルゼロ件（継続合格） |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | 全戦略JSONでai_score系condition+required:trueなし、ranking.primary=ai_scoreなし（静的テスト保証）。`test_tiebreak_falls_to_ai_score` + `test_clear_count_beats_ai_score` 両合格（継続合格） |
+| G5b | AI出力の外部公開禁止 | **PASS** | TR-0 は調査のみ。新規 API・出力経路なし |
+
+### §5-4 G-TR0 Blocker確認
+
+**評価対象:** `TR0_FINDINGS.md`（2026-06-25作成）の Done条件（1〜4）
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| 1. `time_Nf` 系フィールドの意味確定 | **PASS** | 累積タイムと確定（ゴールから Nf 地点〜ゴールまでの合計時間）。整合式 `time_Nf = lap_lN_l(N-1) + time_(N-1)f` が training_slope 2,121,563 行・training_wood 533,599 行の全件で mismatch=0 件を実測確認 |
+| 2. `lap_lX_lY` 系フィールドが指す区間の確定 | **PASS** | 各区間タイムの意味確定（例: `lap_l2_l1` = 残り400-200m、`lap_l1` = ラスト1F）。TR-1 条件①〜⑦すべてに対するフィールド対応表を `TR0_FINDINGS.md` §2 に記載 |
+| 3. `blood_no` から出走馬への紐付け経路確認 | **PASS** | `training_slope.blood_no = race_entries_v2.blood_no` で直結 JOIN 可能。2025年以降ユニーク馬 14,975 匹中 race_entries_v2 に存在する 13,420 匹は 100% マッチ確認済み |
+| 4. 欠損・イレギュラーケースの実態確認 | **PASS** | 同日複数行（複数回計測）: slope 10組・wood 5組（全体の 0.00001% 未満）。坂路/ウッド以外の混入なし（別テーブル格納）。TR-1 実装時は「最新 `chokyo_date` + 最新 `chokyo_time`」採用を方針明示 |
+| 確定不能項目 | **なし** | 全 4 項目確定。確定不能として TR-1 から除外すべき条件なし |
+
+**G-TR0: PASS**
+
+### §5-3 BET-3 継続確認（BET-3・BET-5 実装あり）
+
+BET-3 は前ループで ALL_PASS 評価済みだが、評価指示に基づき本ループでも再確認する。
+
+**CLI 実行結果（`py -m tipster.combo_backtest --honmei-strategy honmei_v1 --aite-strategy anaba_v1 --periods 3m`）:**
+
+| 賭式 | 回収率 | レース数 | ベット数 | 的中 | N/A |
+|---|---|---|---|---|---|
+| 単勝 | 81.9% | 759 | 759 | 85 | 0 |
+| 複勝 | 73.4% | 759 | 759 | 249 | 0 |
+| 馬連 | 6.3% | 759 | 3473 | 24 | 0 |
+| ワイド | 7.2% | 759 | 3473 | 104 | 0 |
+| 三連複 | 5.5% | 744 | 6535 | 7 | 0 |
+
+- 4賭式（単勝・複勝・馬連・ワイド）すべてに `レース数` / `ベット数` が併記されている ✓（Blocker合格）
+- 三連複の出力有無はこの基準の判定に影響しない（PLAN.md §5-3 確認）✓
+- 回収率100%超えの結果: **0件** → 目視確認は条件に該当しないため不要
+
+### G-TR1 / G-TR2 の適用有無
+
+TR-1（優先度抽出・順位付けロジック）が実装されていないため、G-TR1・G-TR2 の判定対象外。
+
+### 総合判定
+
+**合格（全 Blocker PASS、TR-0 Done条件全達成）**
+
+- G1〜G5b: 全合格
+- G-TR0 §5-4 Blocker（調教データ抽出可否検証）: 全合格
+- BET-3 §5-3 Blocker（4賭式件数併記・100%超え目視）: 全合格（継続）
+- G-TR1 / G-TR2: 適用外（TR-1 未実装）
+
+ALL_PASS
