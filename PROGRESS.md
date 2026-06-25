@@ -573,3 +573,109 @@ ALL_PASS
   honmei 系（race_level + time_gap）と同一でない ✓
 - BET-2 接続部分: `select_aite()` が BET-3 で使える形で実装済み ✓
 - 後方互換: 既存の `select_honmei()` / `evaluate_race_context()` は無変更 ✓
+
+---
+
+## Evaluator評価 — BET-1/BET-2 (2026-06-25)
+
+**評価対象:** BET-1（本命選定レビュー確認テスト）+ BET-2（相手選定接続部分）（ブランチ: auto-harness-1）
+**評価結果: 合格**
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 482 passed 実測（前回466+16件、既存466件全件継続合格） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | `select_aite()` は新規追加のみ。`evaluate_race`/`evaluate_race_context` の出力は不変。tipster/strategies/*.json・engine.py の既存ロジック無変更 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` L84-85 に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 存在。`tipster/backtest.py` がインポート・ユーティリティ関数提供。tipster/・scripts/ にランダムシャッフルゼロ件 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | (1) 全戦略JSONで ai_score 系 condition + required:true なし（静的テスト保証）✓ (2) ranking.primary=ai_score の戦略なし（静的テスト保証）✓ (3) `test_tiebreak_falls_to_ai_score` + `test_clear_count_beats_ai_score` 両テスト存在・合格 ✓ |
+| G5b | AI出力の外部公開禁止 | **PASS** | `select_aite()` の入力は `evaluate_race_context()` のフィルタ済み candidates（条件フィルタ通過後の馬）。AIスコア単体をランキング・推奨として外部公開する新規経路なし |
+
+### §5-3 BET-1/BET-2 個別基準確認
+
+| Feature | 項目 | 判定 | 詳細 |
+|---|---|---|---|
+| BET-1 | 本命選定が既存ロジックと整合（G5a同一） | **PASS** | G5a(1)(2)(3) 全合格。`select_honmei()` の優先順位（条件クリア数→合計スコア→AIスコア→馬番）は変更なし。確認テストを `test_tipster_strategy_static.py`（静的G5a-1/2）と `test_tipster_engine.py`（G5a-3 ユニット）で追加 |
+| BET-2 | 相手選定が本命と異なる条件群を使っている | **PASS** | `anaba_v1.json` の必須条件集合（time_gap + min_odds + track_bias_fit）は honmei 系（race_level + time_gap）と同一でないことを `test_anaba_has_different_required_conditions_from_all_honmei` で機械的に保証 |
+| BET-2 | 接続部分（select_aite）実装 | **PASS** | `tipster/engine.py` に `select_aite(candidates, honmei_horse_id, max_aite)` 追加。BET-3 の馬連/ワイド/三連複組み合わせ生成の入力として使用可能な形で実装済み。7件のユニットテスト追加（除外・カット・順序保証を全て網羅） |
+
+### BET-3/BET-5 事前チェック（評価指示に基づく）
+
+BET-3・BET-5 は本ループでは実装されていない（`select_aite()` は接続準備であり BET-3 本体ではない）。
+「BET-3またはBET-5が実装されている場合」の条件に該当しないため、BET-0完了記録の確認は不要。
+
+### 総合判定
+
+**合格（全 Blocker PASS、BET-1/BET-2 Done条件全達成）**
+
+- G1〜G5b: 全合格
+- BET-1 §5-3 Blocker（G5aと同一）: 合格
+- BET-2 §5-3 High（差別化・接続部分）: 合格
+
+ALL_PASS
+
+---
+
+## 作業ログ
+
+### BET-3: 本命×相手 組み合わせ回収率検証 (2026-06-25)
+
+**対応 PLAN.md 項目:** BET-3（本命×相手 組み合わせ回収率検証）
+
+**実装方針:**
+- 既存の `GradeStats` / `BacktestResult` を変更せず後方互換を維持
+- 新モデル `ComboStats`・`ComboBacktestResult` を `tipster/models.py` に追加
+- `tipster/combo_backtest.py` を新規作成（既存 backtest.py のインフラを再利用）
+
+**実装内容:**
+
+1. **tipster/models.py**
+   - `ComboStats` を追加:
+     - `race_count`（集計対象レース数）・`bet_count`（購入点数）を `return_rate` と
+       同じ階層に持つ（PLAN.md §5-3 BET-3 Blocker 要件）
+     - `hit_count`, `return_amount`, `return_rate`, `na_race_count`
+     - デフォルト値は全て 0（サンプル数 0 でも return_rate を null 化しない）
+   - `ComboBacktestResult` を追加:
+     - 5 賭式それぞれに独立した `ComboStats` フィールド（tansho/fukusho/umaren/wide/sanrenfuku）
+     - 戦略ペア（honmei_strategy, aite_strategy）を記録
+
+2. **tipster/combo_backtest.py** (新規作成)
+   - `_combo_str(*umabans)`: 昇順ソート・ハイフン区切り・2 桁ゼロ埋めの
+     payouts.combination フォーマット変換
+   - `gen_umaren_combos(honmei, aite_list)`: 本命-相手N頭でN点
+   - `gen_wide_combos(honmei, aite_list)`: 馬連と同フォーマット
+   - `gen_sanrenfuku_combos(honmei, aite_list)`: C(N,2) 通り（相手 2 頭未満は空リスト）
+   - `_fetch_payouts_bulk(race_ids)`:
+     - `payouts.race_id` と `races.id` が共に 12 桁フォーマット（変換不要）
+     - 同一 `ml.db.engine`（fukurou_jvdl）で races/race_entries/payouts を一括取得
+   - `_accumulate_stats(acc, honmei_umaban, aite_umabans, race_payout_map)`:
+     - `race_payout_map is None` → レース全体データ欠損 → na_race_count +1
+     - `race_payout_map[bet_type] なし` → 賭式データ欠損 → na_race_count +1
+     - combo が payout 内になし → 不的中（return 0）、0% 誤集計防止
+     - 三連複は相手 0〜1 頭では combos 空リスト → 集計そのものをスキップ
+   - `run_combo_backtest(honmei_strategy_path, aite_strategy_path, ...)`:
+     - 既存 `_load_bulk_data`・`_build_race_groups`・`_build_lightweight_context` 等を再利用
+     - 本命評価と相手評価でキャッシュを分離（戦略の条件セットが異なるため）
+     - payouts 一括取得後、レースごとに `_accumulate_stats` を呼び出し集計
+     - `select_aite` に渡す前に条件クリア数→合計スコア→AIスコア→馬番でソート
+   - CLI: `--honmei-strategy`, `--aite-strategy` 等のオプション付きで
+     5 賭式の回収率をレース数・ベット数付きで表示
+
+3. **tests/test_tipster_combo_backtest.py** (新規作成、35 件)
+   - `TestComboStr`: 6 件（2 桁ゼロ埋め・昇順ソート）
+   - `TestGenUmarenCombos`: 5 件（N 頭 = N 点、全 combo に本命含む）
+   - `TestGenWideCombos`: 2 件（馬連と同フォーマット）
+   - `TestGenSanrenfukuCombos`: 7 件（C(N,2) 点数計算、相手 2 頭未満 → 空リスト）
+   - `TestComboStatsModel`: 2 件（デフォルト値、独立性）
+   - `TestAccumulateStats`: 9 件（的中・不的中・N/A・三連複スキップ・累積）
+   - `TestToComboStats`: 4 件（return_rate 計算・ゼロ除算防止・100%超え非除外・件数併記 Blocker）
+
+**テスト結果:** `pytest tests/` → 517 passed（前回 482 → +35 件）
+
+**BET-3 Done 条件確認:**
+- 5 賭式それぞれの回収率が独立して出力される（ComboStats × 5）✓
+- 「不的中（リターン0）」と「データ欠損（N/A）」を区別して扱う ✓
+- 全回収率出力に race_count / bet_count が同じ階層で出力される（Blocker）✓
+- サンプル数が少なくても return_rate を除外・null 化しない（Blocker）✓
+  → `test_over_100_percent_return_not_suppressed` でテスト済み

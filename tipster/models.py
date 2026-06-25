@@ -231,3 +231,39 @@ class BacktestResult(BaseModel):
     confidence_breakdown: dict[str, GradeStats] = Field(default_factory=dict)  # "S"/"A"/"B"/"C" 別集計
     condition_analysis: dict[str, ConditionEffectiveness] = Field(default_factory=dict)
     generated_at: str = ""
+
+
+class ComboStats(BaseModel):
+    """1賭式（単勝/複勝/馬連/ワイド/三連複）の回収率集計結果。
+
+    PLAN.md BET-3 Blocker 要件: race_count と bet_count は return_rate と
+    同じ階層で必ず出力すること（件数なしの回収率は判断材料にならない）。
+    サンプル数が少なくても return_rate を除外・null化しない（可視化優先）。
+    """
+    race_count: int = 0       # 集計対象レース数（payoutsに該当賭式データあり）
+    bet_count: int = 0        # 購入点数合計（100円 × bet_count = 投資額）
+    hit_count: int = 0        # 的中点数
+    return_amount: int = 0    # 払戻合計（円）
+    return_rate: float = 0.0  # 回収率（return_amount / (100 * bet_count)）
+    na_race_count: int = 0    # データ欠損レース数（集計対象外・0%と誤集計しない）
+
+
+class ComboBacktestResult(BaseModel):
+    """本命×相手の組み合わせバックテスト結果（1期間分）。BET-3 の出力モデル。
+
+    PLAN.md BET-3: 5賭式それぞれの回収率が独立して出力される。
+    各賭式の ComboStats に race_count / bet_count が併記される（Blocker要件）。
+    """
+    honmei_strategy: str
+    aite_strategy: str
+    from_date: str
+    to_date: str
+    period_label: str = ""
+    total_races: int = 0
+    skipped_races: int = 0
+    tansho: ComboStats = Field(default_factory=ComboStats)
+    fukusho: ComboStats = Field(default_factory=ComboStats)
+    umaren: ComboStats = Field(default_factory=ComboStats)
+    wide: ComboStats = Field(default_factory=ComboStats)
+    sanrenfuku: ComboStats = Field(default_factory=ComboStats)
+    generated_at: str = ""
