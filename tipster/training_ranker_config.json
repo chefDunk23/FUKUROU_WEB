@@ -1,0 +1,39 @@
+{
+  "_comment": "TR-1 調教AIフィルタリング 閾値設定 — PLAN.md §3.5 TR-1 優先度①〜⑦",
+  "conditions": {
+    "1": {
+      "_label": "① 坂路ラスト1F ≤ 11.9秒 かつ 全区間加速ラップ",
+      "slope_last_1f_max_sec": 11.9
+    },
+    "2": {
+      "_label": "② 坂路ラスト2F目（残り400-200m）≤ 11.9秒（ラスト1Fの減速は許容）",
+      "slope_last_2f_max_sec": 11.9
+    },
+    "3": {
+      "_label": "③ 坂路全体時計（4F累積）≤ 52.9秒 かつ 全区間加速ラップ",
+      "slope_total_time_max_sec": 52.9
+    },
+    "4": {
+      "_label": "④ ウッドラスト1F ≤ 11.5秒 かつ ウッド5F時計 ≤ 67.0秒 かつ 終い2F加速ラップ",
+      "wood_last_1f_max_sec": 11.5,
+      "wood_5f_time_max_sec": 67.0
+    },
+    "5": {
+      "_label": "⑤ 前週（6-8日前）坂路で終い12.9秒以下の加速ラップあり かつ 当週最終追い切りウッドでラスト1F ≤ 11.9秒",
+      "prev_week_min_days_before": 6,
+      "prev_week_max_days_before": 8,
+      "prev_week_slope_last_1f_max_sec": 12.9,
+      "current_week_wood_last_1f_max_sec": 11.9
+    },
+    "6": {
+      "_label": "⑥ 栗東坂路ラスト1F ≤ 12.9秒 かつ 全区間加速ラップ",
+      "center_cd": "1",
+      "slope_last_1f_max_sec": 12.9
+    },
+    "7": {
+      "_label": "⑦ 美浦坂路ラスト1F ≤ 12.9秒 かつ 全区間加速ラップ",
+      "center_cd": "0",
+      "slope_last_1f_max_sec": 12.9
+    }
+  }
+}
