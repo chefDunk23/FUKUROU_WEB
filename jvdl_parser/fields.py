@@ -292,6 +292,21 @@ WC_FIELDS: list[F] = [
     F("lap_l1",            101,   3, _lap3),
 ]
 
+# ── HR — 払戻（レコード長 719、CRLF含む、dataspec RACE） ─────────────────────
+# 8種別の払戻セクションは parse_hr_payouts() で展開する（RECORD_DEFS の table=None）
+# セクション構造（0始まり絶対オフセット）:
+#   S1 単勝  raw[27:141]  114B  winner entry at section offset 75, 3 slots × 13B
+#   S2 複勝  raw[141:206]  65B  5 entries × 13B
+#   S3 枠連  raw[206:245]  39B  3 entries × 13B
+#   S4 馬連  raw[245:293]  48B  3 entries × 16B
+#   S5 ワイド raw[293:453] 160B  10 entries × 16B
+#   S6 馬単  raw[453:549]  96B  6 entries × 16B
+#   S7 三連複 raw[549:603]  54B  3 entries × 18B
+#   S8 三連単 raw[603:717] 114B  6 entries × 19B
+
+HR_FIELDS: list[F] = _race_key_fields()  # レースキー（データ区分・作成日含む）だけ抽出
+
+
 # ── RECORD_DEFS ─────────────────────────────────────────────────────────────────
 # 種別ID(bytes) → (期待レコード長, FieldSpec, テーブル名 or None)
 # テーブル名 None = 繰返しブロックあり。専用ハンドラで展開（parse_wh_entries / parse_o1_entries）
@@ -308,4 +323,5 @@ RECORD_DEFS: dict[bytes, tuple[int, list[F], str | None]] = {
     b"O1": ( 962, O1_FIELDS, None),
     b"HC": (  60, HC_FIELDS, "training_slope"),
     b"WC": ( 105, WC_FIELDS, "training_wood"),
+    b"HR": ( 719, HR_FIELDS, None),
 }

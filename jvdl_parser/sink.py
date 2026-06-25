@@ -270,6 +270,25 @@ _HANDLERS: dict[str, _SinkConf] = {
         pkey=("race_id", "umaban"),
         preprocessor=_with_race_id,
     ),
+
+    # ── HR 払戻 — parse_hr_payouts() が展開した 1 払戻組合せ = 1 行 ─────────────
+    "HR_PAYOUT": _SinkConf(
+        table="payouts",
+        columns=(
+            "race_id",
+            "bet_type",
+            "combo_key",
+            "horse_1",
+            "horse_2",
+            "horse_3",
+            "payout",
+            "popularity_rank",
+            "data_kubun",
+            "data_create_date",
+        ),
+        pkey=("race_id", "bet_type", "combo_key"),
+        preprocessor=_with_race_id,
+    ),
 }
 
 

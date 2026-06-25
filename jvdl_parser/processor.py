@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass
 
 from .fields import RECORD_DEFS
-from .parser import RecordLengthError, iter_records, parse_record, parse_wh_entries, parse_o1_entries, stats
+from .parser import RecordLengthError, iter_records, parse_record, parse_wh_entries, parse_o1_entries, parse_hr_payouts, stats
 from .sink import BulkSink, _build_race_id
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,12 @@ def process_stream(
                     sink.feed("O1_WIN", entry)
                 for entry in expanded["place"]:
                     sink.feed("O1_PLACE", entry)
+                _collect_race_id(row, affected)
+
+            elif rtype == "HR":
+                payouts = parse_hr_payouts(raw, row)
+                for payout in payouts:
+                    sink.feed("HR_PAYOUT", payout)
                 _collect_race_id(row, affected)
 
             else:
