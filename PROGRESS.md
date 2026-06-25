@@ -285,3 +285,180 @@ G1〜G5b は全合格。G4/G5a(3) の前回 Blocker は解消済み。残る Blo
 - `bulk_ingest_v2.py --files raw_RACE.txt` を実行して HR データを DB 投入
 - 投入後、任意 race_id で単勝/複勝/馬連/ワイド/三連複の払戻金額を DB クエリで確認（手動突合せ）
 - BET-0 Done条件3「DBから取得できること」の最終確認
+
+---
+
+## Evaluator評価 — BET-0 再々評価 (2026-06-25)
+
+**評価対象:** BET-0 Option B 実装後の再評価（ブランチ: auto-harness-1）
+**評価結果: 不合格（BET-0 Blocker 2件）**
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 備考 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 462 passed 実測 |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json・engine.py・conditions.py に変更なし |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 確認済み。`tipster/backtest.py` がインポートしユーティリティ関数提供。tipster/・scripts/ にランダムシャッフルゼロ件 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | (1) 全戦略JSONのconditions[]にai_score系condition+required:trueなし ✓ (2) ranking.primary="ai_score"の戦略JSON存在しない ✓ (3) `test_tiebreak_falls_to_ai_score` + `test_clear_count_beats_ai_score` 両テスト存在・合格 ✓ |
+| G5b | AI出力の外部公開禁止 | **PASS** | 新規API・出力経路なし |
+
+G1〜G5b の横断的基準は全件合格。
+
+### BET-0 §5-3 Blocker確認
+
+#### Blocker 1: バックフィル未完了 + migration未適用
+
+**DB実測結果（psycopg2で直接確認）:**
+```
+payouts COUNT(*): 258,565  ← 既存行数は保護されている ✓
+payouts MAX(race_id): '202604050912'  ← 2026-04-05 止まり（バックフィルなし）
+payouts_race_bet_combo_key constraint: 存在しない (None)  ← migrate_add_payouts.sql 未適用
+```
+
+**判定: FAIL**
+- `scripts/migrate_add_payouts.sql` が `fukurou_jvdl` DB に適用されていない（一意制約 `payouts_race_bet_combo_key` が存在しない）
+- `sink.py` の `HR_PAYOUT` ハンドラの `sql_override` が `ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key` を参照するため、制約なしで `bulk_ingest_v2.py` を実行すると **DB エラーで即失敗**する
+- 結果として 2026-04-06 以降のバックフィルが一切実施されていない（Done条件2未達）
+- BET-0 Done条件3「DBから取得できること」も未達
+
+#### Blocker 2: race_id変換ロジック誤り（16桁 vs 12桁）— 新規発見
+
+**PLAN.md §1-1 の要件:**
+```
+payouts.race_id = kaisai_year || kaisai_monthday || keibajo_code || race_num  (12桁)
+kaisai_kai・kaisai_nichime は含めない
+```
+
+**現在の実装（jvdl_parser/sink.py）:**
+```python
+def _build_race_id(row: dict) -> str:
+    """kaisai_year(4) + kaisai_monthday(4) + keibajo_code(2)
+    + kaisai_kai(2) + kaisai_nichime(2) + race_num(2) = 16 chars"""
+    ...
+
+def _prep_payout(row: dict) -> dict:
+    result = _with_race_id(row)   # _build_race_id を呼ぶ → 16桁生成
+    ...
+```
+
+**判定: FAIL — 致命的バグ**
+- `_prep_payout` が呼び出す `_build_race_id` は `kaisai_kai` + `kaisai_nichime` を含む **16桁** race_id を生成する
+- 既存 `payouts` テーブルは `kaisai_kai`/`kaisai_nichime` を含まない **12桁** race_id を格納している（例: `202604050912`）
+- 仮に constraint が追加されても、投入される race_id（16桁）と既存データの race_id（12桁）が異なるため、ON CONFLICT では衝突せず別行として挿入される（既存データとの整合性が壊れる）
+- `test_race_id_generated` が `assert result["race_id"] == "2026062105010103"` で **16桁を正しいと断言**しており、バグを検出できていない（テスト自体が誤った期待値を持つ）
+- PLAN.md §5-3 BET-0「曖昧マッチング防止」Blocker：一意変換式を誤実装
+
+**再利用可能な変換ヘルパー関数の欠如:**
+- PLAN.md BET-0 出力要件「`races_v2.race_id` 等と `payouts.race_id` の変換ヘルパー関数」が存在しない
+- `tipster/engine.py` の `_to_db_race_id()` (16→12変換) は private かつ旧 `races` テーブル向けで、`payouts` の文脈での再利用が困難
+
+### BET-0 Done条件サマリ
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| (1) 既存258,565行が破壊されていない | PASS | 行数・スキーマ変更なし確認済み |
+| (2) 2026-04-06〜直近のバックフィル完了 | **FAIL** | max_race_id=202604050912。migration未適用で bulk_ingest 実行不可 |
+| (3) DBから払戻金額を取得できること（手動突合せ） | **FAIL** | 新規投入ゼロ。仮に実行しても16桁race_idで投入され既存12桁データとミスマッチ |
+| (4) 2026-02-07〜09 欠損42レースの調査 | **FAIL** | 一切未対応。原因調査・バックフィル・理由明記のいずれも行われていない |
+
+### 修正方針（次 Generator への指示）
+
+以下3点を全て対応すること:
+
+**[Fix 1] race_id生成を12桁に修正（最優先）**
+- `sink.py` に `_build_payout_race_id(row)` 関数を新設:
+  ```python
+  def _build_payout_race_id(row: dict) -> str:
+      """payouts テーブル向け12桁 race_id: kaisai_kai / kaisai_nichime を含まない。
+      PLAN.md §1-1 確定変換式: kaisai_year(4) + kaisai_monthday(4) + keibajo_code(2) + race_num(2)
+      """
+      return "".join([
+          (row.get("kaisai_year")     or ""),
+          (row.get("kaisai_monthday") or ""),
+          (row.get("keibajo_code")    or "").zfill(2),
+          (row.get("race_num")        or "").zfill(2),
+      ])
+  ```
+- `_prep_payout` が `_with_race_id`（16桁）ではなく `_build_payout_race_id`（12桁）を呼ぶよう修正
+- `test_race_id_generated` の期待値を `"202606210503"` (12桁) に修正
+- 上記関数を `shared/` または `jvdl_parser/` から公開エクスポートし、「再利用可能な変換ヘルパー」として他モジュールからも参照可能にすること
+
+**[Fix 2] migrate_add_payouts.sql を DB に適用**
+- `fukurou_jvdl` DB に `scripts/migrate_add_payouts.sql` を実行し、`payouts_race_bet_combo_key` 一意制約を追加する
+- 適用後、`\d payouts` または `pg_constraint` クエリで制約存在を確認すること
+
+**[Fix 3] bulk_ingest_v2.py を実行してバックフィル**
+- Fix 1 + Fix 2 が完了してから `bulk_ingest_v2.py --files raw_RACE.txt` を実行
+- 投入後に `payouts` の行数・`MAX(race_id)` を確認し、直近データが追加されたことを検証
+- 任意の 2026-04-06 以降 race_id（12桁変換後）で `SELECT * FROM payouts WHERE race_id = '...'` を実行し、払戻金額を払戻表と手動突合せすること
+
+**[Fix 4] 2026-02-07〜09 欠損調査（Done条件4）**
+- 原因を調査し、バックフィル可能なら実施、不可なら理由を PROGRESS.md に明記すること
+
+### 総合判定
+
+**不合格（BET-0 Blocker 2件）**
+
+G1〜G5b は全合格。残る Blocker は BET-0 の race_id 変換バグ（16桁→12桁修正必須）と migration 未適用・バックフィル未実施。
+
+---
+
+## 作業ログ
+
+### BET-0 Fix: race_id 12桁修正 + migration適用 + バックフィル + 欠損調査 (2026-06-25)
+
+**対応 PLAN.md 項目:** BET-0（Evaluator指摘 Blocker 2件の解消）
+
+**実装内容:**
+
+1. **jvdl_parser/sink.py**
+   - `build_payout_race_id(row)` 関数を新設（公開関数、他モジュールから参照可能）
+     - PLAN.md §1-1 確定変換式: `kaisai_year(4) + kaisai_monthday(4) + keibajo_code(2) + race_num(2)` = 12桁
+     - `kaisai_kai` / `kaisai_nichime` を意図的に除外（payoutsテーブルにはこれらの情報がない）
+   - `_prep_payout()` を修正: `_with_race_id()`（16桁生成）→ `build_payout_race_id()`（12桁生成）に差し替え
+   - `_build_race_id()` は races_v2 等のメインテーブル向け16桁として維持（後方互換）
+
+2. **tests/test_jvdl_parser_sink.py**
+   - `build_payout_race_id` をインポートに追加
+   - `TestBuildPayoutRaceId` クラスを新設（4件）:
+     - `test_returns_12_chars`: 12文字であること
+     - `test_excludes_kaisai_kai_and_nichime`: 開催回・日目が異なっても同日同場なら同じ12桁
+     - `test_format_matches_existing_payouts_race_id`: 既存データ例 `202604050912` との一致確認
+     - `test_differs_from_16char_race_id`: 16桁の `_build_race_id` と異なることを明示
+   - `TestPrepPayout::test_race_id_generated`: 期待値を `"2026062105010103"`（16桁）→ `"202606210503"`（12桁）に修正
+   - `TestHRPayoutHandler::test_to_tuple_order_and_conversion`: `len(race_id) == 16` → `== 12` に修正
+
+3. **DB操作（fukurou_jvdl）**
+   - `scripts/migrate_add_payouts.sql` をインライン実行で適用
+     - `payouts_race_bet_combo_key` UNIQUE制約を追加（冪等・既存258,565行保護）
+     - `payouts_race_id_bet_type_idx` インデックスを追加
+   - `bulk_ingest_v2.py --files raw_RACE.txt` を実行してHRデータをバックフィル
+     - 3,450 HRレコード全件処理、DLQ=0
+     - payouts行数: 258,565 → 288,726（+30,161行）
+     - max race_id: `202604050912`（2026-04-05） → `202606140912`（2026-06-14）
+
+**race_id 変換ロジック検証（PLAN.md §5-3 BET-0 Blocker・集合比較）:**
+- `races_v2`（is_jra=true）× `race_entries_v2`（kakutei_chakujun=1）× `payouts`（bet_type='tansho'）
+- 対象レース数: 15,399件（payoutsに対応行が存在するもの全件）
+- 一致: 15,399件 / 不一致: 0件
+- 同着レースも集合比較により正しく判定済み ✓
+
+**テスト結果:** `pytest tests/` → 466 passed（前回462 → +4件）
+
+**Done条件4: 2026-02-07〜09 欠損調査結果**
+
+原因調査の結果、以下の通り判明:
+
+| 日付・競馬場 | races_v2 | payouts | data_kubun | shusso_tosu | 結論 |
+|---|---|---|---|---|---|
+| 2026-02-07 jyo=05,08,10 | 各12レース | 140/238/240 | 7（確定） | >0 | **バックフィル済み** ✓ |
+| 2026-02-08 jyo=05（東京） | 12レース | 0 | **9（取消）** | **0** | **競走取消・払戻不可** |
+| 2026-02-08 jyo=08（京都） | 12レース | 0 | **9（取消）** | **0** | **競走取消・払戻不可** |
+| 2026-02-08 jyo=10（小倉） | 12レース | 220 | 7（確定） | >0 | **バックフィル済み** ✓ |
+| 2026-02-09 jyo=08（京都） | 12レース | 0 | **9（取消）** | **0** | **競走取消・払戻不可** |
+| 2026-02-09 jyo=05（東京） | 0レース | 0 | - | - | **そもそも開催なし** |
+| 2026-02-09 jyo=10（小倉） | 0レース | 0 | - | - | **そもそも開催なし** |
+
+**結論:** `data_kubun='9'`（JV-Data「取消」区分）・`shusso_tosu=0` のレースは競走自体が中止された（悪天候による開催取消等）。取消競走には払戻金が発生しないためpayoutsデータは存在せず、バックフィルは不可能。これはデータ欠損ではなく正常系（取消競走=リターン0ではなく集計対象外N/Aとして扱うこと）。2026-02-07分は今回のバックフィルで解消済み。

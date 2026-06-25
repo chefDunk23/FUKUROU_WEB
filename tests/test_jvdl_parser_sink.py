@@ -32,6 +32,7 @@ from jvdl_parser.sink import (
     _prep_payout,
     _prep_training,
     _with_race_id,
+    build_payout_race_id,
 )
 
 
@@ -403,6 +404,47 @@ class TestHandlersIntegrity:
         assert any("l10" in c or "l9" in c or "l8" in c for c in wc_only)
 
 
+# ── build_payout_race_id ───────────────────────────────────────────────────────
+
+class TestBuildPayoutRaceId:
+    """PLAN.md §1-1 確定変換式の検証: 12桁、kaisai_kai/kaisai_nichime を含まない。"""
+
+    def test_returns_12_chars(self):
+        row = {
+            "kaisai_year": "2026", "kaisai_monthday": "0621",
+            "keibajo_code": "05", "kaisai_kai": "01",
+            "kaisai_nichime": "01", "race_num": "03",
+        }
+        assert len(build_payout_race_id(row)) == 12
+
+    def test_excludes_kaisai_kai_and_nichime(self):
+        row_a = {
+            "kaisai_year": "2026", "kaisai_monthday": "0621",
+            "keibajo_code": "05", "kaisai_kai": "01",
+            "kaisai_nichime": "01", "race_num": "03",
+        }
+        row_b = {**row_a, "kaisai_kai": "02", "kaisai_nichime": "03"}
+        # 開催回・日目が異なっても同日同場なら同じ12桁になる
+        assert build_payout_race_id(row_a) == build_payout_race_id(row_b)
+
+    def test_format_matches_existing_payouts_race_id(self):
+        # 既存データ例: '202604050912' = 2026年04月05日・場コード09・レース12
+        row = {
+            "kaisai_year": "2026", "kaisai_monthday": "0405",
+            "keibajo_code": "09", "race_num": "12",
+        }
+        assert build_payout_race_id(row) == "202604050912"
+
+    def test_differs_from_16char_race_id(self):
+        row = {
+            "kaisai_year": "2026", "kaisai_monthday": "0621",
+            "keibajo_code": "05", "kaisai_kai": "01",
+            "kaisai_nichime": "01", "race_num": "03",
+        }
+        assert build_payout_race_id(row) != _build_race_id(row)
+        assert len(_build_race_id(row)) == 16
+
+
 # ── _HR_BET_NAMES / _prep_payout ───────────────────────────────────────────────
 
 def _hr_base_row(**kwargs) -> dict:
@@ -453,9 +495,11 @@ class TestPrepPayout:
         assert result["popularity"] == 3
 
     def test_race_id_generated(self):
+        # payouts テーブルは 12 桁 race_id（kaisai_kai/kaisai_nichime を含まない）
+        # PLAN.md §1-1: kaisai_year(4)+kaisai_monthday(4)+keibajo_code(2)+race_num(2)
         result = _prep_payout(_hr_base_row())
         assert "race_id" in result
-        assert result["race_id"] == "2026062105010103"
+        assert result["race_id"] == "202606210503"
 
     def test_original_row_not_mutated(self):
         row = _hr_base_row(bet_type=1)
@@ -498,7 +542,7 @@ class TestHRPayoutHandler:
         assert tup[idx["combination"]] == "06"
         assert tup[idx["payout"]]      == 470
         assert tup[idx["popularity"]]  == 4
-        assert len(tup[idx["race_id"]]) == 16
+        assert len(tup[idx["race_id"]]) == 12  # payouts は 12 桁（kaisai_kai/nichime 除外）
 
     def test_flush_uses_sql_override(self):
         """BulkSink経由でHR_PAYOUTをflushすると sql_override の SQL が execute_values に渡る。"""
