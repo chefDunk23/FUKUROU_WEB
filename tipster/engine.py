@@ -435,6 +435,24 @@ def select_honmei(
     )
 
 
+def select_aite(
+    candidates: list[HorseEvaluation],
+    honmei_horse_id: str | None = None,
+    max_aite: int | None = None,
+) -> list[HorseEvaluation]:
+    """相手選定: 候補馬リストから本命を除いた上位N頭を返す（BET-2）。
+
+    candidates は相手選定戦略（anaba系）で evaluate_race_context() した結果の
+    candidates（除外されていない馬）をそのまま渡すこと。戦略側のランキング順が維持される。
+
+    - honmei_horse_id: 本命馬の horse_id（相手候補から除外する）。None なら除外なし。
+    - max_aite: 最大相手頭数。None なら候補を全員返す。
+      戦略 JSON の max_selections が既に上位カット済みの場合はこれを渡さなくてよい。
+    """
+    pool = [c for c in candidates if c.horse_id != honmei_horse_id]
+    return pool[:max_aite] if max_aite is not None else pool
+
+
 def compute_confidence(honmei: HorseEvaluation | None, eligible_count: int) -> str:
     """本命の自信度を S/A/B/C でラベル化する（AY-3）。
 

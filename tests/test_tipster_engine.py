@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tipster.engine import compute_confidence, evaluate_race, fetch_race_context, load_strategy, select_honmei
+from tipster.engine import compute_confidence, evaluate_race, fetch_race_context, load_strategy, select_aite, select_honmei
 from tipster.models import ConditionResult, HorseEvaluation
 
 _SKIP_REASON = ""
@@ -156,3 +156,49 @@ class TestComputeConfidence:
     def test_very_low_score_is_grade_c(self):
         honmei = _ev("A", score=1.0)
         assert compute_confidence(honmei, eligible_count=1) == "C"
+
+
+class TestSelectAite:
+    """select_aite() のユニットテスト（BET-2）。"""
+
+    def test_returns_all_candidates_when_no_honmei(self):
+        """honmei_horse_id=None のとき全候補を返す。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates)
+        assert [c.horse_id for c in aite] == ["A", "B", "C"]
+
+    def test_excludes_honmei_from_aite(self):
+        """本命馬が相手候補から除外される。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="A")
+        assert [c.horse_id for c in aite] == ["B", "C"]
+
+    def test_max_aite_limits_selection(self):
+        """max_aite による上位N頭カットが機能する。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates, max_aite=2)
+        assert len(aite) == 2
+        assert aite[0].horse_id == "A"
+
+    def test_excludes_honmei_then_caps(self):
+        """本命除外 → 上位N頭カットの順序が正しい。"""
+        candidates = [_ev("A", score=4.0), _ev("B", score=3.0), _ev("C", score=2.0), _ev("D", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="A", max_aite=2)
+        assert [c.horse_id for c in aite] == ["B", "C"]
+
+    def test_empty_candidates_returns_empty(self):
+        """候補が空なら空リストを返す。"""
+        assert select_aite([]) == []
+
+    def test_preserves_ranking_order_from_strategy(self):
+        """candidates の既存ランキング順序を維持する（ソート不変）。"""
+        candidates = [_ev("X", score=5.0), _ev("Y", score=3.0), _ev("Z", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="X")
+        assert aite[0].horse_id == "Y"
+        assert aite[1].horse_id == "Z"
+
+    def test_honmei_not_in_candidates_returns_all(self):
+        """本命 horse_id が candidates に存在しない場合、全員を返す（安全な挙動）。"""
+        candidates = [_ev("A", score=2.0), _ev("B", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="Z")
+        assert len(aite) == 2
