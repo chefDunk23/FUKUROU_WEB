@@ -27,7 +27,9 @@ from jvdl_parser.sink import (
     _build_race_id,
     _build_upsert,
     _HANDLERS,
+    _HR_BET_NAMES,
     _identity,
+    _prep_payout,
     _prep_training,
     _with_race_id,
 )
@@ -399,3 +401,119 @@ class TestHandlersIntegrity:
         wc_cols = set(_HANDLERS["WC"].columns)
         wc_only = wc_cols - hc_cols
         assert any("l10" in c or "l9" in c or "l8" in c for c in wc_only)
+
+
+# ── _HR_BET_NAMES / _prep_payout ───────────────────────────────────────────────
+
+def _hr_base_row(**kwargs) -> dict:
+    base = {
+        "kaisai_year": "2026", "kaisai_monthday": "0621",
+        "keibajo_code": "05", "kaisai_kai": "01",
+        "kaisai_nichime": "01", "race_num": "03",
+        "bet_type": 1,
+        "combo_key": "11",
+        "popularity_rank": 7,
+        "payout": 1510,
+    }
+    return {**base, **kwargs}
+
+
+class TestHRBetNames:
+    def test_all_eight_bet_types_covered(self):
+        expected = {
+            1: "tansho", 2: "fukusho", 3: "wakuren",
+            4: "umaren", 5: "wide", 6: "umatan",
+            7: "sanrenpuku", 8: "sanrentan",
+        }
+        assert _HR_BET_NAMES == expected
+
+    def test_no_extra_keys(self):
+        assert len(_HR_BET_NAMES) == 8
+
+
+class TestPrepPayout:
+    def test_bet_type_int_to_text_tansho(self):
+        result = _prep_payout(_hr_base_row(bet_type=1))
+        assert result["bet_type"] == "tansho"
+
+    def test_bet_type_int_to_text_wide(self):
+        result = _prep_payout(_hr_base_row(bet_type=5, combo_key="0306"))
+        assert result["bet_type"] == "wide"
+
+    def test_bet_type_int_to_text_sanrenpuku(self):
+        result = _prep_payout(_hr_base_row(bet_type=7, combo_key="060911"))
+        assert result["bet_type"] == "sanrenpuku"
+
+    def test_combo_key_becomes_combination(self):
+        result = _prep_payout(_hr_base_row(combo_key="0611"))
+        assert result["combination"] == "0611"
+
+    def test_popularity_rank_becomes_popularity(self):
+        result = _prep_payout(_hr_base_row(popularity_rank=3))
+        assert result["popularity"] == 3
+
+    def test_race_id_generated(self):
+        result = _prep_payout(_hr_base_row())
+        assert "race_id" in result
+        assert result["race_id"] == "2026062105010103"
+
+    def test_original_row_not_mutated(self):
+        row = _hr_base_row(bet_type=1)
+        original_bet = row["bet_type"]
+        _prep_payout(row)
+        assert row["bet_type"] == original_bet  # int 値が元のまま
+
+
+# ── HR_PAYOUT ハンドラ整合性 ────────────────────────────────────────────────────
+
+class TestHRPayoutHandler:
+    def test_handler_exists(self):
+        assert "HR_PAYOUT" in _HANDLERS
+
+    def test_pkey_is_subset_of_columns(self):
+        conf = _HANDLERS["HR_PAYOUT"]
+        for k in conf.pkey:
+            assert k in conf.columns, f"HR_PAYOUT: pkey '{k}' not in columns"
+
+    def test_columns_match_existing_schema(self):
+        conf = _HANDLERS["HR_PAYOUT"]
+        assert set(conf.columns) == {"race_id", "bet_type", "combination", "payout", "popularity"}
+
+    def test_sql_override_used_instead_of_build_upsert(self):
+        conf = _HANDLERS["HR_PAYOUT"]
+        sql = conf.upsert_sql
+        assert "ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key" in sql
+        assert "INSERT INTO payouts" in sql
+        # 鮮度ガード（data_kubun/data_create_date）は含まない
+        assert "data_kubun" not in sql
+        assert "loaded_at = now()" not in sql
+
+    def test_to_tuple_order_and_conversion(self):
+        conf = _HANDLERS["HR_PAYOUT"]
+        row = _hr_base_row(bet_type=2, combo_key="06", popularity_rank=4, payout=470)
+        tup = conf.to_tuple(row)
+        assert len(tup) == 5
+        idx = {c: i for i, c in enumerate(conf.columns)}
+        assert tup[idx["bet_type"]]    == "fukusho"
+        assert tup[idx["combination"]] == "06"
+        assert tup[idx["payout"]]      == 470
+        assert tup[idx["popularity"]]  == 4
+        assert len(tup[idx["race_id"]]) == 16
+
+    def test_flush_uses_sql_override(self):
+        """BulkSink経由でHR_PAYOUTをflushすると sql_override の SQL が execute_values に渡る。"""
+        from unittest.mock import MagicMock, patch
+        conn = MagicMock()
+        cur_cm = MagicMock()
+        cur_cm.__enter__ = MagicMock(return_value=cur_cm)
+        cur_cm.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cur_cm
+
+        sink = BulkSink(conn)
+        sink.feed("HR_PAYOUT", _hr_base_row())
+
+        with patch("psycopg2.extras.execute_values") as mock_ev:
+            sink.flush()
+
+        sql_passed = mock_ev.call_args[0][1]
+        assert "ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key" in sql_passed

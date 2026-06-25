@@ -144,3 +144,144 @@ BET-0 の Done条件「任意のrace_idについて...DBから取得できるこ
    - clear_count=2 / ai_score=0.1 の馬 A が clear_count=1 / ai_score=0.9 の馬 B に勝つことを確認
 
 **テスト結果:** `pytest tests/` 447 passed (既存テスト全件継続合格)
+
+---
+
+## Evaluator評価 — BET-0 再評価 (2026-06-25)
+
+**評価対象:** BET-0 Blocker修正後の再評価（ブランチ: auto-harness-1）
+**評価結果: 不合格（BET-0 Blocker: DBスキーマ不一致 + データ未投入）**
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 備考 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 447 passed 実測 |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json・engine.py・conditions.py に変更なし |
+| G3 | 既存APIの契約破壊なし | **PASS** | 変更ファイル一覧に api_v1/v2/admin が含まれない |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` が追加済み。`tipster/backtest.py` がインポートし `get_train_end_date()` / `get_eval_start_date()` を提供。tipster/・scripts/ にランダムシャッフル（shuffle/random.sample/train_test_split）ゼロ件確認 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | (1) 全戦略JSONのconditions[]にai_score系condition+required:trueなし ✓ (2) ranking.primary="ai_score"の戦略JSON存在しない（honmei_v1:condition_clear_count, honmei_v2:total_score, anaba_v1:total_score）✓ (3) `test_tiebreak_falls_to_ai_score`（同点→AIタイブレーク）+ `test_clear_count_beats_ai_score`（clear_count逆転ケース）両方存在 ✓ |
+| G5b | AI出力の外部公開禁止 | **PASS** | 変更対象ファイルに新規API・出力経路なし。jvdl_parser/*は払戻データのみ扱う |
+
+G1〜G5b の横断的基準は全件合格。
+
+### BET-0 固有 Done条件 / §5-3 Blocker確認
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| パース成功（DLQ=0） | PASS | 前回評価で確認済み（3,450 HRレコード全件パース） |
+| 手動突合せ（払戻表との一致） | PASS | 前回評価で確認済み（Race 2025062102010301 の6賭式スポットチェック） |
+| **DBから取得できること** | **FAIL** | 下記詳細参照 |
+
+### BET-0 FAIL 詳細 — DBスキーマ不一致
+
+`fukurou_jvdl` の `payouts` テーブルを直接確認した結果:
+
+**実際のDBスキーマ（既存テーブル）:**
+```
+race_id      character varying
+bet_type     character varying   ← "wide"/"tansho"/"fukusho" 等のテキスト
+combination  character varying   ← "11" / "0311" 等の組合せキー
+payout       integer
+popularity   integer
+```
+
+**`migrate_add_payouts.sql` / `sink.py` が想定するスキーマ:**
+```
+race_id       TEXT
+bet_type      SMALLINT   ← 1=単勝, 2=複勝... の数値
+combo_key     TEXT       ← "combo_key" カラム
+horse_1       SMALLINT
+horse_2       SMALLINT
+horse_3       SMALLINT
+payout        INTEGER
+popularity_rank SMALLINT
+data_kubun    TEXT
+data_create_date TEXT
+loaded_at     TIMESTAMPTZ
+```
+
+**判明した不整合:**
+1. `payouts` テーブルは既に異なるスキーマで存在する（258,565行）
+2. `migrate_add_payouts.sql` は `CREATE TABLE IF NOT EXISTS payouts` のため、既存テーブルがあると**何もしない**（新スキーマは適用されない）
+3. `sink.py` の UPSERT は `combo_key`, `horse_1`, `horse_2`, `horse_3`, `popularity_rank`, `data_kubun`, `data_create_date` を列指定するが、これらは実テーブルに**存在しない** → 実行すると `ERROR: column "combo_key" does not exist`
+4. スポットチェック対象レース `2025062102010301` は payouts テーブルに **0行**（既存データにも新データにも存在しない）
+
+**結論:** `bulk_ingest_v2.py --files raw_RACE.txt` を実行してもスキーマ不一致で UPSERT が失敗し、HRデータはDBに投入できない状態。BET-0 Done条件「任意のrace_idについて確定払戻金をDBから取得できること」は未達。
+
+### §5-3 BET-0 Blockerとの対応
+
+PLAN.md §5-3「サンプルレース数件で、取得した払戻金額が実際の確定払戻表と一致する（手動突合せ済み）」は、DBから取得して突合せることを前提とする。パース精度は確認済みだが、DBへの投入が機能しない以上、合格ラインに未達。
+
+### 修正方針
+
+以下のいずれかで対応すること:
+
+**オプションA（新スキーマへの移行）:**
+1. 既存 `payouts` テーブルをリネーム or DROP し `migrate_add_payouts.sql` を適用
+2. `bulk_ingest_v2.py --files raw_RACE.txt` を再実行してHRデータを投入
+3. Race 2025062102010301 等で DB クエリ検証
+
+**オプションB（既存スキーマへの適合）:**
+1. `sink.py` の `HR_PAYOUT` 設定を既存スキーマ（combination, bet_type=text, popularity）に合わせて変更
+2. `migrate_add_payouts.sql` を既存スキーマへの差分追加（必要列のみ ALTER TABLE ADD COLUMN）に書き直し
+3. `bulk_ingest_v2.py --files raw_RACE.txt` を実行してHRデータを投入
+4. Race 2025062102010301 等で DB クエリ検証
+
+### 補足（人間による直接DB確認・2026-06-25）
+
+`fukurou_jvdl.payouts` を `psql` で直接確認した結果、**既存テーブルには既に258,565行のデータが投入済み**であることが判明した（race_id範囲: 2020-01-05〜2026-04-05、bet_type内訳: tansho 21,676 / fukusho 64,488 / wakuren 20,519 / umaren 21,680 / wide 65,023 / umatan 21,717 / sanrenpuku 21,692 / sanrentan 21,770）。回収率の定義（確定事項）が要求する5賭式（単勝/複勝/馬連/ワイド/三連複）は全て既にカバーされている。
+
+このデータがどの経路で投入されたかはリポジトリ内のコードからは追跡できない（`jvdl_parser/`に既存のHR書き込みコードは見つからない）。つまり**払戻データ自体は「ゼロから作る」必要はなく、既存テーブルへの追加投入・整合性確認が主目的**である。
+
+**次のGeneratorループへの指示: 必ず「オプションB（既存スキーマへの適合）」を選択すること。** 既存スキーマ（`race_id, bet_type[text], combination, payout, popularity`）をそのまま正とし、`sink.py`/`migrate_add_payouts.sql`をこれに合わせて修正する。オプションA（既存テーブルのリネーム/DROP）は258,565行の既存データを破壊するリスクがあるため**禁止**。
+また、新規実装した`parse_hr_payouts`のHRレコードパース処理自体（8セクション分解ロジック）は不要にはならない可能性が高い（既存データの欠損レース・直近データの追加投入に使える）が、書き込み先は既存スキーマに合わせること。
+
+### 総合判定
+
+**不合格（Blocker 1件: BET-0 DBスキーマ不一致・データ未投入）**
+
+G1〜G5b は全合格。G4/G5a(3) の前回 Blocker は解消済み。残る Blocker は BET-0 のDB投入パイプラインのスキーマ不一致のみ。
+
+---
+
+## 作業ログ
+
+### BET-0 Option B: 既存スキーマ適合 + テスト追加 (2026-06-25)
+
+**対応 PLAN.md 項目:** BET-0（Evaluator指摘 Blocker — DBスキーマ不一致の解消）
+
+**実装方針:** PROGRESS.md の Evaluator指示「オプションBを選択すること」に従い、
+既存 `payouts` テーブルのスキーマ（`race_id, bet_type text, combination, payout, popularity`）を
+正とし、`sink.py`・`migrate_add_payouts.sql` を既存スキーマに適合させた。
+
+**実装内容:**
+
+1. **jvdl_parser/sink.py**
+   - `_SinkConf` に `sql_override: str | None = None` フィールドを追加
+   - `upsert_sql` プロパティが `sql_override` 優先で返すよう変更（鮮度ガード不要なケース向け）
+   - `_HR_BET_NAMES: dict[int, str]` 追加（整数bet_type → 既存DB文字列名の変換表）
+   - `_prep_payout()` プリプロセッサ追加: `bet_type(int)→text`, `combo_key→combination`, `popularity_rank→popularity`
+   - `HR_PAYOUT` ハンドラを既存スキーマ対応に修正:
+     - `columns=("race_id", "bet_type", "combination", "payout", "popularity")`
+     - `pkey=("race_id", "bet_type", "combination")`
+     - `sql_override` で `ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key` を指定
+
+2. **scripts/migrate_add_payouts.sql**
+   - CREATE TABLE を廃止（既存258,565行を破壊しないため）
+   - 既存 `payouts` テーブルに一意制約 `payouts_race_bet_combo_key` を追加する DO $$ ブロックに変更
+   - 制約が既に存在する場合は何もしない（冪等）
+
+3. **tests/test_jvdl_parser_sink.py**
+   - `_HR_BET_NAMES` / `_prep_payout` のインポートを追加（前ループの中断作業）
+   - `TestHRBetNames`: 8賭式全マッピングの正確性を検証（2件）
+   - `TestPrepPayout`: bet_type変換・combination/popularity マッピング・race_id生成・不変性（7件）
+   - `TestHRPayoutHandler`: ハンドラ存在・pkey整合・スキーマ一致・sql_override・to_tuple・BulkSink経由flush（6件）
+
+**テスト結果:** `pytest tests/` → 462 passed（+15件、既存447件全件継続合格）
+
+**残作業（次ループ以降）:**
+- `scripts/migrate_add_payouts.sql` を `fukurou_jvdl` DB に適用して一意制約を追加
+- `bulk_ingest_v2.py --files raw_RACE.txt` を実行して HR データを DB 投入
+- 投入後、任意 race_id で単勝/複勝/馬連/ワイド/三連複の払戻金額を DB クエリで確認（手動突合せ）
+- BET-0 Done条件3「DBから取得できること」の最終確認

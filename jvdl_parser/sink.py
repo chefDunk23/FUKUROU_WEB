@@ -72,9 +72,12 @@ class _SinkConf:
     columns: tuple[str, ...]
     pkey: tuple[str, ...]
     preprocessor: Callable[[dict], dict]
+    sql_override: str | None = None
 
     @property
     def upsert_sql(self) -> str:
+        if self.sql_override is not None:
+            return self.sql_override
         return _build_upsert(self.table, self.columns, self.pkey)
 
     def to_tuple(self, row: dict) -> tuple:
@@ -89,6 +92,32 @@ def _with_race_id(row: dict) -> dict:
 
 def _identity(row: dict) -> dict:
     return row
+
+# ── HR 払戻: パーサーの integer bet_type → 既存 DB の text bet_type 名 ─────────
+_HR_BET_NAMES: dict[int, str] = {
+    1: "tansho",
+    2: "fukusho",
+    3: "wakuren",
+    4: "umaren",
+    5: "wide",
+    6: "umatan",
+    7: "sanrenpuku",
+    8: "sanrentan",
+}
+
+
+def _prep_payout(row: dict) -> dict:
+    """HR払戻エントリを既存 payouts テーブルのスキーマに変換する。
+
+    既存スキーマ: race_id(text), bet_type(text), combination(text), payout(int), popularity(int)
+    パーサー出力: bet_type(int), combo_key(text), popularity_rank(int), horse_1/2/3
+    """
+    result = _with_race_id(row)
+    result["bet_type"] = _HR_BET_NAMES.get(row.get("bet_type"), str(row.get("bet_type")))
+    result["combination"] = row.get("combo_key")
+    result["popularity"] = row.get("popularity_rank")
+    return result
+
 
 def _prep_training(row: dict) -> dict:
     # center_cd: '0'=美浦, '1'=栗東。fields.py の _default_conv が空文字→None にするケースへの安全ネット。
@@ -272,22 +301,22 @@ _HANDLERS: dict[str, _SinkConf] = {
     ),
 
     # ── HR 払戻 — parse_hr_payouts() が展開した 1 払戻組合せ = 1 行 ─────────────
+    # 既存 payouts テーブルのスキーマに合わせる:
+    #   race_id(text), bet_type(text), combination(text), payout(int), popularity(int)
+    # _build_upsert の鮮度ガード (data_create_date/data_kubun) は使わず、
+    # 単純な ON CONFLICT DO UPDATE を使う（払戻確定値は変動しない）。
     "HR_PAYOUT": _SinkConf(
         table="payouts",
-        columns=(
-            "race_id",
-            "bet_type",
-            "combo_key",
-            "horse_1",
-            "horse_2",
-            "horse_3",
-            "payout",
-            "popularity_rank",
-            "data_kubun",
-            "data_create_date",
+        columns=("race_id", "bet_type", "combination", "payout", "popularity"),
+        pkey=("race_id", "bet_type", "combination"),
+        preprocessor=_prep_payout,
+        sql_override=(
+            "INSERT INTO payouts (race_id, bet_type, combination, payout, popularity)\n"
+            "VALUES %s\n"
+            "ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key DO UPDATE SET\n"
+            "    payout = EXCLUDED.payout,\n"
+            "    popularity = EXCLUDED.popularity"
         ),
-        pkey=("race_id", "bet_type", "combo_key"),
-        preprocessor=_with_race_id,
     ),
 }
 
