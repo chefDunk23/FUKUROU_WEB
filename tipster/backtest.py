@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
+from shared.config import EVAL_START_DATE, TRAIN_END_DATE
 from .conditions import CONDITION_REGISTRY, _class_level_from_codes, classify_pace_prediction
 from .engine import _SURFACE_JA_TO_EN, compute_confidence, load_strategy, select_honmei
 from .models import (
@@ -41,6 +42,11 @@ from .models import (
 # ─────────────────────────────────────────────────────────────────────────
 # 定数
 # ─────────────────────────────────────────────────────────────────────────
+# データ分割境界（shared.config で一元管理）:
+#   学習データ: ~ TRAIN_END_DATE (2025-05-31)
+#   検証データ: EVAL_START_DATE (2025-06-01) ~ 直近
+# バックテストを検証期間のみで実施する場合は from_date に EVAL_START_DATE を使うこと。
+# ランダムシャッフル分割は禁止。時系列順の分割のみ許可。
 
 _PERIOD_DAYS = {"3m": 90, "6m": 180, "1y": 365}
 _LOOKBACK_DAYS = 730        # 前走/前々走探索用にロード期間を遡る幅
@@ -51,6 +57,16 @@ _DISTANCE_BUCKETS = (
     (1800, "mile"),
     (2200, "middle"),
 )
+
+
+def get_train_end_date() -> date:
+    """学習データ終了日（shared.config.TRAIN_END_DATE）を date オブジェクトで返す。"""
+    return date.fromisoformat(TRAIN_END_DATE)
+
+
+def get_eval_start_date() -> date:
+    """検証データ開始日（shared.config.EVAL_START_DATE）を date オブジェクトで返す。"""
+    return date.fromisoformat(EVAL_START_DATE)
 
 
 def _parse_period_days(period: str) -> int:

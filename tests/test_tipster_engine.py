@@ -95,6 +95,16 @@ class TestSelectHonmei:
         honmei = select_honmei(candidates, {"A": 5, "B": 2})
         assert honmei.horse_id == "B"
 
+    def test_clear_count_beats_ai_score(self):
+        """clear_count が少ない馬の ai_score が高くても、clear_count 上位が選ばれること。
+        AIスコアはタイブレーカーとしてのみ機能し、条件クリア数に優先しない（G5a-3）。"""
+        candidates = [
+            _ev("A", score=1.0, clear_count=2, ai_score=0.1),  # clear_count 高・ai_score 低
+            _ev("B", score=1.0, clear_count=1, ai_score=0.9),  # clear_count 低・ai_score 高
+        ]
+        honmei = select_honmei(candidates, {"A": 1, "B": 2})
+        assert honmei.horse_id == "A"
+
     def test_empty_candidates_returns_none(self):
         assert select_honmei([], {}) is None
 

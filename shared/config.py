@@ -76,6 +76,14 @@ REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
 # 空文字 = 開発環境（認証スキップ）。本番では必ず設定すること。
 API_KEY: str = os.getenv("API_KEY", "")
 
+# ── データ分割境界（学習 / 検証）────────────────────────────────────────────
+# 学習データ: ~ TRAIN_END_DATE (含む)
+# 検証データ: EVAL_START_DATE ~ (含む)
+# tipster/backtest.py および学習スクリプト (scripts/train_v2_*.py) はこの定数を参照すること。
+# ランダムシャッフル分割は禁止。時系列順の分割のみ許可。
+TRAIN_END_DATE: str = os.getenv("TRAIN_END_DATE", "2025-05-31")
+EVAL_START_DATE: str = os.getenv("EVAL_START_DATE", "2025-06-01")
+
 # ── 機能フラグ ───────────────────────────────────────────────────────────────
 DEV_MODE: bool = os.getenv("DEV_MODE", "false").lower() == "true"
 
