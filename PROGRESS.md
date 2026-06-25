@@ -816,3 +816,94 @@ py -m tipster.combo_backtest --honmei-strategy honmei_v1 --aite-strategy anaba_v
 - 全出力に race_count / bet_count が同じ階層で出力される（Blocker）✓
 - 回収率100%超えの結果: **0件**（3ヶ月期間・honmei_v1 × anaba_v1では100%超えなし）
 - N/A=0 → バックフィル済み期間（直近 2026-06-14 まで）のみ対象のため欠損なし ✓
+
+---
+
+## Evaluator評価 — BET-3 最終評価 (2026-06-25)
+
+**評価対象:** BET-3 KeyError修正後の最終評価（ブランチ: auto-harness-1）
+**評価結果: 合格**
+
+### 前提チェック
+
+- **PROGRESS.md 1行目「BET-0: 完了」の記録**: あり ✓ → データ基盤整備済みとして評価継続
+- **BET-3実装時のBET-0完了確認**: PASS
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 520 passed 実測（前回517+3件） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json・engine.py の既存 evaluate_race/evaluate_race_context に変更なし。combo_backtest.py は新規・加算的追加 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 存在。tipster/・scripts/ にランダムシャッフルゼロ件（継続合格） |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | (1) 全戦略JSONで ai_score 系 condition + required:true なし（静的テスト保証）✓ (2) ranking.primary=ai_score 戦略なし（静的テスト保証）✓ (3) `test_tiebreak_falls_to_ai_score` + `test_clear_count_beats_ai_score` 両テスト合格 ✓ |
+| G5b | AI出力の外部公開禁止 | **PASS** | combo_backtest.py の CLI 出力は `select_honmei()`/`select_aite()` 経由のフィルタ済み candidates を入力とする。AIスコア単体をランキング推奨として外部公開する新規経路なし |
+
+### BET-3 §5-3 Blocker確認
+
+#### Blocker 1: KeyError 修正確認
+
+- `combo_backtest.py:387` — `sanrenfuku=_to_combo_stats(acc["sanrenpuku"])` ✓
+- `_COMBO_BET_TYPES` の全キーが `_new_acc()` に存在することを `TestAccKeyMapping` 3件で機械的に保証
+- `test_new_acc_contains_sanrenpuku_not_sanrenfuku`: `acc["sanrenfuku"]` 参照を typo 再発防止テストで封じている ✓
+
+#### Blocker 2: 回収率に件数（サンプルサイズ）が併記されているか
+
+**ComboStats モデル（tipster/models.py:236–248）:**
+```
+race_count: int = 0       # 集計対象レース数
+bet_count: int = 0        # 購入点数合計
+hit_count: int = 0
+return_amount: int = 0
+return_rate: float = 0.0  # return_rate と同じ階層に race_count/bet_count を配置
+na_race_count: int = 0
+```
+
+`race_count` / `bet_count` が `return_rate` と同じ階層（同一モデルフィールド）に存在する ✓
+
+**CLI 出力フォーマット（combo_backtest.py:437–440）:**
+```
+{label}: 回収率={stats.return_rate:.1%} レース数={stats.race_count} ベット数={stats.bet_count} 的中={stats.hit_count} N/A={stats.na_race_count}
+```
+
+件数が回収率と並んで必ず出力される ✓
+
+#### Blocker 3: 回収率100%超えの目視確認
+
+以下の組み合わせで実際に CLI を実行して確認:
+
+| 実行パターン | 結果 |
+|---|---|
+| honmei_v1 × anaba_v1 / 3m | 最高81.9%（単勝）— 100%超えなし |
+| honmei_v1 × anaba_v1 / 6m | 最高79.0%（複勝）— 100%超えなし |
+| honmei_v1 × anaba_v1 / 1y | 最高77.1%（複勝）— 100%超えなし |
+| honmei_v2 × anaba_v1 / 3m + sprint | 最高73.3%（複勝）— 100%超えなし |
+| honmei_v2 × anaba_v1 / 3m + G1 | 対象0レース — 適用外 |
+
+全パターンで回収率100%超えの結果は0件。PLAN.md §5-3「100%超えの結果が1件でもあれば目視確認」の条件に該当せず ✓
+
+### BET-3 Done条件サマリ
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| 5賭式それぞれの回収率が独立して出力される | **PASS** | CLI出力: 単勝/複勝/馬連/ワイド/三連複が各 ComboStats として独立して表示 |
+| 不的中 vs データ欠損の区別 | **PASS** | `_accumulate_stats`: payout_map=None → na_race_count+1、combo不存在 → 不的中(return=0)、明確に区別 |
+| 全回収率出力に race_count / bet_count が同じ階層 | **PASS** | ComboStats モデルフィールド + CLI print 文で完全に実装・出力 |
+| サンプル数が少なくても return_rate を除外・null化しない | **PASS** | `test_over_100_percent_return_not_suppressed` でテスト済み。ComboStats のデフォルト return_rate=0.0（null化なし） |
+| 回収率100%超えの目視確認 | **PASS（該当なし）** | 複数パターン実行で100%超え結果0件 |
+
+### 追加確認（G8/G9）
+
+- G8 (trash/依存なし): combo_backtest.py に trash/ import ゼロ件 ✓
+- G9 (DBソース明確): ファイル先頭コメントに `fukurou_jvdl (ml.db.engine): races, race_entries, payouts` と明記 ✓
+
+### 総合判定
+
+**合格（全 Blocker PASS、BET-3 Done条件全達成）**
+
+- G1〜G5b: 全合格
+- BET-3 §5-3 Blocker（KeyError修正・件数併記・100%超え目視）: 全合格
+- BET-3 Done条件: 全達成
+
+ALL_PASS
