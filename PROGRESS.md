@@ -172,3 +172,99 @@ v2 条件 8 つすべての AND でも 34.8%（サンプル23件）止まり。
 ```
 py -3 scripts/run_v2_combo_search.py --from-date 2025-06-27 --to-date 2026-06-27
 ```
+
+---
+
+## PHASE-2 セグメント別条件探索（2026-06-27）
+
+### 実施内容
+`scripts/run_segment_search.py` を新設。f3_time / track_condition / bloodline（種牡馬）/ jockeys.yr_wins
+をスタンドアローン SQL で取得し、以下 12 条件をセグメント別に pandas ベクトル演算で評価。
+C(10,3-5)=PatternA / 距離変化条件を含むPatternB、安定性（4月×3期間）、ROI（複勝/単勝）を計測。
+
+#### 評価母数（2025-06-27〜2026-06-27）
+| セグメント | レース数 | 出走頭数 | 複勝自然率 | 単勝自然率 |
+|---|---|---|---|---|
+| 芝短距離(〜1400m) | 473 | 6,908 | 20.6% | 6.9% |
+| 芝マイル(1401-1800m) | 632 | 8,311 | 22.8% | 7.6% |
+| 芝中距離(1801-2200m) | 425 | 5,432 | 23.5% | 7.8% |
+| 芝長距離(2201m+) | 123 | 1,543 | 23.9% | 8.0% |
+| ダート短距離(〜1400m) | 701 | 10,345 | 20.4% | 6.8% |
+| ダート中距離(1401m+) | 907 | 12,437 | 21.9% | 7.3% |
+
+#### 評価条件（12条件）
+PatternA (10条件): margin / class_ok / jockey_ok / weight_ok / interval_ok / surface_ok / f3_top / sire_surf / sire_dist / heavy_ok
+PatternB (+2条件): dist_ext（距離延長）/ dist_short（距離短縮）
+
+### PatternA 全体サマリー（セグメント最良パターン）
+
+| セグメント | 最良複勝率 | 頭数 | 条件組み合わせ | 安定性 |
+|---|---|---|---|---|
+| 芝短距離 | 39.4% | 160 | jockey_ok+interval_ok+surface_ok+f3_top | ◎安定(9.0%) |
+| 芝マイル | 45.3% | 150 | class_ok+weight_ok+surface_ok+f3_top+sire_dist | ◎安定(12.4%) |
+| 芝中距離 | 53.5% | 127 | margin+weight_ok+surface_ok+f3_top+sire_surf | ✕不安定(28.0%) |
+| 芝長距離 | 56.9% | 116 | margin+jockey_ok+surface_ok+f3_top+sire_dist | ✕不安定(24.5%) |
+| ダート短距離 | 53.9% | 102 | margin+jockey_ok+weight_ok+f3_top+heavy_ok | △(17.9%) |
+| ダート中距離 | 55.3% | 103 | margin+class_ok+jockey_ok+f3_top+heavy_ok | ✕不安定(35.0%) |
+
+### 安定パターン（期間ばらつき≤15%）
+
+| セグメント | 複勝率 | 頭数 | 複ROI | 条件 | ばらつき |
+|---|---|---|---|---|---|
+| 芝短距離 | 39.4% | 160 | 78.9% | jockey_ok+interval_ok+surface_ok+f3_top | 9.0% |
+| 芝マイル | 42.9% | 182 | **89.1%** | margin+class_ok+surface_ok+sire_surf | 9.3% |
+| 芝マイル | 42.9% | 268 | 79.4% | margin+jockey_ok+surface_ok+f3_top+sire_dist | 11.4% |
+| ダート中距離 | **53.4%** | **238** | **92.8%** | class_ok+interval_ok+surface_ok+f3_top+sire_dist | **2.8%** ★ |
+| ダート中距離 | **53.2%** | **387** | **87.9%** | margin+class_ok+interval_ok+surface_ok+f3_top | **6.9%** ★ |
+
+### PatternB（距離変化条件追加）上位
+
+距離短縮（dist_short）条件を含むと芝短距離で PatternA を超える:
+- 芝短距離: `margin+class_ok+surface_ok+sire_dist+dist_short` → 複45.2%/124頭 (+5.8pp 改善)
+- 芝短距離: `margin+jockey_ok+surface_ok+dist_short` → 複44.9%/158頭 (+5.5pp 改善)
+
+距離延長（dist_ext）条件を含む:
+- ダート中距離: `interval_ok+surface_ok+f3_top+sire_dist+dist_ext` → 複50.0%/108頭
+- ダート中距離: `class_ok+interval_ok+surface_ok+f3_top+dist_ext` → 複48.8%/127頭
+
+### 機能B（4番人気以降 穴馬）ROI100%超え
+
+| セグメント | 複勝率 | 頭数 | 複ROI | 単ROI | 条件 |
+|---|---|---|---|---|---|
+| ダート中距離 | 35.0% | 123 | **125.0%** | 46.2% | jockey_ok+interval_ok+surface_ok+f3_top+sire_dist |
+| 芝短距離 | 34.6% | 52 | **111.9%** | 93.8% | margin+class_ok+jockey_ok+sire_surf |
+| 芝マイル 穴 | 27.3% | 66 | **108.5%** | 20.2% | margin+weight_ok+heavy_ok |
+| 芝中距離 穴 | 34.6% | 52 | **106.2%** | 122.3% | margin+surface_ok+heavy_ok |
+| 芝中距離 穴 | 30.8% | 104 | **100.1%** | **148.2%** | margin+weight_ok+surface_ok+sire_surf |
+| 芝マイル 穴 | 26.4% | 53 | **101.1%** | 69.1% | interval_ok+surface_ok+f3_top+sire_dist |
+
+### 単勝25%超え（目標達成）
+
+| セグメント | 複勝率 | 単勝率 | 頭数 | 条件 | 安定性 |
+|---|---|---|---|---|---|
+| ダート短距離 | 53.9% | **26.5%** | 102 | margin+jockey_ok+weight_ok+f3_top+heavy_ok | △(17.9%) |
+| ダート中距離 | 55.3% | **25.2%** | 103 | margin+class_ok+jockey_ok+f3_top+heavy_ok | ✕不安定(35.0%) |
+
+→ 単勝25%超えを達成したが、いずれも重馬場好走歴（heavy_ok）依存で期間安定性に課題あり。
+
+### 所見
+
+1. **f3_top（上がり3F上位33%）は全セグメントで有効**。単一条件でも芝・ダート全セグメントでトップ3入り。
+2. **heavy_ok（重馬場好走歴）はダート系で特効**。ダート中距離で単独複勝率35.3%/995頭。ただしサンプル安定性に課題。
+3. **sire_surf/sire_dist（種牡馬適性）は芝系で有効**。芝マイル・芝中距離で複勝率を5〜10pp押し上げ。
+4. **ダート中距離が最も安定した高複勝率セグメント**:
+   - `class_ok+interval_ok+surface_ok+f3_top+sire_dist`: 複53.4%/238頭/ばらつき2.8% ← 最高安定性
+   - `margin+class_ok+interval_ok+surface_ok+f3_top`: 複53.2%/387頭/ばらつき6.9% ← 頭数最大・安定
+5. **全レース共通 37.7% の天井をセグメント別で突破**。ダート中距離で安定的に53%超え。
+6. **複勝60% 目標は未達**（最高56.9%）だが、安定した50%超えパターンを複数発見。
+
+### フェーズ3 推奨
+- ダート中距離安定2パターンをベースに戦略JSON化・本番適用検討
+- 機能B ROI125.0%（ダート中距離穴馬）の追加期間検証
+- 芝マイル sire_surf との組み合わせ最適化
+- heavy_ok（重馬場好走歴）の安定化 → 直近1年 vs 3年の期間設定比較
+
+### 使用スクリプト
+```
+py -3 scripts/run_segment_search.py --from-date 2025-06-27 --to-date 2026-06-27
+```
