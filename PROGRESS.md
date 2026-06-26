@@ -1,4 +1,5 @@
 BET-0: 完了
+BET-4: 完了
 TR-0: 完了
 TR-1: 完了
 
@@ -1118,3 +1119,257 @@ ALL_PASS
 2. 同一優先度内の tie-breaker（坂路全体時計/ウッド5F時計、完全同タイム時の同着）がユニットテストで固定 ✓
 3. 前週データなし・イレギュラー時に条件⑤が False になることがユニットテストで固定 ✓
 4. 出力が推奨順位リストのみ（買い目構築ロジックを一切含まない）: `test_output_contains_no_bet_construction` で機械的に検証 ✓
+
+---
+
+## Evaluator評価 — TR-1 (2026-06-26)
+
+**評価対象:** TR-1 調教AIフィルタリング 優先度抽出・順位付けロジック（ブランチ: auto-harness-1）
+**評価結果: 合格**
+
+### 前提チェック（着手順序ブロッカー）
+
+| 前提 | 判定 | 根拠 |
+|---|---|---|
+| PROGRESS.md「BET-0: 完了」記録あり | **PASS** | 1行目に記載 ✓ |
+| PROGRESS.md「TR-0: 完了」記録あり（TR-1 着手可能） | **PASS** | 2行目に記載 ✓ |
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 586 passed 実測（前回520+66件、既存520件全件継続合格） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | tipster/strategies/*.json・engine.py・conditions.py に変更なし。training_ranker.py は新規独立モジュールとして加算的追加 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 確認済み（継続合格）。ランダムシャッフルゼロ件 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | TR-1 は ai_score を一切参照しない独立モジュール。既存戦略 JSON・engine.py 無変更。静的テスト（test_tipster_strategy_static.py）+ ユニットテスト（test_tiebreak_falls_to_ai_score / test_clear_count_beats_ai_score）全合格（継続） |
+| G5b | AI出力の外部公開禁止 | **PASS** | `RankedHorse` 出力は blood_no / umaban / priority / condition_label / tiebreak_time_sec / rank のみ。AI スコア単体をランキング推奨として外部公開する新規経路なし |
+
+### §5-4 ワークストリームC（TR）Blocker確認
+
+#### G-TR0: TR-0 Done条件達成確認
+
+前ループ（TR-0 評価: ALL_PASS）にて4項目全件確定済み。本ループで TR-1 着手のブロッカーが解消されていることを確認 ✓
+
+#### G-TR1（Blocker）: 加速ラップ判定・tie-breaker・前週イレギュラー
+
+**加速ラップ判定（同タイムは非加速）:**
+
+`training_ranker.py:143`:
+```python
+return a > b > c > d  # 厳密大なり（>）のみ。>=は使用しない
+```
+
+同タイムの連続（例: `lap_l2_l1=12.5, lap_l1=12.5`）は `>` が成立しないため False ✓
+専用テスト: `TestIsFullAcceleration.test_same_time_between_l2_l1_and_l1_is_not_acceleration` が `False` を確認 ✓
+→ **同タイムを加速と誤判定する実装ではない: PASS**
+
+**tie-breaker（坂路全体時計/ウッド5F時計、完全同タイム時の同着）:**
+
+| テスト | 確認内容 |
+|---|---|
+| `test_tiebreak_by_time_4f_within_same_priority` | 坂路系: time_4f が小さい馬が上位 ✓ |
+| `test_same_tiebreak_time_gets_same_rank` | 完全同タイムは同一 rank（同着）✓ |
+| `test_tiebreak_by_time_5f_for_wood_condition` | ウッド系: time_5f が小さい馬が上位 ✓ |
+
+→ **PASS**
+
+**前週データなし時の条件⑤ → False（エラーにしない）:**
+
+`TestCondition5.test_no_prev_week_slope_returns_false`: 前週（6-8日前）坂路データなし → `False` ✓
+`TestCondition5.test_no_wood_data_returns_false`: 当週ウッドデータなし → `False` ✓
+
+→ **PASS**
+
+**G-TR1: PASS**
+
+#### G-TR2（Blocker）: 出力が「推奨順位の提示」までであり、買い目構築を含まない
+
+`RankedHorse` dataclass フィールド（`training_ranker.py:101–114`）:
+```
+blood_no, umaban, priority, condition_label, tiebreak_time_sec, rank
+```
+
+賭式・点数・購入指示に相当するフィールドは一切存在しない ✓
+
+`test_output_contains_no_bet_construction` がフィールド集合を機械的に検証:
+```python
+allowed_fields = {"blood_no", "umaban", "priority", "condition_label",
+                  "tiebreak_time_sec", "rank"}
+assert actual_fields == allowed_fields
+```
+
+→ **G-TR2: PASS**
+
+#### G-TR3（High）: 条件パターンがハードコードされていない
+
+`training_ranker_config.json` で全7条件の閾値を一元管理（コードへの直接埋め込みなし）:
+- ①`slope_last_1f_max_sec: 11.9` / ②`slope_last_2f_max_sec: 11.9` / ③`slope_total_time_max_sec: 52.9`
+- ④`wood_last_1f_max_sec: 11.5 + wood_5f_time_max_sec: 67.0`
+- ⑤`prev_week_min/max_days_before: 6/8 + 各閾値`
+- ⑥`center_cd: "1" + slope_last_1f_max_sec: 12.9` / ⑦`center_cd: "0" + slope_last_1f_max_sec: 12.9`
+
+`test_custom_config_changes_threshold` でカスタム設定が反映されることを確認 ✓
+`test_config_file_contains_all_7_conditions` で全7条件の存在を確認 ✓
+
+→ **G-TR3: PASS**
+
+### §5-3 BET-3 Blocker継続確認（BET-3 実装あり）
+
+**CLI 実行結果（2026-06-26 再確認）:**
+
+| 賭式 | 回収率 | レース数 | ベット数 | 的中 | N/A |
+|---|---|---|---|---|---|
+| 単勝 | 81.9% | 759 | 759 | 85 | 0 |
+| 複勝 | 73.4% | 759 | 759 | 249 | 0 |
+| 馬連 | 6.3% | 759 | 3473 | 24 | 0 |
+| ワイド | 7.2% | 759 | 3473 | 104 | 0 |
+| 三連複 | 5.5% | 744 | 6535 | 7 | 0 |
+
+- 4賭式（単勝・複勝・馬連・ワイド）全てに `レース数` / `ベット数` が併記されている ✓（Blocker合格）
+- 回収率100%超えの結果: **0件** → 目視確認は条件に該当しないため不要
+
+### TR-1 Done条件サマリ
+
+| Done条件 | 判定 | 詳細 |
+|---|---|---|
+| 優先度①〜⑦それぞれの抽出結果がユニットテストで固定 | **PASS** | `TestCondition1`〜`TestCondition7` 計25件（全条件を網羅、加速ラップ厳密判定含む）|
+| 同一優先度内 tie-breaker と同着がユニットテストで固定 | **PASS** | `test_tiebreak_by_time_4f_within_same_priority` / `test_same_tiebreak_time_gets_same_rank` / `test_tiebreak_by_time_5f_for_wood_condition` |
+| 前週データなし・イレギュラー時に条件⑤がFalse（エラーにならない） | **PASS** | `TestCondition5` 8件（前週なし・ウッドなし・境界値等を全網羅） |
+| 出力が推奨順位リストのみ（買い目構築ロジックを一切含まない） | **PASS** | `test_output_contains_no_bet_construction` でフィールド集合を機械的に検証 |
+
+### 総合判定
+
+**合格（全 Blocker PASS、TR-1 Done条件全達成）**
+
+- G1〜G5b: 全合格
+- G-TR0（TR-0完了確認）: PASS
+- G-TR1（加速ラップ・tie-breaker・前週イレギュラー）: PASS
+- G-TR2（買い目構築禁止）: PASS
+- G-TR3（ハードコード禁止）: PASS
+- BET-3 §5-3 Blocker（4賭式件数併記・100%超え目視）: PASS（継続）
+
+ALL_PASS
+
+
+---
+
+## 2026-06-26: Step1/Step2（今週末レース データ取得 + 条件フィルタリング簡易表示）
+
+### Step1: データ取得（既存JV-Link取得実装をそのまま実行、新規実装なし）
+
+- 実行コマンド: `py -3 -m jvdl_client.sync_jvdata`（デフォルト, OPT_STORED_DIFF / 差分取得）
+- 取得件数: RACE raw 4773件 → RA=144 / SE=1917 / HR=72 / O1=72、SLOP(坂路)=8435、WOOD(ウッド)=2869、合計 ok=16,077 / DLQ=0
+- 取得期間: watermark `20260618220017` 〜 lastfile_ts `20260625182737`（RACE）/ `20260625094139`（SLOP/WOOD）
+- 追加確認: `--weekly`（今週分のみ取得）でも新規データなし（0件）を確認済み。デフォルト同期で既に最新化されていたことの裏付け。
+
+### 副次対応（Step1実行中に発見したブロッカーの修正）
+
+`tipster/engine.py` が依存する DB_V2（fukurou_keiba_v2）の `races`/`race_entries` が12日分stale（最大2026-06-14）だったため、本命/相手条件（fetch_race_context経由）が今週末レースで動作しないブロッカーを検出。
+
+既存の同期ジョブ `sync_races_from_jvdl`（`shared/worker/job_runner.py`）を実行して解消を試みたところ、同ジョブの `race_entries` UPSERT に既存バグ2件を発見・修正（新規データ取得ではなく、既存同期ジョブの不具合修正）:
+
+1. `ON CONFLICT (race_id, umaban)` が実際の部分一意インデックス `uq_re_race_horse (race_id, horse_id) WHERE horse_id <> '0000000000'` と不一致で UniqueViolation。→ 対象レース分を削除してから再投入する方式に変更。
+2. `race_entries_v2`（同期元）が同一 (race_id, horse_id) を data_kubun（速報/確定）ごとに複数行保持しているケースがあり、削除→再投入でも同一バッチ内で重複しUniqueViolation。→ (race_id, horse_id) ごとに最新（umaban確定済み優先、同条件ならdata_kubun大）の1行のみ残すデデュープを追加。
+
+修正後、ジョブ再実行で成功（races=269 / entries=2809）。DB_V2.races/race_entries とも今週末分（72レース）が反映されたことを確認済み。
+
+**新たに判明した制約（ブロッカーではなく、JV-Link/同期先データの現状）**: `race_entries_v2` 自体、今週末（2026-06-27/28）の各レースにまだ1頭分のレコードしか存在しない（出走馬名表が速報段階）。これは既存取得処理を再実行しても増えない、データ提供側の現状であり、Step2の表示結果が薄くなる直接の原因。
+
+### Step2: 今週末レースへのフィルタリング結果表示
+
+- 新規実装ファイル:
+  - `tipster/weekend_filter_data.py` — 条件ロジック呼び出し層（DB取得 + `select_honmei`/`select_aite`/`rank_horses_by_training` の呼び出しのみ。買い目構築は行わない）
+  - `tipster/weekend_filter_renderer.py` — HTML生成層（DB・ロジック呼び出し一切なし。将来「見たい条件を選ぶ」UIに発展する際はこのファイルのみ差し替えで対応可能）
+  - `scripts/generate_weekend_filter_report.py` — 上記2層をつなぐ薄いCLIエントリポイント
+- 出力ファイル: `data/output/tipster/weekend_filter_check.html`
+- 対象レース数: **72レース**（2026-06-27/28、`api_v2.routers.races.get_weekend_races()` 経由で取得。全72レースで例外なく生成成功）
+- 表示形式: レースごとに本命条件/相手条件/調教のみ条件をタブで切替表示（馬番・馬名・該当条件or優先度・スコアを一覧化）
+- 既知の制約: 上記「新たに判明した制約」により、現時点では多くのレースで各条件の候補が1頭のみ（出走馬名表が速報段階のため）。条件ロジック自体は正しく動作している（コード・配線は完成）が、表示内容が薄いのはデータ提供側の現状による。
+
+
+---
+
+## 2026-06-26 13:00 JST: 出馬表確定後の再取得・再生成確認
+
+13:00 JSTまで待機後（ユーザー指示により出馬表確定を待つ目的）、以下を実施。
+
+### 1. JV-Link再取得結果
+
+`py -3 -m jvdl_client.sync_jvdata`（デフォルト差分取得、新規実装なし）を再実行:
+
+- 新規取得: RA=38 / SE=479 / HC(坂路)=1261 / WC(ウッド)=191、合計 ok=2,938 / DLQ=0
+
+### 2. 出馬表（race_entries_v2）充足状況の確認
+
+今週末72レース（6/27土:36レース、6/28日:36レース）を確認した結果:
+
+| 対象日 | レース数 | 出走馬数 |
+|---|---|---|
+| 2026-06-27（土） | 36 | **妥当な人数に充足**（例: 1R=16頭、4R=16頭、3020101=14頭。8〜17頭の範囲） |
+| 2026-06-28（日） | 36 | **依然1頭のみ**（出馬表が未確定。JV-Data側の出馬表公開が開催日ごとに段階的なため、土曜分のみ確定済みで日曜分はまだ未公開と推測） |
+
+→ 6/28（日）分は追加取得を行っても解消されない（速報系データではなく、出馬表確定自体がJV-Data側で未公開のため）。スコープ外として無理に新規実装で穴埋めはしていない。
+
+### 3. sync_races_from_jvdl 再実行（DB_V2最新化）
+
+ジョブ再実行（job id=33）で成功: races=269 / entries=3250。DB_V2.race_entriesも土曜分のレース（例: 2026062702010501=16件、2026062702010504=16件、2026062703020101=14件）に反映されたことをDBクエリで確認済み。
+
+### 4. レポート再生成・確認
+
+`scripts/generate_weekend_filter_report.py` を再実行（コード変更なし）。72レース全て例外なく成功。
+
+`fetch_race_context()` で実際の出走馬数を確認:
+- 2026062702010501（土1R）: horses=16
+- 2026062702010504（土4R）: horses=16
+- 2026062703020101（土・別場1R）: horses=14
+- 2026062810020208（日）: horses=1（未確定のまま）
+
+土曜分は本命/相手条件が複数候補（本命候補プールで平均1.8件、最大3件 ※honmei_v1戦略の選定上限によるもので、入力馬数自体は14〜16頭で妥当）から正しく抽出されることを確認。日曜分は引き続き1頭のため候補が薄い（0〜1件）。
+
+### 結論
+
+土曜（6/27）分は出馬表確定により意図した「妥当な人数での条件フィルタリング確認」が可能な状態になった。日曜（6/28）分は本日13:00時点でまだJV-Data側の出馬表が未確定であり、これは取得処理の再実行では解消できない既知の制約（速報系データはスコープ外との指示通り、無理な穴埋めは行っていない）。
+
+---
+
+## 作業ログ
+
+### BET-4: データ分割明文化 (2026-06-26)
+
+**対応 PLAN.md 項目:** BET-4（データ分割・リーク防止の明文化）
+
+**実装方針:**
+- `shared/config.py` には既に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` が存在し、`tipster/backtest.py` もインポート済み。
+- 未対応だったのは: (1) `scripts/train_v2_submodels.py` が同定数を未参照、(2) 検証スクリプト/テストが存在しない、の2点。
+- BET-4 Done条件「検証データ期間のレースIDが学習データ生成スクリプトの入力に含まれていないことをコードレビュー+データ検証スクリプトで確認できること」を満たすために以下を実装した。
+
+**実装内容:**
+
+1. **scripts/train_v2_submodels.py**
+   - `from shared.config import EVAL_START_DATE, TRAIN_END_DATE` インポートを追加
+   - `_load_parquet()` にデータ分割リーク防止ガードを追加:
+     - `race_id` 先頭8文字（YYYYMMDD）と `EVAL_START_DATE` を比較
+     - 12桁・16桁いずれの `race_id` 形式にも対応（先頭8文字は両方とも `kaisai_year + kaisai_monthday`）
+     - リーク行が存在した場合: WARNING ログを出力して除外（ランダムシャッフルは行わない）
+     - リーク行がない場合: INFO ログで「リークなし ✓」を表示
+
+2. **scripts/verify_data_split.py** (新規作成)
+   - 学習用 Parquet ファイルを入力として、`EVAL_START_DATE` 以降の race_id が含まれていないかを検証するスタンドアロンスクリプト
+   - `_race_id_to_date_str(race_id)`: 先頭8文字を `YYYY-MM-DD` に変換（12桁・16桁両対応）
+   - `verify_no_eval_leakage(df)`: DataFrame に対して leakage チェックを行い結果 dict を返す
+   - CLI: `--parquet` 引数必須、`--strict` でリーク検出時に exit code 1（CI/CD 向け）
+   - 使用例: `py -3 scripts/verify_data_split.py --parquet outputs/bloodline_features_v1_2022plus.parquet`
+
+3. **tests/test_data_split_guard.py** (新規作成、17件)
+   - `TestConfigConstants` (5件): TRAIN_END_DATE / EVAL_START_DATE の存在・形式・境界値・ISO日付形式の確認
+   - `TestRaceIdToDateStr` (4件): 16桁/12桁 race_id の変換、境界日の変換正確性
+   - `TestVerifyNoEvalLeakage` (8件): リークなし・リークあり・境界値・空DataFrame・混在・重複除外・サンプルキャップ
+
+**テスト結果:** `pytest tests/` → 603 passed（前回 586 → +17件、既存586件全件継続合格）
+
+**BET-4 Done条件確認:**
+- 検証データ期間（2025-06以降）のレースが学習データに混入していないことを検証スクリプト+テストで確認できる ✓
+- `tipster/backtest.py` は既に `shared.config` の定数をインポート済み ✓
+- `scripts/train_v2_submodels.py` が定数を参照し、リーク行を自動除外するガードを追加 ✓
+- ランダムシャッフル分割は使用していない（時系列順の除外のみ）✓

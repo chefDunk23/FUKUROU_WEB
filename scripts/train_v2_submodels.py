@@ -30,6 +30,7 @@ if str(_ROOT) not in sys.path:
 
 _FEATURE_SELECTION_CONFIG = _ROOT / "config" / "selected_features.json"
 
+from shared.config import EVAL_START_DATE, TRAIN_END_DATE
 from src.features.pace_simulation_v1 import create_pace_simulation_features
 from src.models.submodel_registry import SubmodelManager
 from src.models.v2.config import (
@@ -235,6 +236,32 @@ def _load_parquet(path: Path) -> pd.DataFrame:
     df = df.sort_values(["race_id", "umaban"]).reset_index(drop=True)
     df = _prepare_numerics(df)
     log.info("  %d 行 / %d レース", len(df), df["race_id"].nunique())
+
+    # ── データ分割リーク防止ガード（BET-4） ─────────────────────────────────
+    # 学習データは TRAIN_END_DATE 以前のみ使用する（shared.config で一元管理）。
+    # race_id の先頭8文字が YYYYMMDD 形式であることを前提にする（12桁・16桁いずれも同様）。
+    # ランダムシャッフルは行わない。時系列順の除外のみ。
+    eval_start_raw = EVAL_START_DATE.replace("-", "")  # "20250601"
+    dates = df["race_id"].astype(str).str[:8]
+    leak_mask = dates >= eval_start_raw
+    if leak_mask.any():
+        leaked_count = int(leak_mask.sum())
+        log.warning(
+            "  [BET-4] 検証データ期間（%s 以降）の行が %d 件含まれています → 除外します",
+            EVAL_START_DATE,
+            leaked_count,
+        )
+        df = df[~leak_mask].reset_index(drop=True)
+        log.info(
+            "  [BET-4] 除外後: %d 行 / %d レース",
+            len(df),
+            df["race_id"].nunique(),
+        )
+    else:
+        log.info(
+            "  [BET-4] データ分割チェック: 検証期間(%s 以降)の行 0 件 → リークなし ✓",
+            EVAL_START_DATE,
+        )
     return df
 
 
