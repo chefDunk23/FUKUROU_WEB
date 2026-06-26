@@ -438,6 +438,28 @@ def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
         ctx.report_progress(70)
 
         # ── Step 4: race_entries → DB_V2 UPSERT ──────────────────────────────
+        # race_entries_v2 は同一 (race_id, blood_no) でも data_kubun（速報→確定）ごとに
+        # 別行として保持されており、umaban が確定前(0等)と確定後で異なることがある。
+        # race_entries は horse_id ごとに1行のみのため、(race_id, blood_no) で最新
+        # （umaban が確定済み=非0を優先し、同条件なら data_kubun が大きい方）の行だけ残す。
+        best_by_horse: dict[tuple[str, str], dict] = {}
+        for e in entry_rows:
+            bn = e.get("blood_no")
+            if not bn:
+                continue
+            key = (e["race_id"], bn)
+            cur_best = best_by_horse.get(key)
+            if cur_best is None:
+                best_by_horse[key] = e
+                continue
+            cur_final = (cur_best["umaban"] or 0) != 0
+            new_final = (e["umaban"] or 0) != 0
+            if (new_final, str(e.get("data_kubun") or "")) > (
+                cur_final, str(cur_best.get("data_kubun") or "")
+            ):
+                best_by_horse[key] = e
+        entry_rows = [e for e in entry_rows if not e.get("blood_no")] + list(best_by_horse.values())
+
         entry_records = []
         for e in entry_rows:
             kinryo = e.get("kinryo")
@@ -471,7 +493,16 @@ def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
                 e.get("data_kubun"),
             ))
 
+        # race_entries には PK (race_id, umaban) のほかに、馬番変更（出走取消の再出走等）を
+        # 想定した部分一意インデックス uq_re_race_horse (race_id, horse_id) も存在する。
+        # ON CONFLICT は1つの制約しか対象にできないため、horse_id の umaban が前回同期時から
+        # 変わったケースで uq_re_race_horse 違反になり UPSERT が失敗する。
+        # jvdl側にエントリが存在するレースのみ削除してから挿入し直すことで両制約の衝突を避ける
+        # （jvdl側が未バックフィルのレースまで削除してしまわないよう、対象を entry_rows に限定）。
         if entry_records:
+            entry_race_ids = list({e["race_id"] for e in entry_rows})
+            with v2_conn.cursor() as cur:
+                cur.execute("DELETE FROM race_entries WHERE race_id = ANY(%s)", (entry_race_ids,))
             with v2_conn.cursor() as cur:
                 psycopg2.extras.execute_values(cur, """
                     INSERT INTO race_entries (
@@ -483,26 +514,10 @@ def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
                         tan_odds, ninki, go_4f_time, go_3f_time,
                         data_kubun
                     ) VALUES %s
-                    ON CONFLICT (race_id, umaban) DO UPDATE SET
-                        horse_id         = EXCLUDED.horse_id,
-                        kakutei_chakujun = EXCLUDED.kakutei_chakujun,
-                        race_time        = EXCLUDED.race_time,
-                        corner_1         = EXCLUDED.corner_1,
-                        corner_2         = EXCLUDED.corner_2,
-                        corner_3         = EXCLUDED.corner_3,
-                        corner_4         = EXCLUDED.corner_4,
-                        tan_odds         = EXCLUDED.tan_odds,
-                        ninki            = EXCLUDED.ninki,
-                        go_4f_time       = EXCLUDED.go_4f_time,
-                        go_3f_time       = EXCLUDED.go_3f_time,
-                        horse_weight     = EXCLUDED.horse_weight,
-                        weight_sign      = EXCLUDED.weight_sign,
-                        weight_diff      = EXCLUDED.weight_diff,
-                        data_kubun       = EXCLUDED.data_kubun
                 """, entry_records, page_size=1000)
-            v2_conn.commit()
             entries_upserted = len(entry_records)
-            ctx.append_log(f"  race_entries UPSERT: {entries_upserted} 行")
+            ctx.append_log(f"  race_entries 再投入: {entries_upserted} 行")
+        v2_conn.commit()
 
         ctx.report_progress(100)
         ctx.append_log(

@@ -171,6 +171,19 @@
   4. MLflow等の外部実験管理ツールは導入しない（既存プロジェクトの構成・依存関係に存在しないため、スコープ外）。
 - **Done条件**: 2つ以上の戦略パターン（本命または相手）を切り替えて、同一レース群に対する4賭式（単勝・複勝・馬連・ワイド）回収率を並べて比較できること。比較のためにPythonコードを変更する必要がないこと（戦略ファイルの指定変更のみで切り替え可能）。三連複の比較は本Featureの合否判定には用いない。
 
+### BET-6: 本命選定ロジックのクリア数設計見直し（バックログ、2026-06-26追加）
+
+- **現状の問題**（`tipster/weekend_filter_check.html`での目視確認・ユーザー指摘により判明）:
+  - `weight_change`/`jockey_change`（`tipster/conditions.py`）は、どの分岐でも常に`passed=True`を返す設計のため、「クリア数(`clear_count`)」というメトリクスがこの2条件に関して実質的に馬を区別する力を持たない（加点/減点は`score`にのみ反映され、`passed`は常にTrue）。
+  - 同様に`race_level`/`time_gap`/`track_bias_fit`も、判定に必要なデータが不足している場合は「判定保留」として`passed=True, score=0.0`を返す設計のため、「本当に基準をクリアした」のか「データがないだけ」なのかが`clear_count`の数値からは区別できない。
+  - 結果として、`select_honmei()`のランキング第一キーである`clear_count`（`tipster/engine.py`の`-c.clear_count, -c.total_score, -c.ai_score`ソート）が、データが薄い状況下ではほぼ全馬で同値（5条件中5）になり、実質的な順位付けは`total_score`/`ai_score`に委ねられている。
+- **改善方針（案。着手時に詳細化する。今回はコード変更しない）**:
+  1. `ConditionResult.passed`をbool(true/false)から3値（true/false/null=判定不能）に拡張し、「判定保留」と「明確にクリア」を区別できるようにする。
+  2. `weight_change`/`jockey_change`にも、実際に`passed=False`になり得るしきい値・分岐を設ける（現状は加点/減点のみで合否判定が存在しない）。
+  3. 表示側（`tipster/weekend_filter_renderer.py`の本命テーブル、`tipster/renderer.py`等）も、`clear_count`を主指標として見せず、`total_score`/`ai_score`を主指標として扱うように表示順・強調を見直す。
+- **優先度**: 中（本筋の`BET-4`/`BET-5`完了後に着手。今すぐの着手は不要）。
+- **注意（スコープ境界）**: `select_honmei()`のスコアリング結果自体（AIスコア計算式、各条件の`score`加減点ロジック）は変更しないこと。本Featureはあくまで`passed`判定の意味論（「クリアした」と「判定不能」の区別）を明確化する話であり、既存の本命選定結果（誰が本命に選ばれるか、各馬の`total_score`/`ai_score`の値）を変えてはならない。
+
 ---
 
 ## 3.5. ワークストリームC: 調教AIフィルタリング（2026-06-25追加）

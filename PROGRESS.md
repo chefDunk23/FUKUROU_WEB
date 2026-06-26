@@ -1373,3 +1373,145 @@ ALL_PASS
 - `tipster/backtest.py` は既に `shared.config` の定数をインポート済み ✓
 - `scripts/train_v2_submodels.py` が定数を参照し、リーク行を自動除外するガードを追加 ✓
 - ランダムシャッフル分割は使用していない（時系列順の除外のみ）✓
+
+---
+
+## Evaluator評価 — BET-4 + Step1/Step2 (2026-06-26)
+
+**評価対象:** BET-4（データ分割明文化）+ Step1/Step2（週末レース フィルタリング表示）+ job_runner.py バグ修正（ブランチ: auto-harness-1）
+**評価結果: 合格**
+
+### 前提チェック（着手順序ブロッカー）
+
+| 前提 | 判定 | 根拠 |
+|---|---|---|
+| PROGRESS.md「BET-0: 完了」記録あり（BET-3/BET-5実装の前提） | **PASS** | 1行目に記載 ✓ |
+| PROGRESS.md「TR-0: 完了」記録あり（TR-1着手可能） | **PASS** | 3行目に記載 ✓ |
+| PROGRESS.md「TR-1: 完了」記録あり（G-TR1/G-TR2評価対象） | **PASS** | 4行目に記載 ✓ |
+
+### 横断的基準（G1–G5b）スコア
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 603 passed 実測（前回586+17件、既存586件全件継続合格） |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | `tipster/strategies/*.json`・`engine.py`・`conditions.py` に変更なし。新規追加は weekend_filter_data.py / weekend_filter_renderer.py / verify_data_split.py のみ（加算的）。job_runner.py の変更は race_entries 同期ジョブの内部修正で evaluate_race 系出力に無関係 |
+| G3 | 既存APIの契約破壊なし | **PASS** | api_v1/v2/admin に変更なし。job_runner.py はジョブ内部処理の修正のみ（エンドポイント契約不変） |
+| G4 | 時系列データ分割の厳守 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 存在。`tipster/backtest.py` がインポート済み。`scripts/train_v2_submodels.py` が BET-4 実装でインポート追加 + `_load_parquet()` にリーク防止ガード追加。ランダムシャッフルゼロ件（継続合格） |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | 戦略JSON・engine.py 無変更。静的テスト（test_tipster_strategy_static.py）+ ユニットテスト（test_tiebreak_falls_to_ai_score / test_clear_count_beats_ai_score）全合格（継続） |
+| G5b | AI出力の外部公開禁止 | **PASS** | `weekend_filter_data.py` の `_collect_honmei()` / `_collect_aite()` はいずれも `evaluate_race_context()` の戻り値（フィルタ適用後）を入力とし、`ev.honmei` / `select_aite()` 経由でフィルタ済み結果を組み立てる。`HonmeiRow.ai_score` / `AiteRow.ai_score` は参照情報として表示されているが、推奨判定の主体は `is_honmei` フラグ（`select_honmei()` 決定）であり、AIスコア単体をランキング推奨として返す新規経路は存在しない |
+
+### §5-4 ワークストリームC（TR）Blocker継続確認
+
+**TR-1 が実装済みのため G-TR0/G-TR1/G-TR2 を継続確認する。**
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G-TR0 | TR-0完了確認 | **PASS** | PROGRESS.md 3行目「TR-0: 完了」。前ループ（TR-0評価 ALL_PASS）にて4項目全件確定済み |
+| G-TR1 | 加速ラップ判定・tie-breaker・前週イレギュラー | **PASS** | `training_ranker.py` は本ループで無変更。`_is_full_acceleration`: `return a > b > c > d`（厳密`>`のみ）。同タイム非加速テスト・tie-breakerテスト・前週データなし→Falseテスト 全合格（継続） |
+| G-TR2 | 出力が推奨順位のみ（買い目なし） | **PASS** | `RankedHorse` のフィールド: `blood_no, umaban, priority, condition_label, tiebreak_time_sec, rank` のみ。`weekend_filter_data.py` の `TrainingRow` も同フィールド構成（buy_type・点数等なし）。`weekend_filter_renderer.py` の調教タブ表示: 順位・馬番・馬名・優先度・タイムのみ |
+
+### §5-3 BET-3 Blocker継続確認
+
+**BET-3実装（combo_backtest.py）は本ループで無変更。前ループ評価（ALL_PASS）からの継続確認。**
+
+4賭式（単勝・複勝・馬連・ワイド）全てに `レース数` / `ベット数` が併記される実装（ComboStats モデル + CLI print 文）に変更なし ✓
+回収率100%超えの結果: 前ループで複数パターン実行確認済み（0件）、本ループで combo_backtest.py 変更なし ✓
+
+### BET-4 §5-3 個別基準確認
+
+| 項目 | 判定 | 詳細 |
+|---|---|---|
+| BET-4 リーク検証の自動化（High） | **PASS** | `scripts/verify_data_split.py` + `tests/test_data_split_guard.py`（17件）が存在。`TestConfigConstants::test_expected_split_boundary` が境界日（2025-05-31 / 2025-06-01）を機械的に保証。`TestVerifyNoEvalLeakage` でリーク検出ロジックを8ケース確認 |
+| BET-4 Done条件（G4と同一） | **PASS** | G4 PASS と同根拠。`scripts/train_v2_submodels.py` が `EVAL_START_DATE` / `TRAIN_END_DATE` をインポートし `_load_parquet()` でリーク行を WARNING + 除外。ランダムシャッフル分割なし |
+
+### Step1/Step2・job_runner.py 変更確認
+
+| 変更 | G1〜G5b影響 | 評価 |
+|---|---|---|
+| `tipster/weekend_filter_data.py` | G5b確認済み | `evaluate_race_context()` フィルタ後の candidates を入力とする。買い目構築なし ✓ |
+| `tipster/weekend_filter_renderer.py` | G5b確認済み | 純粋 HTML 変換関数。DB・ロジック呼び出しなし。賭式・点数出力なし ✓ |
+| `scripts/generate_weekend_filter_report.py` | G3確認済み | CLI エントリポイント。API エンドポイント変更なし ✓ |
+| `shared/worker/job_runner.py` | G1確認済み | race_entries の ON CONFLICT バグを削除→再投入方式に変更。dedupe追加。G1（pytest 603 passed）で既存テスト全件合格を確認 ✓ |
+| `PLAN.md` | スコープ外 | BET-6（バックログ）追記のみ。コード変更なし ✓ |
+
+### G8/G9 確認
+
+- G8 (trash/依存なし): 新規ファイル全件で trash/ import ゼロ件 ✓
+- G9 (DBソース明確): `weekend_filter_data.py` 冒頭コメントに `ml.db.engine（fukurou_jvdl）` と明記。`training_slope`/`training_wood` の参照先も同一 DB ✓
+
+### 総合判定
+
+**合格（全 Blocker PASS、BET-4 Done条件全達成）**
+
+- G1〜G5b: 全合格
+- G-TR0（TR-0完了確認）: PASS（継続）
+- G-TR1（加速ラップ・tie-breaker・前週イレギュラー）: PASS（継続）
+- G-TR2（買い目構築禁止）: PASS（継続）
+- BET-3 §5-3 Blocker（4賭式件数併記・100%超え目視）: PASS（継続）
+- BET-4 §5-3 High（リーク検証自動化・Done条件）: PASS
+
+ALL_PASS
+
+---
+
+## 作業ログ
+
+### BET-5: 条件パターンの実験管理・複数戦略パターンの比較 (2026-06-26)
+
+**対応 PLAN.md 項目:** BET-5（設計柔軟性・条件パターンの実験管理）
+
+**実装方針:**
+- 既存の `combo_backtest.py`・`training_ranker.py`・`engine.py`・`select_honmei()`/`select_aite()` は一切変更しない。
+- BET-5 はこれらの上に「複数の戦略パターンを切り替えて結果を比較できる」実験管理レイヤーを追加するもの。
+- PLAN.md §3 BET-5 提案する実装方針に従い、MLflow 等の外部ツールは導入しない。
+
+**実装内容:**
+
+1. **tipster/strategies/honmei_v3.json** (新規作成)
+   - honmei_v1 をベースに `track_bias_fit` を `required:true` に変更した厳格バリアント
+   - `ranking.primary: "condition_clear_count"`（v1 と同じ。v2 は `total_score`）
+   - 必須条件 ID: `{race_level, time_gap, track_bias_fit}`（v1 の `{race_level, time_gap}` より 1 条件追加）
+   - `max_selections: 3`（anaba_v1 の 5 を超えない → 既存静的テスト `test_anaba_allows_more_selections_than_honmei` を保護）
+
+2. **tipster/strategies/anaba_v2.json** (新規作成)
+   - anaba_v1 の `min_odds` 閾値を 10.0 → 7.0 に緩和（準人気馬まで相手候補に含める）
+   - `max_selections: 3`（v1 の 5 より絞り込み、買い目点数を抑制）
+   - 必須条件 ID: `{time_gap, min_odds}`（track_bias_fit を外して条件を緩和）
+   - G5a-2 保護: `ranking.primary: "total_score"`（`"ai_score"` でない）
+   - BET-2 差別化テスト継続合格: anaba_v2 必須 `{time_gap, min_odds}` は全 honmei 必須と異なる
+
+3. **scripts/run_strategy_experiment.py** (新規作成)
+   - `run_combo_backtest()` の薄いラッパー。結果を JSON に保存する実験管理スクリプト。
+   - 保存先: `data/output/tipster/backtest_results/{honmei}__{aite}__{period}_{YYYY-MM-DD}.json`
+   - 戦略名を切り替えるだけで異なるパターンを記録（コード変更不要）
+   - CLI: `--honmei-strategy`, `--aite-strategy`, `--periods`, `--reference-date`, `--output-dir`
+
+4. **scripts/compare_strategy_results.py** (新規作成)
+   - 複数の実験結果 JSON を読み込み、4 賭式（単勝・複勝・馬連・ワイド）回収率を並べて比較するスクリプト
+   - 出力規約遵守: 全回収率に `レース数 / ベット数 / 的中数` を同じ行で出力（PLAN.md BET-3/BET-5 共通）
+   - 三連複はデフォルト表示対象外（`_BET_TYPES_4` = 4 賭式のみ）
+   - CLI: `--results-dir`, `--result-files`, `--bet-types`, `--period-filter`
+   - `load_result()` / `collect_result_files()` / `get_combo_stats()` / `print_comparison_table()` を公開関数として分離（テスト容易性）
+
+5. **tests/test_bet5_experiment.py** (新規作成、41 件)
+   - `TestNewStrategyJsons` (13 件): honmei_v3/anaba_v2 の静的整合性（G5a-1/-2、BET-2 差別化、track_bias_fit required、min_odds 閾値差異）
+   - `TestComboBacktestResultSerialization` (3 件): JSON シリアライズ/デシリアライズ。race_count/bet_count が JSON に保存・復元されること
+   - `TestCollectResultFiles` (4 件): ディレクトリ検出・直接指定・空ディレクトリ
+   - `TestGetComboStats` (5 件): 4 賭式全てが取得可能
+   - `TestFormatStats` (4 件): 回収率・レース数・ベット数が文字列に含まれる（出力規約）
+   - `TestBuildStrategyLabel` (1 件)
+   - `TestPrintComparisonTable` (8 件): 4 賭式表示・三連複非表示・2 戦略が両方出力される（BET-5 Done 条件）・件数表示・期間フィルタ
+   - `TestBet5OutputRegulation` (3 件): `_BET_TYPES_4` が 4 賭式のみ・sanrenfuku 非含有・race_count/bet_count フィールド存在
+
+**テスト結果:** `pytest tests/` → 644 passed（前回 603 → +41 件、既存 603 件全件継続合格）
+
+**BET-5 Done 条件確認:**
+1. 2 つ以上の戦略パターン（honmei_v1/v3、anaba_v1/v2）を切り替えて、同一レース群に対する 4 賭式回収率を並べて比較できる ✓
+   - `run_strategy_experiment.py` で各戦略ペアの結果を JSON として保存
+   - `compare_strategy_results.py` で複数 JSON を読み込んで 4 賭式を並べて表示
+2. 比較のために Python コードを変更する必要がない ✓
+   - `--honmei-strategy` / `--aite-strategy` の引数変更のみで異なるパターンを試行・記録可能
+   - `test_bet5_done_condition_no_code_change_needed` でこれを明示的に検証
+3. 三連複は比較対象外（`_BET_TYPES_4` の定義、`test_sanrenfuku_not_in_default_output` でテスト済み）✓
+4. 全回収率出力に race_count / bet_count が同じ階層で出力される（出力規約）✓
+
