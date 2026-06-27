@@ -171,18 +171,20 @@
   4. MLflow等の外部実験管理ツールは導入しない（既存プロジェクトの構成・依存関係に存在しないため、スコープ外）。
 - **Done条件**: 2つ以上の戦略パターン（本命または相手）を切り替えて、同一レース群に対する4賭式（単勝・複勝・馬連・ワイド）回収率を並べて比較できること。比較のためにPythonコードを変更する必要がないこと（戦略ファイルの指定変更のみで切り替え可能）。三連複の比較は本Featureの合否判定には用いない。
 
-### BET-6: 本命選定ロジックのクリア数設計見直し（バックログ、2026-06-26追加）
+### BET-6: 本命選定ロジックのクリア数設計見直し（2026-06-26着手、2026-06-27実装・検証完了）
 
 - **現状の問題**（`tipster/weekend_filter_check.html`での目視確認・ユーザー指摘により判明）:
   - `weight_change`/`jockey_change`（`tipster/conditions.py`）は、どの分岐でも常に`passed=True`を返す設計のため、「クリア数(`clear_count`)」というメトリクスがこの2条件に関して実質的に馬を区別する力を持たない（加点/減点は`score`にのみ反映され、`passed`は常にTrue）。
   - 同様に`race_level`/`time_gap`/`track_bias_fit`も、判定に必要なデータが不足している場合は「判定保留」として`passed=True, score=0.0`を返す設計のため、「本当に基準をクリアした」のか「データがないだけ」なのかが`clear_count`の数値からは区別できない。
   - 結果として、`select_honmei()`のランキング第一キーである`clear_count`（`tipster/engine.py`の`-c.clear_count, -c.total_score, -c.ai_score`ソート）が、データが薄い状況下ではほぼ全馬で同値（5条件中5）になり、実質的な順位付けは`total_score`/`ai_score`に委ねられている。
-- **改善方針（案。着手時に詳細化する。今回はコード変更しない）**:
-  1. `ConditionResult.passed`をbool(true/false)から3値（true/false/null=判定不能）に拡張し、「判定保留」と「明確にクリア」を区別できるようにする。
-  2. `weight_change`/`jockey_change`にも、実際に`passed=False`になり得るしきい値・分岐を設ける（現状は加点/減点のみで合否判定が存在しない）。
-  3. 表示側（`tipster/weekend_filter_renderer.py`の本命テーブル、`tipster/renderer.py`等）も、`clear_count`を主指標として見せず、`total_score`/`ai_score`を主指標として扱うように表示順・強調を見直す。
-- **優先度**: 中（本筋の`BET-4`/`BET-5`完了後に着手。今すぐの着手は不要）。
-- **注意（スコープ境界）**: `select_honmei()`のスコアリング結果自体（AIスコア計算式、各条件の`score`加減点ロジック）は変更しないこと。本Featureはあくまで`passed`判定の意味論（「クリアした」と「判定不能」の区別）を明確化する話であり、既存の本命選定結果（誰が本命に選ばれるか、各馬の`total_score`/`ai_score`の値）を変えてはならない。
+- **実施内容（2026-06-27実装完了）**:
+  1. `ConditionResult.passed`をbool(true/false)から3値（true/false/null=判定不能）に拡張し、「判定保留」と「明確にクリア」を区別できるようにした（`tipster/models.py`/`tipster/conditions.py`）。
+  2. `weight_change`に`false_threshold_kg`（デフォルト3.0kg、実データ80パーセンタイル相当根拠）、`jockey_change`に既存データ（`jockey_change_step1_same_race`×`affinity`不良）で判断可能な`passed=False`分岐を追加した。
+  3. `engine.py`/`backtest.py`の足切り判定（`not result.passed`）が`passed=None`を誤って失格扱いする副作用を発見し、ユーザー承認のうえ`result.passed is False`に修正（3箇所、既存True/False挙動は不変）。
+  4. 表示側（`tipster/weekend_filter_renderer.py`）への注記バナー追加は2026-06-26に別途実施済み（Step1）。
+- **優先度**: 完了。
+- **注意（スコープ境界、2026-06-27更新）**: `select_honmei()`/`select_aite()`のランキング計算式自体（ソートキーの構造）・AIスコア計算式・各条件の`score`加減点ロジックは変更していない（変更していないことを確認済み）。一方、`passed`の意味論修正は`select_honmei()`の一次ランキングキーである`clear_count`の値に直接影響するため、**本命選定の順位・回収率の数値自体は変化する**（honmei_v1×anaba_v1等は±1.5pt程度、TR-1組み込み済みのhonmei_v5は最大-7.5pt[3m単勝]の変動を確認、2026-06-27検証）。これは「死んでいた判定（データ不足の保留がクリア扱いされていた状態）が修正されたことで、もともと意図されていた区別が正しく反映されるようになった」結果であり、意図的な許容範囲とする。**本Feature以降のスコープ境界は「既存の選定の意図（各条件が何を測ろうとしているか）を保つこと」とし、その結果として選定順位・回収率の数値が変化すること自体は許容する**（AIスコア計算式・score配点ロジックを変更しないことのみを厳守する）。
+- **検証結果（2026-06-27、honmei_v5×anaba_v1）**: 修正後の3期間(3m/6m/1y)×4賭式=12組み合わせ全てで、honmei_v1×anaba_v1基準を下回るケースは0件（詳細はPROGRESS.md参照）。ホールドアウト検証（前半/後半分割）も修正後コードで再実行し、両半期で単勝・複勝の改善が再現することを確認済み。
 
 ---
 

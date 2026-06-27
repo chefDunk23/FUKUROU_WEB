@@ -152,6 +152,7 @@ _BULK_SQL = text("""
       e.bracket_number AS wakuban, e.horse_number AS umaban,
       e.weight AS burden_weight, e.win_odds AS tan_odds,
       e.confirmed_rank, e.time_seconds, e.corner_4,
+      e.f3_time,
       r.date, r.place_code, r.distance, r.course_type AS surface,
       r.grade_code, r.jyoken_cd_3, r.name AS race_name
     FROM race_entries e
@@ -187,7 +188,7 @@ def _load_bulk_data(load_start: date, load_end: date) -> pd.DataFrame:
 
     df = pd.read_sql(_BULK_SQL, _engine, params={"start": load_start, "end": load_end})
     df["date"] = pd.to_datetime(df["date"])
-    for col in ("burden_weight", "tan_odds", "confirmed_rank", "time_seconds", "corner_4", "distance"):
+    for col in ("burden_weight", "tan_odds", "confirmed_rank", "time_seconds", "corner_4", "distance", "f3_time"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["is_jra"] = True
 
@@ -207,6 +208,10 @@ def _load_bulk_data(load_start: date, load_end: date) -> pd.DataFrame:
     df["winner_time"] = df.groupby("race_id")["time_seconds"].transform("min")
     df["this_margin"] = df["time_seconds"] - df["winner_time"]
     df["field_size"] = df.groupby("race_id")["horse_id"].transform("count")
+
+    # 上がり3Fレース内順位パーセンタイル（v2_f3_top 条件用）
+    df["f3_rank"] = df.groupby("race_id")["f3_time"].rank(ascending=True, na_option="keep")
+    df["f3_rank_pct"] = df["f3_rank"] / df["field_size"]
 
     df["corner_ratio"] = np.where(
         df["corner_4"].notna() & (df["corner_4"] > 0) & (df["field_size"] > 1),
@@ -518,6 +523,95 @@ class _JockeyVenueCache:
         return venue, overall
 
 
+_SIRE_VENUE_COLS = (
+    [f"venue_{i:02d}_top3_rate" for i in range(1, 11)]
+    + [f"venue_{i:02d}_count" for i in range(1, 11)]
+)
+_SIRE_VENUE_MIN_COUNT = 10
+
+
+class _SireVenueCache:
+    """PIT-safe 種牡馬会場適性キャッシュ（sire_feature_store）。v2_sire_venue 条件用。
+
+    ml.db の horses テーブルで horse → sire のマッピングを取得し、
+    sire_feature_store の venue_{XX}_top3_rate / venue_{XX}_count で PIT ルックアップする。
+    """
+
+    def __init__(self) -> None:
+        self._horse_sire: dict[str, str | None] = {}    # horse_id → sire_id
+        self._sire_series: dict[str, pd.DataFrame] = {} # sire_id → time-series DataFrame
+
+    def preload(self, horse_ids: set[str], load_start, load_end) -> None:
+        horse_ids = {h for h in horse_ids if h}
+        if not horse_ids:
+            return
+        from ml.db import engine as _engine
+
+        try:
+            with _engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT id, sire_id FROM horses WHERE id = ANY(:ids)"),
+                    {"ids": list(horse_ids)},
+                ).fetchall()
+            self._horse_sire = {r[0]: r[1] for r in rows if r[1]}
+
+            sire_ids = list({sid for sid in self._horse_sire.values() if sid})
+            if not sire_ids:
+                return
+
+            venue_cols_sql = ", ".join(
+                f"venue_{i:02d}_top3_rate, venue_{i:02d}_count" for i in range(1, 11)
+            )
+            with _engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        f"SELECT sire_id, target_date, top3_rate, {venue_cols_sql} "
+                        "FROM sire_feature_store WHERE sire_id = ANY(:ids) "
+                        "AND target_date BETWEEN :start AND :end "
+                        "ORDER BY sire_id, target_date"
+                    ),
+                    {"ids": sire_ids, "start": load_start, "end": load_end},
+                ).fetchall()
+
+            cols = ["target_date", "top3_rate"] + _SIRE_VENUE_COLS
+            grouped: dict[str, list] = defaultdict(list)
+            for row in rows:
+                grouped[row[0]].append(row[1:])
+            for sid, recs in grouped.items():
+                df = pd.DataFrame(recs, columns=cols)
+                df["target_date"] = pd.to_datetime(df["target_date"])
+                self._sire_series[sid] = df
+        except Exception:
+            pass  # DB 接続失敗時は全条件が passed=None になる（フォールバック）
+
+    def lookup(
+        self, horse_id: str | None, race_date, place_code: str | None
+    ) -> dict[str, float] | None:
+        """戻り値: {place_code: top3_rate, "overall": top3_rate}（count≥10のみ venue 収録）。"""
+        if not horse_id or not place_code:
+            return None
+        sid = self._horse_sire.get(horse_id)
+        if not sid or sid not in self._sire_series:
+            return None
+        series = self._sire_series[sid]
+        cand = series[series["target_date"] <= pd.Timestamp(race_date)]
+        if cand.empty:
+            return None
+        last = cand.iloc[-1]
+        overall = float(last["top3_rate"]) if pd.notna(last["top3_rate"]) else None
+        if overall is None:
+            return None
+        result: dict[str, float] = {"overall": overall}
+        rate_col = f"venue_{place_code}_top3_rate"
+        cnt_col  = f"venue_{place_code}_count"
+        if rate_col in last.index and cnt_col in last.index:
+            rate = last[rate_col]
+            cnt  = last[cnt_col]
+            if pd.notna(rate) and pd.notna(cnt) and int(cnt) >= _SIRE_VENUE_MIN_COUNT:
+                result[place_code] = float(rate)
+        return result
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # 軽量 RaceContext 構築
 # ─────────────────────────────────────────────────────────────────────────
@@ -548,7 +642,10 @@ def _get_past_race_info(
         next_rank_raw = int(orow["next_confirmed_rank"]) if pd.notna(orow["next_confirmed_rank"]) else None
         next_date = orow["next_race_date"] if pd.notna(orow["next_race_date"]) else None
         this_margin = float(orow["this_margin"]) if pd.notna(orow["this_margin"]) else None
-        raw_opponents.append((orow["horse_id"], this_rank, this_margin, next_date, next_rank_raw))
+        # f3_rank_pct: f3_time が _BULK_SQL に追加された場合のみ存在する（テスト用 DataFrame では None）
+        f3pct_val = orow.get("f3_rank_pct")
+        f3pct = float(f3pct_val) if f3pct_val is not None and pd.notna(f3pct_val) else None
+        raw_opponents.append((orow["horse_id"], this_rank, this_margin, next_date, next_rank_raw, f3pct))
 
     first = rows.iloc[0]
     grade_code = _safe_str_or_none(first["grade_code"])
@@ -588,14 +685,16 @@ def _build_past_races(
             continue
 
         own_rank = None
+        own_f3pct: float | None = None
         opponents: list[PastRaceOpponent] = []
-        for ohid, this_rank, this_margin, next_date, next_rank_raw in raw_opponents:
+        for ohid, this_rank, this_margin, next_date, next_rank_raw, f3pct in raw_opponents:
             safe_next_rank = next_rank_raw if (next_date is not None and next_date < evaluation_date) else None
             opponents.append(PastRaceOpponent(
                 horse_id=ohid, this_rank=this_rank, this_margin=this_margin, next_race_rank=safe_next_rank,
             ))
             if ohid == hid:
                 own_rank = this_rank
+                own_f3pct = f3pct
 
         out.append(PastRaceInfo(
             race_id=prid,
@@ -613,6 +712,7 @@ def _build_past_races(
             place_code=meta["place_code"],
             jyoken_cd_3=meta["jyoken_cd_3"],
             class_level=meta["class_level"],
+            f3_time_rank_pct=own_f3pct,
         ))
     return out
 
@@ -628,6 +728,7 @@ def _build_lightweight_context(
     past_race_cache: dict,
     jockey_venue_cache: _JockeyVenueCache | None = None,
     non_jra_races: dict[str, list[tuple]] | None = None,
+    sire_venue_cache: _SireVenueCache | None = None,
 ) -> RaceContext | None:
     """軽量版 RaceContext を構築する。
 
@@ -711,6 +812,10 @@ def _build_lightweight_context(
             jockey_venue_win_rate=jockey_venue_rate,
             jockey_overall_win_rate=jockey_overall_rate,
             overseas_interim_place_code=overseas_place_code,
+            sire_venue_top3=(
+                sire_venue_cache.lookup(hid, meta["date"], meta["place_code"])
+                if sire_venue_cache is not None else None
+            ),
         ))
 
     return RaceContext(
@@ -780,7 +885,8 @@ def _finalize_horse(horse_id: str, full_results: list[tuple], exclude_id: str | 
         if cfg.id == exclude_id:
             continue
         ev.conditions.append(result)
-        if cfg.required and not result.passed:
+        # passed=None（判定不能・保留）は失格させない（BET-6）。明確に False の場合のみ失格。
+        if cfg.required and result.passed is False:
             ev.eliminated = True
             ev.elimination_reason = f"{cfg.id}: {result.reason}"
             break
@@ -849,7 +955,7 @@ def run_backtest_range(
             for h_res in results:
                 for cfg, result in zip(enabled_cfgs, h_res.conditions):
                     applied[cfg.id] += 1
-                    if cfg.required and not result.passed:
+                    if cfg.required and result.passed is False:
                         eliminated_counter[cfg.id] += 1
 
         candidates = [r for r in results if not r.eliminated]
@@ -964,6 +1070,7 @@ def run_backtest(
     distance_filter: list[str] | None = None,
     min_total_score: float | None = None,
     max_candidates_for_honmei: int | None = None,
+    filter_race_ids: set[str] | None = None,
 ) -> dict[str, BacktestResult]:
     """期間ごと(3m/6m/1y等)にバックテストを実行する。バルクロードは1回だけ行い期間間で共有する。
 
@@ -1005,6 +1112,8 @@ def run_backtest(
     synergy_cache.preload(_collect_synergy_pairs(race_groups, all_target_ids), load_start, ref)
     jockey_venue_cache = _JockeyVenueCache()
     jockey_venue_cache.preload(jockey_ids, load_start, ref)
+    sire_venue_cache = _SireVenueCache()
+    sire_venue_cache.preload(horse_ids, load_start, ref)
     non_jra_races = _fetch_non_jra_interim_races(horse_ids, load_start, ref)
     past_race_cache: dict = {}
 
@@ -1012,7 +1121,8 @@ def run_backtest(
     for rid in all_target_ids:
         ctx = _build_lightweight_context(
             rid, race_groups, race_meta, bias_map, synergy_cache,
-            date_jockey_places, jockey_stats, past_race_cache, jockey_venue_cache, non_jra_races,
+            date_jockey_places, jockey_stats, past_race_cache, jockey_venue_cache,
+            non_jra_races, sire_venue_cache,
         )
         if ctx is not None:
             contexts[rid] = ctx
@@ -1024,6 +1134,8 @@ def run_backtest(
     results: dict[str, BacktestResult] = {}
     for p, (start, end) in period_ranges.items():
         period_ids = [rid for rid in contexts if start <= race_meta[rid]["date"].date() <= end]
+        if filter_race_ids is not None:
+            period_ids = [rid for rid in period_ids if rid in filter_race_ids]
         applied: dict[str, int] = defaultdict(int)
         eliminated: dict[str, int] = defaultdict(int)
         result = run_backtest_range(

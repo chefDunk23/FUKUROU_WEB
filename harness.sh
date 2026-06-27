@@ -2,7 +2,7 @@
 # Generator <-> Evaluator 自動ループ。
 # .claude/settings.local.json (Edit/Write/Bash(*) 全許可) を前提に
 # --dangerously-skip-permissions なしで無人実行する。
-MAX_LOOPS=15
+MAX_LOOPS=25
 START_LOOP=${START_LOOP:-1}
 LOGFILE="harness.log"
 

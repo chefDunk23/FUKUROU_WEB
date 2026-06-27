@@ -71,6 +71,44 @@ def _ev(horse_id: str, score: float, clear_count: int = 1, ai_score: float = 0.0
     return HorseEvaluation(horse_id=horse_id, ai_score=ai_score, conditions=conditions)
 
 
+def test_evaluate_race_context_required_condition_returning_none_does_not_eliminate():
+    """BET-6: passed=None（判定不能・保留）を返す条件が required:true でも、馬は失格にならない。
+
+    race_level/time_gap は past_races が無いと passed=None を返す（tipster/conditions.py）。
+    旧実装(`not result.passed`)では None も False 同様に失格判定されてしまうバグがあった
+    （engine.py:499 修正の回帰防止テスト）。
+    """
+    from tipster.engine import evaluate_race_context
+    from tipster.models import ConditionConfig, HorseContext, RaceContext, RankingConfig, Strategy
+
+    horse = HorseContext(
+        horse_id="H1", horse_name="テスト馬", umaban=1, wakuban=1,
+        jockey_id="J1", jockey_name=None, trainer_id=None, trainer_name=None,
+        burden_weight=56.0, horse_weight=460.0, ai_score=0.5, ai_rank=1,
+        chokyo_score=None, position_tendency=None,
+        prev_race_rank=None, prev_race_grade=None, prev_race_days_ago=None,
+        past_races=[],  # race_level/time_gap が passed=None を返す条件
+    )
+    race_ctx = RaceContext(
+        race_id="TESTRACE", race_name="テストレース", race_date="2026-01-01",
+        place_code="05", keibajo_name="東京", distance=2000, surface="芝",
+        class_label=None, grade_code=None, horses=[horse],
+    )
+    strategy = Strategy(
+        name="テスト戦略", tipster="test", type="honmei", version="1.0",
+        conditions=[
+            ConditionConfig(id="race_level", enabled=True, required=True, params={}),
+            ConditionConfig(id="time_gap", enabled=True, required=True, params={}),
+        ],
+        ranking=RankingConfig(),
+    )
+
+    evaluation = evaluate_race_context(race_ctx, strategy)
+    assert evaluation.candidates[0].horse_id == "H1"
+    assert evaluation.candidates[0].eliminated is False
+    assert all(c.passed is None for c in evaluation.candidates[0].conditions)
+
+
 class TestSelectHonmei:
     def test_picks_higher_clear_count_first(self):
         candidates = [_ev("A", score=5.0, clear_count=1), _ev("B", score=1.0, clear_count=2)]

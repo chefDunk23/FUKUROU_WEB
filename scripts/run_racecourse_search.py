@@ -125,7 +125,7 @@ _N_A = len(CONDS_A)
 
 _SUPP_SQL = text("""
     SELECT e.race_id, e.horse_id, h.sire_id,
-           e.f3_time, e.popularity,
+           e.popularity,
            r.track_condition,
            b.sire_turf_wr, b.sire_dirt_wr,
            b.sire_sprint_wr, b.sire_mile_wr, b.sire_middle_wr, b.sire_long_wr,
@@ -142,8 +142,8 @@ _SUPP_SQL = text("""
 """)
 
 _SIRE_SQL = text("""
-    SELECT DISTINCT ON (sire_id)
-           sire_id, top3_rate AS sire_top3_rate,
+    SELECT sire_id, target_date,
+           top3_rate AS sire_top3_rate,
            venue_01_top3_rate, venue_01_count,
            venue_02_top3_rate, venue_02_count,
            venue_03_top3_rate, venue_03_count,
@@ -157,8 +157,26 @@ _SIRE_SQL = text("""
            surface_turf_top3_rate AS sire_sfs_turf_top3,
            surface_dirt_top3_rate AS sire_sfs_dirt_top3
     FROM sire_feature_store
-    ORDER BY sire_id, target_date DESC
+    ORDER BY sire_id, target_date
 """)
+
+
+def _merge_sire_pit(df: pd.DataFrame, sire_df: pd.DataFrame) -> pd.DataFrame:
+    """PIT (Point-In-Time) 種牡馬特性マージ: レース日より前の最新スナップショットを使用"""
+    sire_df = sire_df.copy()
+    sire_df["target_date"] = pd.to_datetime(sire_df["target_date"]).astype("datetime64[us]")
+    sire_cols = [c for c in sire_df.columns if c not in ("sire_id", "target_date")]
+    race_keys = df[["race_id", "sire_id", "date"]].drop_duplicates().copy()
+    race_keys["date"] = race_keys["date"].astype("datetime64[us]")
+    race_keys = race_keys.sort_values("date").reset_index(drop=True)
+    sire_sorted = sire_df.sort_values("target_date").reset_index(drop=True)
+    pit = pd.merge_asof(
+        race_keys, sire_sorted,
+        left_on="date", right_on="target_date",
+        by="sire_id", direction="backward",
+    )
+    pit = pit[["race_id", "sire_id"] + sire_cols]
+    return df.merge(pit, on=["race_id", "sire_id"], how="left")
 
 
 def _load_extended(load_start: date, to_date: date) -> pd.DataFrame:
@@ -168,11 +186,11 @@ def _load_extended(load_start: date, to_date: date) -> pd.DataFrame:
     print("[rc] 拡張フィールド読み込み...")
     supp = pd.read_sql(_SUPP_SQL, _engine, params={"start": load_start, "end": to_date})
 
-    print("[rc] 種牡馬特性読み込み...")
+    print("[rc] 種牡馬特性読み込み (PIT)...")
     sire_df = pd.read_sql(_SIRE_SQL, _engine)
 
     df = base.merge(supp, on=["race_id", "horse_id"], how="left")
-    df = df.merge(sire_df, on="sire_id", how="left")
+    df = _merge_sire_pit(df, sire_df)
 
     # class_level
     def _cl(row):
@@ -181,10 +199,6 @@ def _load_extended(load_start: date, to_date: date) -> pd.DataFrame:
             str(row["jyoken_cd_3"]) if pd.notna(row["jyoken_cd_3"]) else None,
         )
     df["class_level"] = df.apply(_cl, axis=1)
-
-    # f3 rank in race
-    df["f3_rank"] = df.groupby("race_id")["f3_time"].rank(ascending=True, na_option="keep")
-    df["f3_rank_pct"] = df["f3_rank"] / df["field_size"]
 
     return df
 

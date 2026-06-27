@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import tipster.conditions_tr1  # noqa: F401  (training_rank_top を CONDITION_REGISTRY に登録するためimport)
 from tipster.combo_backtest import run_combo_backtest
 from tipster.models import ComboBacktestResult
 

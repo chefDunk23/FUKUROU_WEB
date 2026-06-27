@@ -213,6 +213,141 @@ def _fetch_track_bias(race_id: str, meta: dict) -> dict:
         return {"front_bias_pit": front_bias, "inner_bias_pit": None, "source": "course_profile_store"}
 
 
+_BABA_CODE_MAP: dict[str, str] = {"1": "良", "2": "稍重", "3": "重", "4": "不良"}
+
+
+def _fetch_baba_supplement_batch(horse_ids: list[str], race_date: str) -> dict[str, dict]:
+    """JVDL から馬場別実績 + 種牡馬馬場適性を一括取得する（BET-7 馬場条件用）。
+
+    PIT ルール: race_date より前のデータのみ参照（当該レース結果は含まない）。
+
+    Returns: {horse_id: {
+        "baba_record": {"良": (runs, placed), ...},
+        "sire_id": str | None,
+        "sire_baba_top3": {"良": top3_rate_shift, ...},  # 全体平均との差
+    }}
+    """
+    import psycopg2
+    from shared.config import DB_JVDL
+
+    if not horse_ids:
+        return {}
+
+    _BABA_LABELS = ["良", "稍重", "重", "不良"]
+    _CODE_TO_LABEL = {"1": "良", "2": "稍重", "3": "重", "4": "不良"}
+
+    # ── 1. 馬場別過去成績（PIT: race_date より前のみ）────────────────────────
+    baba_records: dict[str, dict[str, list[int, int]]] = {hid: {} for hid in horse_ids}
+    try:
+        conn = psycopg2.connect(**DB_JVDL)
+        cur = conn.cursor()
+        # ダート/芝の両馬場コードを OR で取る（どちらか一方が設定）
+        # race_date (YYYY-MM-DD) → '20260627' 形式に変換して race_id 先頭8桁と比較 (PIT)
+        race_date_compact = race_date.replace("-", "") if race_date else ""
+        cur.execute(
+            """
+            SELECT
+                re.blood_no,
+                COALESCE(NULLIF(TRIM(r.dirt_baba_code::text), ''), NULLIF(TRIM(r.shiba_baba_code::text), '')) AS baba_code,
+                COUNT(*) AS runs,
+                SUM(CASE WHEN re.kakutei_chakujun BETWEEN 1 AND 3 THEN 1 ELSE 0 END) AS placed
+            FROM race_entries_v2 re
+            JOIN races_v2 r ON re.race_id = r.race_id
+            WHERE re.blood_no = ANY(%s)
+              AND re.kakutei_chakujun > 0
+              AND SUBSTRING(r.race_id::text, 1, 8) < %s
+              AND (
+                  (r.dirt_baba_code IS NOT NULL AND TRIM(r.dirt_baba_code::text) NOT IN ('', '0'))
+                  OR
+                  (r.shiba_baba_code IS NOT NULL AND TRIM(r.shiba_baba_code::text) NOT IN ('', '0'))
+              )
+            GROUP BY re.blood_no, baba_code
+            """,
+            (horse_ids, race_date_compact),
+        )
+        for blood_no, baba_code, runs, placed in cur.fetchall():
+            label = _CODE_TO_LABEL.get(str(baba_code or "").strip())
+            if label and blood_no in baba_records:
+                baba_records[blood_no][label] = [int(runs), int(placed)]
+
+        # ── 2. 種牡馬 ID 取得（horse_blood_tree）────────────────────────────
+        cur.execute(
+            "SELECT horse_id, sire_id FROM horse_blood_tree WHERE horse_id = ANY(%s)",
+            (horse_ids,),
+        )
+        sire_map: dict[str, str | None] = {hid: None for hid in horse_ids}
+        for horse_id, sire_id in cur.fetchall():
+            sire_map[horse_id] = sire_id
+
+        # ── 3. 種牡馬馬場適性 + 会場適性（sire_feature_store PIT）──────────
+        sire_ids = [sid for sid in sire_map.values() if sid]
+        sire_baba: dict[str, dict[str, float]] = {}
+        sire_venue: dict[str, dict[str, float]] = {}
+        if sire_ids:
+            # PIT スナップショット（レース日以前の最新）を取得
+            cur.execute(
+                """
+                SELECT DISTINCT ON (sire_id)
+                    sire_id,
+                    baba_firm_top3_rate, baba_firm_top3_shift,
+                    baba_yaya_top3_rate, baba_yaya_top3_shift,
+                    baba_omo_top3_rate, baba_omo_top3_shift,
+                    baba_furyo_top3_rate, baba_furyo_top3_shift,
+                    top3_rate,
+                    venue_01_top3_rate, venue_01_count,
+                    venue_02_top3_rate, venue_02_count,
+                    venue_03_top3_rate, venue_03_count,
+                    venue_04_top3_rate, venue_04_count,
+                    venue_05_top3_rate, venue_05_count,
+                    venue_06_top3_rate, venue_06_count,
+                    venue_07_top3_rate, venue_07_count,
+                    venue_08_top3_rate, venue_08_count,
+                    venue_09_top3_rate, venue_09_count,
+                    venue_10_top3_rate, venue_10_count
+                FROM sire_feature_store
+                WHERE sire_id = ANY(%s)
+                  AND target_date <= %s
+                ORDER BY sire_id, target_date DESC
+                """,
+                (sire_ids, race_date),
+            )
+            for row in cur.fetchall():
+                sid = row[0]
+                sire_baba[sid] = {
+                    "良":  float(row[2] or 0),   # baba_firm_top3_shift
+                    "稍重": float(row[4] or 0),   # baba_yaya_top3_shift
+                    "重":  float(row[6] or 0),    # baba_omo_top3_shift
+                    "不良": float(row[8] or 0),   # baba_furyo_top3_shift
+                }
+                overall = float(row[9] or 0)
+                ven: dict[str, float] = {"overall": overall}
+                for i, pc in enumerate([f"{n:02d}" for n in range(1, 11)]):
+                    rate_idx = 10 + i * 2       # row[10], row[12], ... row[28]
+                    cnt_idx  = 10 + i * 2 + 1   # row[11], row[13], ... row[29]
+                    rate = row[rate_idx]
+                    cnt  = row[cnt_idx]
+                    if rate is not None and cnt is not None and int(cnt) >= 10:
+                        ven[pc] = float(rate)
+                sire_venue[sid] = ven
+
+        cur.close()
+        conn.close()
+    except Exception:
+        # DB接続失敗時はフォールバック（条件は passed=None になる）
+        return {hid: {"baba_record": {}, "sire_id": None, "sire_baba_top3": {}, "sire_venue_top3": {}} for hid in horse_ids}
+
+    result = {}
+    for hid in horse_ids:
+        sid = sire_map.get(hid)
+        result[hid] = {
+            "baba_record": {k: tuple(v) for k, v in baba_records[hid].items()},
+            "sire_id": sid,
+            "sire_baba_top3": sire_baba.get(sid, {}) if sid else {},
+            "sire_venue_top3": sire_venue.get(sid, {}) if sid else {},
+        }
+    return result
+
+
 def _to_db_race_id(race_id: str) -> str:
     """JV-Data 16桁 race_id (日付8+場2+回2+日2+R番2) を races.id の12桁形式 (日付8+場2+R番2) に変換する。
 
@@ -319,12 +454,17 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
     bias = _fetch_track_bias(race_id, meta)
     supp = _fetch_supplementary(race_id, meta, horses_raw)
     extra_map = _fetch_past_race_extra(_collect_past_race_ids(horses_raw))
+    # BET-7: 馬場別実績 + 種牡馬馬場適性（PIT-safe）
+    race_date = meta.get("date") or (race_id[:8] if len(race_id) >= 8 else "")
+    horse_ids_for_baba = [h["horse_id"] for h in horses_raw]
+    baba_supp = _fetch_baba_supplement_batch(horse_ids_for_baba, race_date)
 
     horses: list[HorseContext] = []
     for h in horses_raw:
         hid = h["horse_id"]
         extra = h.get("extra") or {}
         s = supp.get(hid, {})
+        bs = baba_supp.get(hid, {})
         horses.append(HorseContext(
             horse_id=hid,
             horse_name=h.get("horse_name"),
@@ -357,6 +497,12 @@ def _build_race_context(race_id: str, payload: dict) -> RaceContext:
             # 海外/地方帰り判定はバックテスト(軽量パス)限定の実装。ライブパスでは
             # past_races[0].place_code（DB補完済み）による簡易判定に委ねる。
             overseas_interim_place_code=None,
+            # BET-7: 馬場別実績 + 種牡馬馬場適性
+            baba_record=bs.get("baba_record") or None,
+            sire_id=bs.get("sire_id"),
+            sire_baba_top3=bs.get("sire_baba_top3") or None,
+            # Phase 2 S-1: 種牡馬会場適性（v2_sire_venue 条件用）
+            sire_venue_top3=bs.get("sire_venue_top3") or None,
         ))
 
     race_grade_code = payload.get("grade_code")
@@ -496,7 +642,8 @@ def evaluate_race_context(
                 continue
             result = fn(horse, race_ctx, cond_cfg.params)
             ev.conditions.append(result)
-            if cond_cfg.required and not result.passed:
+            # passed=None（判定不能・保留）は失格させない（BET-6）。明確に False の場合のみ失格。
+            if cond_cfg.required and result.passed is False:
                 ev.eliminated = True
                 ev.elimination_reason = f"{cond_cfg.id}: {result.reason}"
                 break

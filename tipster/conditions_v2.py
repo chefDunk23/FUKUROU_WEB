@@ -332,10 +332,17 @@ def check_v2_weight_favor(
             score=increase_penalty,
             reason=f"斤量増量（{pbw}kg→{bw}kg, +{diff:.1f}kg）",
         )
+    # 変化なし or 軽微増量（+0.5未満）→ 軽減ではないので False
+    if diff < 0:
+        return ConditionResult(
+            passed=True,
+            score=0.0,
+            reason=f"軽微な斤量軽減（{pbw}kg→{bw}kg, -{abs(diff):.1f}kg）",
+        )
     return ConditionResult(
-        passed=True,
+        passed=False,
         score=0.0,
-        reason=f"斤量変化軽微（{pbw}kg→{bw}kg）",
+        reason=f"斤量変化なし・軽微増量（{pbw}kg→{bw}kg）",
     )
 
 
@@ -432,6 +439,172 @@ def check_v2_surface_history(
         passed=False,
         score=0.0,
         reason=f"同馬場（{today_surface}）実績{same_surface_runs}走中好走なし",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 2 S-1/B-2 条件（正式実装: pipeline 対応済み）
+# PHASE2_VERIFIED_PATTERNS.md 記載の3条件をそのまま移植。
+# run_racecourse_search.py のローカル実装と同一ロジック。
+# ─────────────────────────────────────────────────────────────────────────
+
+# 坂あり競馬場コード（racecourse_features.json の has_hill=true）
+# 福島(03)/東京(05)/中山(06)/中京(07)/阪神(09)
+_HILL_PLACE_CODES: frozenset[str] = frozenset({"03", "05", "06", "07", "09"})
+
+
+@register_condition("v2_f3_top")
+def check_v2_f3_top(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """Phase 2 S-1/B-2: 前走の上がり3Fがそのレースの出走馬中、上位 top_pct 以内か。
+
+    Phase 2 f3_top 条件の本番実装。
+    prev1_f3pct = 前走の f3_time_rank_pct (= f3_rank / field_size, 0=最速, 1=最遅)。
+    pipeline 対応: PastRaceInfo.f3_time_rank_pct（backtest.py _BULK_SQL で f3_time 追加済み）。
+
+    params:
+        top_pct      (float, default 0.33): 上位何分率以内か（0.33=上位1/3）
+        lookback     (int,   default 1):    参照走数（Phase 2 は prev1 のみ。拡張可）
+        bonus_score  (float, default 0.5):  条件クリア時の加点
+    """
+    top_pct = float(params.get("top_pct", 0.33))
+    lookback = int(params.get("lookback", 1))
+    bonus_score = float(params.get("bonus_score", 0.5))
+
+    for i in range(min(lookback, len(horse.past_races))):
+        pr = horse.past_races[i]
+        if pr.f3_time_rank_pct is None:
+            continue
+        pct = pr.f3_time_rank_pct
+        if pct <= top_pct:
+            return ConditionResult(
+                passed=True,
+                score=bonus_score,
+                reason=f"前{i + 1}走の上がり3F順位パーセンタイル{pct:.2f}（≤{top_pct:.2f}=上位{top_pct:.0%}以内）",
+            )
+        return ConditionResult(
+            passed=False,
+            score=0.0,
+            reason=f"前{i + 1}走の上がり3F順位パーセンタイル{pct:.2f}（>{top_pct:.2f}=上位{top_pct:.0%}外）",
+        )
+
+    return ConditionResult(passed=None, score=0.0, reason="上がり3Fデータなし（判定保留）")
+
+
+@register_condition("v2_hill_fit")
+def check_v2_hill_fit(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """Phase 2 S-1: 今回と同じ「坂あり/なし」区分の競馬場で過去好走歴があるか。
+
+    Phase 2 hill_fit 条件の本番実装。
+    坂あり競馬場: 福島(03)/東京(05)/中山(06)/中京(07)/阪神(09)
+
+    判定ロジック:
+      - 今回の place_code が坂ありかどうかを判定
+      - 過去 lookback 走の place_code を同じ坂区分で絞り込み
+      - 同区分出走が一度もない → passed=None（判定保留）
+      - 同区分出走あり かつ 3着以内が1回以上 → passed=True
+      - 同区分出走あり かつ 3着以内なし → passed=False
+
+    params:
+        lookback        (int,   default 3): 参照走数
+        min_place_rank  (int,   default 3): 好走と見なす着順上限
+        bonus_score     (float, default 0.5): 条件クリア時の加点
+    """
+    lookback = int(params.get("lookback", 3))
+    min_place_rank = int(params.get("min_place_rank", 3))
+    bonus_score = float(params.get("bonus_score", 0.5))
+
+    today_pc = race_ctx.place_code
+    if today_pc is None:
+        return ConditionResult(passed=None, score=0.0, reason="今回競馬場コードなし（判定保留）")
+
+    today_is_hill = today_pc in _HILL_PLACE_CODES
+    hill_label = "坂あり" if today_is_hill else "坂なし"
+
+    same_type_runs = 0
+    good_runs = 0
+    for i in range(min(lookback, len(horse.past_races))):
+        pr = horse.past_races[i]
+        if pr.place_code is None:
+            continue
+        prev_is_hill = pr.place_code in _HILL_PLACE_CODES
+        if prev_is_hill != today_is_hill:
+            continue
+        same_type_runs += 1
+        if pr.rank is not None and pr.rank <= min_place_rank:
+            good_runs += 1
+
+    if same_type_runs == 0:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"{hill_label}競馬場の出走実績なし（過去{lookback}走以内、判定保留）",
+        )
+    if good_runs > 0:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"{hill_label}競馬場で過去{good_runs}/{same_type_runs}走好走（3着以内）",
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"{hill_label}競馬場の出走{same_type_runs}走中好走なし",
+    )
+
+
+@register_condition("v2_sire_venue")
+def check_v2_sire_venue(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """Phase 2 S-1: 種牡馬の産駒の今回競馬場 top3 率が全体 top3 率を上回るか。
+
+    Phase 2 sire_venue 条件の本番実装。
+    PIT-safe: HorseContext.sire_venue_top3 はレース日以前の最新 sire_feature_store スナップショット。
+
+    判定ロジック（run_racecourse_search.py と同一）:
+      - sire.venue_{XX}_top3_rate > sire.top3_rate（overall）
+      - かつ venue_{XX}_count >= min_count
+
+    params:
+        min_count    (int,   default 10):   会場別実績の最低サンプル数
+        bonus_score  (float, default 0.5):  条件クリア時の加点
+    """
+    min_count = int(params.get("min_count", 10))
+    bonus_score = float(params.get("bonus_score", 0.5))
+
+    today_pc = race_ctx.place_code
+    if today_pc is None:
+        return ConditionResult(passed=None, score=0.0, reason="今回競馬場コードなし（判定保留）")
+
+    if not horse.sire_venue_top3:
+        return ConditionResult(passed=None, score=0.0, reason="種牡馬会場適性データなし（判定保留）")
+
+    overall = horse.sire_venue_top3.get("overall")
+    if overall is None:
+        return ConditionResult(passed=None, score=0.0, reason="種牡馬全体 top3 率データなし（判定保留）")
+
+    venue_rate = horse.sire_venue_top3.get(today_pc)
+    if venue_rate is None:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"種牡馬の当該競馬場({today_pc})実績 {min_count} 頭未満（判定保留）",
+        )
+
+    if venue_rate > overall:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"種牡馬産駒: 競馬場({today_pc}) top3率 {venue_rate:.1%} > 全体 {overall:.1%}（得意会場）",
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"種牡馬産駒: 競馬場({today_pc}) top3率 {venue_rate:.1%} ≤ 全体 {overall:.1%}（優位なし）",
     )
 
 
@@ -534,4 +707,200 @@ def check_v2_sire_distance_fit(
         passed=None,
         score=0.0,
         reason="sire 距離適性データは pipeline 未収録（フェーズ2 pipeline 整備後に有効化）",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# BET-7: 馬場別条件（v2_baba_track_record / v2_sire_baba_fit / v2_heavy_track_stamina）
+# ─────────────────────────────────────────────────────────────────────────
+
+_BABA_LABELS = ["良", "稍重", "重", "不良"]
+
+
+@register_condition("v2_baba_track_record")
+def check_v2_baba_track_record(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """BET-7: 対象馬場での過去成績が基準を満たすか。
+
+    HorseContext.baba_record から params["baba"] の馬場成績を取得し判定する。
+    当日の馬場状態は使わない。4パターン（良/稍重/重/不良）の事前計算に対応。
+
+    params:
+        baba            (str,   default "良"):    評価対象馬場（"良"/"稍重"/"重"/"不良"）
+        min_runs        (int,   default 3):       最小出走数（未満は None）
+        pass_rate       (float, default 0.30):    passed=True の複勝率下限
+        fail_rate       (float, default 0.15):    passed=False の複勝率上限（苦手判定）
+        bonus_score     (float, default 1.0):     passed=True 時加点
+        penalty_score   (float, default -1.0):    passed=False 時減点
+    """
+    baba = str(params.get("baba", "良"))
+    min_runs = int(params.get("min_runs", 3))
+    pass_rate = float(params.get("pass_rate", 0.30))
+    fail_rate = float(params.get("fail_rate", 0.15))
+    bonus_score = float(params.get("bonus_score", 1.0))
+    penalty_score = float(params.get("penalty_score", -1.0))
+
+    if baba not in _BABA_LABELS:
+        return ConditionResult(passed=None, score=0.0, reason=f"不明な馬場: {baba}")
+
+    record = (horse.baba_record or {}).get(baba)
+    if record is None:
+        return ConditionResult(passed=None, score=0.0, reason=f"{baba}馬場: 出走実績なし（判定保留）")
+
+    runs, placed = record
+    if runs < min_runs:
+        rate = placed / runs if runs > 0 else 0.0
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"{baba}馬場: {placed}/{runs}回 — サンプル少（{min_runs}走未満、判定保留）",
+            detail={"runs": runs, "placed": placed},
+        )
+
+    rate = placed / runs
+    if rate >= pass_rate:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"{baba}馬場: {placed}/{runs}回 ({rate:.0%}) — 基準({pass_rate:.0%})超え",
+            detail={"runs": runs, "placed": placed, "rate": rate},
+        )
+    if rate < fail_rate:
+        return ConditionResult(
+            passed=False,
+            score=penalty_score,
+            reason=f"{baba}馬場: {placed}/{runs}回 ({rate:.0%}) — 苦手（{fail_rate:.0%}未満）",
+            detail={"runs": runs, "placed": placed, "rate": rate},
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"{baba}馬場: {placed}/{runs}回 ({rate:.0%}) — 基準({pass_rate:.0%})未満",
+        detail={"runs": runs, "placed": placed, "rate": rate},
+    )
+
+
+@register_condition("v2_sire_baba_fit")
+def check_v2_sire_baba_fit(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """BET-7: 種牡馬の産駒が対象馬場で全体平均を上回るか（PIT-safe sire_feature_store）。
+
+    sire_baba_top3 の shift 値（全体平均との差）を使う。
+    shift > threshold なら True（種牡馬の産駒は当該馬場が得意）。
+
+    params:
+        baba            (str,   default "良"):     評価対象馬場
+        threshold       (float, default 0.02):    top3_rate_shift の合格下限（+2%pt 以上）
+        bonus_score     (float, default 0.5):     passed=True 時加点
+    """
+    baba = str(params.get("baba", "良"))
+    threshold = float(params.get("threshold", 0.02))
+    bonus_score = float(params.get("bonus_score", 0.5))
+
+    if baba not in _BABA_LABELS:
+        return ConditionResult(passed=None, score=0.0, reason=f"不明な馬場: {baba}")
+
+    if not horse.sire_baba_top3:
+        return ConditionResult(passed=None, score=0.0, reason="種牡馬馬場データなし（判定保留）")
+
+    shift = horse.sire_baba_top3.get(baba)
+    if shift is None:
+        return ConditionResult(passed=None, score=0.0, reason=f"種牡馬の{baba}馬場データなし（判定保留）")
+
+    if shift >= threshold:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"種牡馬産駒: {baba}馬場 複勝率shift={shift:+.1%}（全体比優位）",
+            detail={"baba": baba, "shift": shift},
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"種牡馬産駒: {baba}馬場 複勝率shift={shift:+.1%}（優位なし）",
+        detail={"baba": baba, "shift": shift},
+    )
+
+
+@register_condition("v2_heavy_track_stamina")
+def check_v2_heavy_track_stamina(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """BET-7: 重馬場/不良馬場でのスタミナ・パワー適性を評価する。
+
+    対象: 重馬場または不良馬場のシミュレーション（params["baba"] が "重" or "不良"）のみ。
+    良/稍重の場合は passed=None（評価不要）を返す。
+
+    baba_record の 重+不良 合算成績で判定:
+      - 合算 3 走以上 かつ 複勝率 30% 以上 → True（道悪巧者）
+      - 合算 3 走以上 かつ 複勝率 15% 未満 → False（道悪苦手）
+      - データ不足 → None
+
+    params:
+        baba            (str,   default "重"):     評価対象馬場（重/不良のみ有効）
+        min_runs        (int,   default 3):        合算最小出走数
+        pass_rate       (float, default 0.30):     passed=True の複勝率下限
+        fail_rate       (float, default 0.15):     passed=False の複勝率上限
+        bonus_score     (float, default 1.0):      passed=True 時加点
+        penalty_score   (float, default -1.5):     passed=False 時減点（道悪は致命的）
+    """
+    baba = str(params.get("baba", "重"))
+    min_runs = int(params.get("min_runs", 3))
+    pass_rate = float(params.get("pass_rate", 0.30))
+    fail_rate = float(params.get("fail_rate", 0.15))
+    bonus_score = float(params.get("bonus_score", 1.0))
+    penalty_score = float(params.get("penalty_score", -1.5))
+
+    # 良/稍重は対象外（この条件は道悪専用）
+    if baba not in ("重", "不良"):
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"{baba}馬場ではこの条件は適用されない（道悪専用条件）",
+        )
+
+    record = horse.baba_record or {}
+    # 重 + 不良 の合算
+    total_runs = total_placed = 0
+    for label in ("重", "不良"):
+        if label in record:
+            r, p = record[label]
+            total_runs += r
+            total_placed += p
+
+    if total_runs == 0:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason="道悪（重/不良）での出走実績なし（判定保留）",
+        )
+    if total_runs < min_runs:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"道悪合算: {total_placed}/{total_runs}回 — サンプル少（{min_runs}走未満、判定保留）",
+        )
+
+    rate = total_placed / total_runs
+    if rate >= pass_rate:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"道悪巧者: 重/不良合算 {total_placed}/{total_runs}回 ({rate:.0%})",
+            detail={"runs": total_runs, "placed": total_placed, "rate": rate},
+        )
+    if rate < fail_rate:
+        return ConditionResult(
+            passed=False,
+            score=penalty_score,
+            reason=f"道悪苦手: 重/不良合算 {total_placed}/{total_runs}回 ({rate:.0%}) — {fail_rate:.0%}未満",
+            detail={"runs": total_runs, "placed": total_placed, "rate": rate},
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"道悪中程度: 重/不良合算 {total_placed}/{total_runs}回 ({rate:.0%})",
+        detail={"runs": total_runs, "placed": total_placed, "rate": rate},
     )

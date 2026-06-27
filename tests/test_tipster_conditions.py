@@ -18,6 +18,11 @@ from tipster.conditions import (
     check_track_bias_fit,
     check_weight_change,
 )
+from tipster.conditions_v2 import (
+    check_v2_f3_top,
+    check_v2_hill_fit,
+    check_v2_sire_venue,
+)
 from tipster.models import HorseContext, PastRaceInfo, PastRaceOpponent, RaceContext
 
 
@@ -51,7 +56,8 @@ def _race(**overrides) -> RaceContext:
 def test_race_level_insufficient_data_holds_neutral():
     horse = _horse(past_races=[])
     result = check_race_level(horse, _race(), {})
-    assert result.passed is True
+    # BET-6: 判定不能(データ不足)はpassed=None(中立)。passed=Trueの「クリア」とは区別する。
+    assert result.passed is None
     assert result.score == 0.0
 
 
@@ -168,7 +174,8 @@ def test_race_level_or_falls_back_to_second_past_race():
 def test_time_gap_no_past_race_holds_neutral():
     horse = _horse(past_races=[])
     result = check_time_gap(horse, _race(), {})
-    assert result.passed is True and result.score == 0.0
+    # BET-6: 判定不能(データ不足)はpassed=None(中立)。
+    assert result.passed is None and result.score == 0.0
 
 
 def test_time_gap_within_threshold_passes():
@@ -216,7 +223,8 @@ def test_time_gap_within_fallback_range_penalized_but_passes():
 def test_track_bias_fit_missing_data_holds_neutral():
     horse = _horse(position_tendency=None)
     result = check_track_bias_fit(horse, _race(front_bias_pit=None), {})
-    assert result.passed is True and result.score == 0.0
+    # BET-6: 判定不能(データ不足)はpassed=None(中立)。
+    assert result.passed is None and result.score == 0.0
 
 
 def test_track_bias_fit_mismatch_excludes_when_configured():
@@ -256,6 +264,23 @@ def test_weight_change_increase_penalized():
     horse = _horse(burden_weight=58.0, prev_burden_weight=56.0)
     result = check_weight_change(horse, _race(), {"increase_penalty": -1})
     assert result.score == -1
+    # BET-6: +2.0kgはデフォルトしきい値(3.0kg)未満のため、scoreは減点でもpassedはTrueのまま。
+    assert result.passed is True
+
+
+def test_weight_change_significant_increase_fails():
+    """BET-6: false_threshold_kg(デフォルト3.0kg)以上の斤量増はpassed=Falseになる。"""
+    horse = _horse(burden_weight=59.5, prev_burden_weight=56.0)
+    result = check_weight_change(horse, _race(), {"increase_penalty": -1})
+    assert result.passed is False
+    assert result.score == -1  # scoreの計算自体は変更しない
+
+
+def test_weight_change_custom_false_threshold():
+    horse = _horse(burden_weight=58.0, prev_burden_weight=56.0)
+    result = check_weight_change(horse, _race(), {"increase_penalty": -1, "false_threshold_kg": 1.5})
+    assert result.passed is False
+    assert result.score == -1
 
 
 def test_weight_change_decrease_bonus():
@@ -289,6 +314,9 @@ def test_jockey_change_step1_penalized():
     horse = _horse(jockey_id="J_NEW", prev_jockey_id="J_OLD", jockey_change_step1_same_race=True)
     result = check_jockey_change(horse, _race(), {})
     assert result.score == -1.0
+    # BET-6: 相性データでも好材料がない乗り替わりマイナスは、既存データで判断可能な明確に
+    # 不利なケースとしてpassed=Falseとする。
+    assert result.passed is False
 
 
 def test_jockey_change_step1_overridden_by_affinity():
@@ -571,3 +599,144 @@ def test_jockey_intent_no_bonus_when_not_specialist():
     )
     result = check_jockey_intent(horse, _race(), {"course_winrate_bonus_pct": 20})
     assert result.score == 0.0
+
+
+# ── v2_f3_top ────────────────────────────────────────────────────────────
+
+
+def _past_with_f3(f3pct: float | None, rank: int = 3) -> PastRaceInfo:
+    return PastRaceInfo(
+        race_id="P1", date="2026-05-01", rank=rank, distance=1600, surface="ダート",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], grade_code=None,
+        f3_time_rank_pct=f3pct,
+    )
+
+
+def test_v2_f3_top_passes_when_pct_within_threshold():
+    horse = _horse(past_races=[_past_with_f3(0.20)])
+    result = check_v2_f3_top(horse, _race(), {})
+    assert result.passed is True
+    assert result.score > 0
+
+
+def test_v2_f3_top_fails_when_pct_above_threshold():
+    horse = _horse(past_races=[_past_with_f3(0.60)])
+    result = check_v2_f3_top(horse, _race(), {})
+    assert result.passed is False
+    assert result.score == 0.0
+
+
+def test_v2_f3_top_neutral_when_no_data():
+    horse = _horse(past_races=[_past_with_f3(None)])
+    result = check_v2_f3_top(horse, _race(), {})
+    assert result.passed is None
+
+    horse_no_past = _horse(past_races=[])
+    result2 = check_v2_f3_top(horse_no_past, _race(), {})
+    assert result2.passed is None
+
+
+def test_v2_f3_top_boundary_at_threshold():
+    # 0.33 以下 → True
+    horse = _horse(past_races=[_past_with_f3(0.33)])
+    result = check_v2_f3_top(horse, _race(), {"top_pct": 0.33})
+    assert result.passed is True
+
+    # 0.34 は境界超え → False
+    horse2 = _horse(past_races=[_past_with_f3(0.34)])
+    result2 = check_v2_f3_top(horse2, _race(), {"top_pct": 0.33})
+    assert result2.passed is False
+
+
+# ── v2_hill_fit ───────────────────────────────────────────────────────────
+
+
+def _past_at(place_code: str, rank: int = 1) -> PastRaceInfo:
+    return PastRaceInfo(
+        race_id="P1", date="2026-05-01", rank=rank, distance=1800, surface="ダート",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code=place_code,
+    )
+
+
+def test_v2_hill_fit_passes_when_hill_good_run_at_hill_venue():
+    # 今回: 東京(05)=坂あり / 前走: 中山(06)=坂あり 1着
+    horse = _horse(past_races=[_past_at("06", rank=1)])
+    race = _race(place_code="05")
+    result = check_v2_hill_fit(horse, race, {})
+    assert result.passed is True
+
+
+def test_v2_hill_fit_fails_when_hill_bad_run_at_hill_venue():
+    # 今回: 東京(05)=坂あり / 前走: 中山(06)=坂あり 5着
+    horse = _horse(past_races=[_past_at("06", rank=5)])
+    race = _race(place_code="05")
+    result = check_v2_hill_fit(horse, race, {})
+    assert result.passed is False
+
+
+def test_v2_hill_fit_neutral_when_no_hill_experience():
+    # 今回: 東京(05)=坂あり / 前走: 新潟(04)=坂なし
+    horse = _horse(past_races=[_past_at("04", rank=1)])
+    race = _race(place_code="05")
+    result = check_v2_hill_fit(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_hill_fit_neutral_when_past_place_code_missing():
+    past = PastRaceInfo(
+        race_id="P1", date="2026-05-01", rank=1, distance=1800, surface="ダート",
+        head_count=10, race_name="前走", class_score=None, time_score=None,
+        member_level_score=None, opponents_next_races=[], place_code=None,
+    )
+    horse = _horse(past_races=[past])
+    result = check_v2_hill_fit(horse, _race(place_code="05"), {})
+    assert result.passed is None
+
+
+def test_v2_hill_fit_flat_venue_good_run_at_flat():
+    # 今回: 新潟(04)=坂なし / 前走: 小倉(10)=坂なし 2着
+    horse = _horse(past_races=[_past_at("10", rank=2)])
+    race = _race(place_code="04")
+    result = check_v2_hill_fit(horse, race, {})
+    assert result.passed is True
+
+
+# ── v2_sire_venue ─────────────────────────────────────────────────────────
+
+
+def test_v2_sire_venue_passes_when_venue_rate_above_overall():
+    horse = _horse(sire_venue_top3={"overall": 0.30, "05": 0.42})
+    race = _race(place_code="05")
+    result = check_v2_sire_venue(horse, race, {})
+    assert result.passed is True
+    assert result.score > 0
+
+
+def test_v2_sire_venue_fails_when_venue_rate_below_overall():
+    horse = _horse(sire_venue_top3={"overall": 0.35, "05": 0.28})
+    race = _race(place_code="05")
+    result = check_v2_sire_venue(horse, race, {})
+    assert result.passed is False
+
+
+def test_v2_sire_venue_neutral_when_no_data():
+    horse = _horse(sire_venue_top3=None)
+    result = check_v2_sire_venue(horse, _race(place_code="05"), {})
+    assert result.passed is None
+
+
+def test_v2_sire_venue_neutral_when_venue_count_too_low():
+    # place_code "05" が辞書にない = count < 10 でフィルタ済み → None
+    horse = _horse(sire_venue_top3={"overall": 0.30})
+    race = _race(place_code="05")
+    result = check_v2_sire_venue(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_sire_venue_neutral_when_place_code_missing():
+    horse = _horse(sire_venue_top3={"overall": 0.30, "05": 0.40})
+    race = _race(place_code=None)
+    result = check_v2_sire_venue(horse, race, {})
+    assert result.passed is None

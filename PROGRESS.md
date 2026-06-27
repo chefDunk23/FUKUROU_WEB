@@ -5,6 +5,7 @@ BET-3: 完了
 BET-4: 完了
 BET-5: 完了（条件パターン探索含む、honmei_v5がホールドアウト検証通過）
 BET-6: 完了（条件意味論修正、weight_change/jockey_change/3値化対応）
+BET-7: 完了（2026-06-27）（馬場別条件追加 + バックテスト + 4-baba HTML生成）
 TR-0: 完了
 TR-1: 完了
 PHASE-1: 完了（2026-06-27）
@@ -15,6 +16,85 @@ P1-B: 完了（2026-06-27）
 P1-C: 完了（2026-06-27）
 P2-A: 完了（2026-06-27）
 P2-B: 完了（2026-06-27）
+P2-C: 完了（2026-06-27）
+
+---
+
+## 馬場別バックテスト不一致調査（2026-06-27）
+
+### 不一致の内容
+- Phase 2 S-1: 115頭 / 複勝67.0%
+- run_segment_baba_backtest.py S-1: 546R / 複勝19.8%
+
+### 原因1（最重要）: 集計単位が根本的に異なる
+
+**Phase 2 (`run_racecourse_search.py`)**: 条件クリアした「馬（頭数）」の複勝率
+- `_calc_stats` が条件ALLクリア馬を全部 `matched` に追加 → 1レースに複数頭入れる
+- n=115 は「115頭の条件クリア馬」
+
+**今回 (`run_backtest_range`)**: 1レース1本命の複勝率
+- `select_honmei` で1レースから1頭だけ選ぶ → n=546は546レース
+- 同じレースに複数頭が条件クリアしても1頭しかカウントされない
+
+→ **比較自体が不適切。異なる指標を測定していた。**
+
+### 原因2: 使用条件が全く異なる
+
+| | Phase 2 S-1 | honmei_v6 |
+|---|---|---|
+| hill_fit（坂あり好走歴） | ✅ | ❌ |
+| sire_venue（種牡馬会場適性） | ✅ | ❌ |
+| f3_top（上がり上位33%） | ✅ | ❌ |
+| v2_race_quality（前走レースレベル） | ❌ | ✅（必須） |
+| 実装基盤 | pandas ベクトル計算 | conditions_v2.py + engine.py |
+
+→ Phase 2 と honmei_v6 は別の条件セット。同じS-1セグメントでも比較不能。
+
+### 原因3: min_n フィルタ
+
+Phase 2は `min_n=50`（50頭以上クリアした高頻出パターンのみ表示）。
+今回はフィルタなしで全レース対象。
+
+### 結論
+
+「Phase 2 複勝67.0%」と「honmei_v6 複勝19.8%」は異なる指標であり、性能の乖離ではない。
+馬場別ランク判定の根拠は honmei_v6 ベースの数値（良: ROI82.3%, 稍重: 43.4%, 重: 27.7%）を使う。
+
+---
+
+## BET-7 馬場別条件 + バックテスト + 4-baba HTML完了（2026-06-27）
+
+### Step1: 3条件追加（tipster/conditions_v2.py）
+- `v2_baba_track_record`: 馬場別過去複勝率（PIT-safe: race_id[:8] < race_date_compact）
+- `v2_sire_baba_fit`: 種牡馬馬場適性（JVDL sire_feature_store.baba_{firm/yaya/omo/furyo}_top3_shift）
+- `v2_heavy_track_stamina`: 道悪スタミナ（重+不良のみ有効）
+- HorseContext に `baba_record / sire_id / sire_baba_top3` 追加（tipster/models.py）
+- engine.py に `_fetch_baba_supplement_batch()` 追加（一括PIT-safe取得）
+
+### Step2: 馬場別バックテスト（scripts/run_baba_backtest.py）
+| 馬場 | R数 | 複勝率 | ROI(単勝) |
+|---|---|---|---|
+| 全体 | 3261 | 21.8% | 67.5% |
+| 良  | 2534 | 22.4% | 74.4% |
+| 稍重 | 527 | 18.4% | 46.0% |
+| 重  | 165 | 24.9% | 33.3% |
+| 不良 | 35 | 14.3% | 49.7% |
+
+### Step3: ROI警告設計
+- 良: 変更なし（ROI 74.4%）
+- 稍重: ⚠️ ROI注意（46.0%）
+- 重: ⚠️⚠️ ROI低調（33.3%）
+- 不良: ⚠️ サンプル少（49.7%）
+
+### Step4: 4-baba HTML生成（generate_picks_report.py）
+- `honmei_v7.json` 採用（honmei_v6 + 3条件追加）
+- 各レースを4馬場で評価 → `baba_picks_map` 構築
+- 静的HTML: `.baba-section[data-baba]` × 4個生成（CSSで`display:none/block`切替）
+- `switchBaba()` JS: `.baba-section.active` トグル（推奨馬が馬場で変わる）
+- 全出走馬モード: `race.baba_picks[currentBaba]` 参照でピック強調
+- RACE_DATA JSON: `baba_picks` フィールド追加
+- `_BABA_ROI_WARNING` 警告を各馬場セクションに表示
+- pytest 647件 全件 PASS
 
 ---
 
@@ -50,6 +130,72 @@ P2-B: 完了（2026-06-27）
 - RaceDetailView.tsx: `fetchPublicRaceDetail` → `fetchRaceDetail`（認証付きエンドポイントに切替）
 - frontend/src/api/raceDetail.ts: 廃止済み `fetchPublicRaceDetail` 関数と関連型を削除（140行削減）
 - pytest 647件 全件 PASS
+
+---
+
+## P2-C 予想精度改善 + 累計的中率追跡システム（2026-06-27）
+
+### 作業内容
+
+#### 1. picks_report バグ修正（問題0〜3）
+- **問題0**: 全レース「中山」と表示 → `race_id[4:6]` が日付部の "06" を取得 → `race_id[8:10]` に修正
+- **問題1**: レース番号が常に "2" → `race_id[8:10]` (keibajo) を使用していた → `race_id[14:16]` に修正
+- **問題2**: `v2_weight_favor` で斤量変化なし（57.0→57.0）が✅パス → `diff < 0` のみTrue、それ以外False に修正
+- **問題3**: 条件データ欠損（surface/place_code/class_level全てNone）→ `_fetch_race_meta_v2()` で V2 DB から補完
+
+#### 2. 騎手データ補完（v2_jockey_positive ⚪→0件解消）
+- 根本原因: `engine._fetch_supplementary` が JVDL `race_entries`（旧テーブル、最大2026-06-14）を参照
+  - 当週データは JVDL `race_entries_v2` にあるが参照されない → `jockey_id = None`
+- 修正: `generate_picks_report.py` に `_fetch_jockey_entries()` 追加
+  - V2 DB `race_entries.jockey_cd` / `jockey_cd_before` から当週分を一括取得
+  - `_fetch_jockey_yr_wins()` で JVDL `race_entries_v2` の2026年勝利数を集計
+  - 117騎手コード / 127名年間勝利数データを適用
+- 効果: v2_jockey_positive ⚪ 0件（78 pass + 9 fail）
+
+#### 3. 過去走クラスレベル補完（v2_class_change ⚪ 74→52 -22件改善）
+- 根本原因: `engine._fetch_past_race_extra` が JVDL `races`（12桁ID, max 2026-06-14）参照
+  - 直近4週の過去走は JVDL `races_v2`（16桁ID）にのみ存在 → `jyoken_cd_3 = None` → `class_level = None`
+- 修正: `_fetch_past_class_levels()` を追加（JVDL `races_v2.kyoso_shubetsu` から補完）
+- フェーズ1（コンテキスト収集）→ フェーズ2（クラスレベル一括補完 208件）→ フェーズ3（評価）に再構造化
+
+#### 4. 累計的中率追跡システム
+- `scripts/update_results.py` 新規作成
+  - JV-Link同期後に実行 → JVDL `race_entries_v2` から着順取得
+  - `data/output/tipster/picks_this_week.json` に actual_rank / placed を反映
+  - `data/output/tipster/picks_history.json` に週次記録を累積追加
+  - ランク別（S/B/anaba/anaba_pick/other）複勝率を集計・表示
+- `generate_picks_report.py` に picks_this_week.json 自動保存を追加
+
+### 使い方
+```bash
+# 週末ピック生成（金曜or土曜朝）
+py -3 scripts/generate_picks_report.py
+
+# レース結果反映（全レース終了後 16:30以降）
+py -3 -m jvdl_client.sync_jvdata --dataspecs RACE
+py -3 scripts/update_results.py
+```
+
+### 現在の条件クリア率（2026-06-27 時点）
+| 条件 | ✅ | ❌ | ⚪ | 備考 |
+|---|---|---|---|---|
+| 騎手（継続/有力） | 78 | 9 | 0 | 修正済み |
+| 前走好走歴 | 68 | 0 | 19 | 正常 |
+| 距離適性 | 73 | 0 | 14 | 正常 |
+| 適切間隔 | 59 | 3 | 25 | 正常 |
+| 同馬場好走歴 | 43 | 2 | 42 | 正常 |
+| 斤量軽減 | 28 | 44 | 15 | 正常 |
+| クラス変化 | 35 | 0 | 52 | 改善（74→52）|
+| 前走レースレベル | 7 | 0 | 65 | **構造的制約**: 対戦相手次走データ待ち（2〜3週で自然解消）|
+
+### 今週の一押し5頭（土曜分3頭 + 日曜分2頭）
+| ランク | 馬名 | レース | クリア数 |
+|---|---|---|---|
+| 一押し(S) | アオイミズホ | 福島R2(土) | 4 |
+| 一押し(S) | ショウナンパトス | 福島R3(土) | 4 |
+| 一押し(S) | コックピットサイト | 福島R10(土)いわき特別 | 6 |
+| 一押し(S) | ウインビギニング | 福島R2(日) | 4 |
+| 一押し(S) | オリーブグリーン | 福島R10(日)鶴ヶ城S | 5 |
 
 ---
 
@@ -865,3 +1011,87 @@ py -3 scripts/run_pit_comparison.py --from-date 2026-01-01 --to-date 2026-06-27
 # 最終検証（安定性 + アブレーション）
 py -3 scripts/run_final_validation.py --from-date 2025-06-27 --to-date 2026-06-27
 ```
+
+---
+
+## picks_report バグ修正（2026-06-27）
+
+### 修正内容
+
+**問題0/1: 競馬場名・レース番号の誤表示**
+- 原因: race_id は16桁（YYYYMMDD[8:10]=keibajo [14:16]=R番）だが、`race_id[4:6]`（=日付の "06"）を場コード、`race_id[8:10]`（=keibajo "02"）をレース番号として使っていた
+- 修正: `place_code = race_id[8:10]`、`race_num = int(race_id[14:16])`
+- 影響: 全レースが「中山 R2」→「函館 R1」等と正しく表示されるようになった
+
+**問題2: 斤量条件のロジックバグ（conditions_v2.py）**
+- 原因: `v2_weight_favor` の fallthrough case（差 ±0.5kg未満）が passed=True を返していた。変化なし（0kg差）も True になっていた
+- 修正: diff < 0（実際に軽減）→ True、diff >= 0（変化なし/増量）→ False に変更
+- ファイル: `tipster/conditions_v2.py` `check_v2_weight_favor()`
+
+**問題3: 条件データの大量欠損（根本原因と対策）**
+
+根本原因（優先度順）:
+
+| 条件 | ⚪の原因 | 対策 |
+|------|---------|------|
+| v2_surface_history | `race_ctx.surface` が None（JVDL races テーブルに当週データなし） | generate_picks_report.py で v2 DB の track_code から補完 → 修正済み |
+| v2_class_change | `race_ctx.class_level` が None（payload に class_label なし） | v2 DB の race_syubetsu_code からマッピングして補完 → 修正済み |
+| v2_jockey_positive | `horse.jockey_id` が None（JVDL race_entries に当週エントリなし） | JVDL は 2026-06-14 まで。当週分は V2 DB の race_entries にあるが jockey_cd（生コード）で jockeys テーブルとの結合が必要 → 未実装（次回対応） |
+| v2_past_margin | `_own_margin_sec()` が 0 件（自馬の着差が opponents_next_races に含まれないケース） | race_detail_cache 生成ロジックの問題。当面データなし扱い |
+| v2_race_quality | 前走の上位馬が次走をまだ走っていない（直近2週間以内の前走） | 設計上の制約。当面データなし扱い |
+
+修正後の改善:
+- `今回馬場データなし` （surface=None）: 多数 → 3件（障害レースのみ）に減少
+- `class_level` None: 多数 → 未勝利/1勝/2勝クラス判定できるようになった
+- ⚪ の多くは jockey_id 欠損（JVDL 未同期）と past_margin データ不足が残存
+
+### 次回対応候補
+
+1. **JVDL 週次同期の自動化**: 毎週月曜に JVDL を最新化 → jockey_id が当週分も取得可能になる
+2. **V2 DB の jockey_cd → jockey_id マッピング**: `jockeys` テーブルの `jvdl_id` 列で結合できれば engine.py の `_fetch_supplementary` を V2 DB 対応に拡張可能
+
+---
+
+## 問題4: 馬場状態の考慮（設計案、実装は次回）
+
+### 調査結果
+
+**当日の馬場状態取得タイミング**
+
+JV-VAN（JV-Link）の馬場状態データは以下のタイミングで取得できる:
+
+| データ種別 | 取得タイミング | 備考 |
+|-----------|-------------|------|
+| 天候・馬場状態（レース当日確定値） | **レース後**（成績データ収録時） | JVDL の `races.track_condition` に収録される |
+| 当日発表の馬場状態 | **競馬開催前**（通常 8〜9 時頃）、JRA 公式サイト/オッズ配信に掲載 | JV-VAN の速報系データ（TK: 天候馬場情報）で取得可能 |
+| 前日天気予報 | レース前日 | 天気予報 API（気象庁、OpenWeatherMap 等）で取得可能 |
+
+**結論**: JV-VAN の TK（天候馬場情報）レコードをリアルタイムで取得すれば、レース前（同日朝）に馬場状態を取得できる。ただし現行パイプラインは TK レコードを収録していない。
+
+### 設計案（馬場状態条件の追加）
+
+**案1: TK レコード収録 + 条件追加**
+
+```
+1. JV-Link TK レコードをリアルタイム取得する定期ジョブを追加（当日 8:00 JST）
+2. races テーブルに track_condition_today カラムを追加（良=1/稍重=2/重=3/不良=4）
+3. `v2_track_condition_skill` 条件（conditions_v2.py に実装済み、currently passed=None）を有効化:
+   - 良馬場専用パターン（S-1等）は track_condition_today=1 のときのみ一押し推奨
+   - 稍重以上ではパターンの複勝率が下がる可能性があるため二押し格下げ or 推奨なし
+4. conditions_v2.py の past_races に track_condition を追加（PastRaceInfo に track_condition フィールド追加）
+```
+
+**案2: 天気予報 API 活用（代替案）**
+
+JV-VAN 連携が難しい場合:
+- 気象庁 API（`https://www.jma.go.jp/bosai/forecast/`）または OpenWeatherMap で競馬場所在地の当日予報を取得
+- 降水確率 > 50% の場合は「馬場悪化リスクあり」として確信度を下げる（一押し→二押し格下げ）
+- 限界: 実際の馬場状態（良/重等）は推定にとどまる
+
+**採用推奨**: 案1（TK レコード活用）。正確なデータが取れる。
+実装優先度: 低〜中（今週の雨で重要性が確認されたが、他の条件改善が先）。
+
+### 今週（2026-06-27）の教訓
+
+全国的に雨で馬場が悪化（重〜不良）。良馬場前提で設計された Phase 2 パターンは
+予定より複勝率が下がる可能性がある。ただし今回は実績が取れていないため検証は次週以降。

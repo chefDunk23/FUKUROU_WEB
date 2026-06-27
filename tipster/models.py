@@ -53,8 +53,14 @@ class Strategy(BaseModel):
 
 
 class ConditionResult(BaseModel):
-    """各条件関数 (conditions.py) の戻り値。"""
-    passed: bool
+    """各条件関数 (conditions.py) の戻り値。
+
+    passed は3値（BET-6, 2026-06-26）:
+      True  = 基準を満たした（クリア）
+      False = 基準を満たさなかった（不クリア）
+      None  = 判定不能（データ不足等による保留。clear_count に加算されない中立状態）
+    """
+    passed: bool | None
     score: float = 0.0
     reason: str = ""
     detail: dict[str, Any] | None = None
@@ -92,6 +98,7 @@ class PastRaceInfo:
     place_code: str | None = None   # races.place_code（course_fitness/海外帰り判定用）
     jyoken_cd_3: str | None = None  # races.jyoken_cd_3（class_direction の細分化用）
     class_level: int | None = None  # 新馬=1〜G1=10 の序列（conditions._class_level_from_codes）
+    f3_time_rank_pct: float | None = None  # 上がり3Fのレース内順位パーセンタイル（0=最速, 1=最遅）
 
 
 @dataclass
@@ -127,6 +134,12 @@ class HorseContext:
     jockey_venue_win_rate: float | None = None      # 今回の競馬場での騎手勝率 (jockey_feature_store)
     jockey_overall_win_rate: float | None = None    # 騎手の全体勝率（コース巧者判定の基準値）
     overseas_interim_place_code: str | None = None  # 前走(JRA)と今回の間に地方/海外出走があればそのplace_code
+    # ── 馬場別実績（BET-7 馬場条件）─────────────────────────────────────────
+    baba_record: dict[str, tuple[int, int]] | None = None  # {baba_label: (runs, placed)} PIT-safe
+    sire_id: str | None = None                             # horse_blood_tree.sire_id
+    sire_baba_top3: dict[str, float] | None = None         # {baba: top3_rate_shift} sire_feature_store PIT
+    # ── 会場適性（Phase 2 S-1条件: v2_sire_venue）────────────────────────────
+    sire_venue_top3: dict[str, float] | None = None        # {place_code: top3_rate, "overall": rate} count≥10のみ
 
 
 @dataclass
@@ -166,7 +179,8 @@ class HorseEvaluation(BaseModel):
 
     @property
     def clear_count(self) -> int:
-        return sum(1 for c in self.conditions if c.passed)
+        """passed=True の条件数。passed=None（判定不能・保留）は加算しない（BET-6）。"""
+        return sum(1 for c in self.conditions if c.passed is True)
 
     @property
     def total_score(self) -> float:

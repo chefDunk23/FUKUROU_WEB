@@ -118,7 +118,7 @@ def check_race_level(horse: HorseContext, race_ctx: RaceContext, params: dict) -
     thresholds = params.get("thresholds", _DEFAULT_RACE_LEVEL_THRESHOLDS)
 
     if not horse.past_races:
-        return ConditionResult(passed=True, score=0.0, reason="前走データなし(判定保留)")
+        return ConditionResult(passed=None, score=0.0, reason="前走データなし(判定保留)")
 
     attempts: list[dict] = []
     for prev in horse.past_races[:2]:
@@ -159,7 +159,7 @@ def check_race_level(horse: HorseContext, race_ctx: RaceContext, params: dict) -
             )
 
     if not attempts:
-        return ConditionResult(passed=True, score=0.0, reason="次走実績馬数不足のため判定保留")
+        return ConditionResult(passed=None, score=0.0, reason="次走実績馬数不足のため判定保留")
 
     best = max(attempts, key=lambda a: a["rate"])
     return ConditionResult(
@@ -182,12 +182,12 @@ def check_race_level(horse: HorseContext, race_ctx: RaceContext, params: dict) -
 def check_time_gap(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
     """前走の勝ち馬との着差（秒）が距離区分ごとの基準以内かを判定する。"""
     if not horse.past_races:
-        return ConditionResult(passed=True, score=0.0, reason="前走データなし(判定保留)")
+        return ConditionResult(passed=None, score=0.0, reason="前走データなし(判定保留)")
 
     prev = horse.past_races[0]
     own = next((o for o in prev.opponents_next_races if o.horse_id == horse.horse_id), None)
     if own is None or own.this_margin is None:
-        return ConditionResult(passed=True, score=0.0, reason="前走着差データなし(判定保留)")
+        return ConditionResult(passed=None, score=0.0, reason="前走着差データなし(判定保留)")
 
     margin = own.this_margin
     sprint_threshold_m = params.get("sprint_threshold_m", 1400)
@@ -221,7 +221,7 @@ def check_track_bias_fit(horse: HorseContext, race_ctx: RaceContext, params: dic
     pos = horse.position_tendency
     front_bias = race_ctx.front_bias_pit
     if pos is None or front_bias is None:
-        return ConditionResult(passed=True, score=0.0, reason="脚質/バイアスデータ不足(判定保留)")
+        return ConditionResult(passed=None, score=0.0, reason="脚質/バイアスデータ不足(判定保留)")
 
     mismatch = False
     if front_bias > bias_threshold and pos >= 0.6:
@@ -253,10 +253,19 @@ def check_track_bias_fit(horse: HorseContext, race_ctx: RaceContext, params: dic
 
 @register_condition("weight_change")
 def check_weight_change(horse: HorseContext, race_ctx: RaceContext, params: dict) -> ConditionResult:
-    """前走と今回の斤量(burden_weight)を比較する。減量騎手の影響は apprentice_bonus_disabled で無効化可能。"""
+    """前走と今回の斤量(burden_weight)を比較する。減量騎手の影響は apprentice_bonus_disabled で無効化可能。
+
+    BET-6(2026-06-26): false_threshold_kg 以上の斤量増加は明確に不利な変化としてpassed=Falseとする
+    （それ未満の増加は従来通りscoreでの減点のみで、passedはTrueのまま）。
+    デフォルト値3.0kgは、2025-06-01以降の実データ（race_entries.weight、馬ごとの前走比差分、
+    対象47,915件・増加した馬10,992件）の分布を根拠とする: +3kg以上の増加は全体の5.7%
+    （増加した馬の中でも上位24.8%）に過ぎず、+2kg以下（全体の10.2%、増加馬の44.5%）の方が
+    はるかに一般的な変動である。+3kg以上を「明確に稀かつ不利な変化」の閾値とした。
+    """
     increase_penalty = params.get("increase_penalty", -1)
     decrease_bonus = params.get("decrease_bonus", 1)
     apprentice_bonus_disabled = params.get("apprentice_bonus_disabled", True)
+    false_threshold_kg = params.get("false_threshold_kg", 3.0)
 
     if horse.burden_weight is None or horse.prev_burden_weight is None:
         return ConditionResult(passed=True, score=0.0, reason="斤量データ不足(判定保留)")
@@ -266,7 +275,12 @@ def check_weight_change(horse: HorseContext, race_ctx: RaceContext, params: dict
         return ConditionResult(passed=True, score=0.0, reason="斤量変化なし")
 
     if diff > 0:
-        return ConditionResult(passed=True, score=increase_penalty, reason=f"斤量増(+{diff:.1f}kg)")
+        is_significant_increase = diff >= false_threshold_kg
+        return ConditionResult(
+            passed=not is_significant_increase,
+            score=increase_penalty,
+            reason=f"斤量増(+{diff:.1f}kg)" + ("(基準+{:.1f}kg以上で不利)".format(false_threshold_kg) if is_significant_increase else ""),
+        )
 
     is_new_apprentice = (
         apprentice_bonus_disabled
@@ -312,7 +326,10 @@ def check_jockey_change(horse: HorseContext, race_ctx: RaceContext, params: dict
                 reason="前走騎手は他馬へ乗り替わりだが新騎手×厩舎相性良好のため加点",
                 detail={"affinity": affinity},
             )
-        return ConditionResult(passed=True, score=-1.0, reason="前走騎手が同レースの他馬へ乗り替わり(マイナス)")
+        # BET-6(2026-06-26): 前走騎手が同レースの他馬へ乗り替わり、かつ新騎手×厩舎の相性データ
+        # でも好材料が見られない（good_affinity=False）= 既存データで判断可能な明確に不利な
+        # ケースとしてpassed=Falseとする（score計算は変更しない）。
+        return ConditionResult(passed=False, score=-1.0, reason="前走騎手が同レースの他馬へ乗り替わり(マイナス)")
 
     if horse.jockey_change_step2_other_venue:
         return ConditionResult(passed=True, score=0.0, reason="前走騎手は同日別会場へ騎乗(ノーカウント)")
