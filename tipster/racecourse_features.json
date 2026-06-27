@@ -1,0 +1,94 @@
+{
+  "_comment": "JRA全10場の物理特性。place_code をキーとする。内回り/外回りはDBで区別不可のため代表値を使用（新潟・京都・阪神は外回り直線距離を採用）。",
+  "01": {
+    "name": "札幌",
+    "turf_type": "western",
+    "straight_m": 266,
+    "has_hill": false,
+    "course_size": "small",
+    "turn": "right"
+  },
+  "02": {
+    "name": "函館",
+    "turf_type": "western",
+    "straight_m": 262,
+    "has_hill": false,
+    "course_size": "small",
+    "turn": "right"
+  },
+  "03": {
+    "name": "福島",
+    "turf_type": "japanese",
+    "straight_m": 292,
+    "has_hill": true,
+    "hill_height_m": 1.2,
+    "course_size": "small",
+    "turn": "right"
+  },
+  "04": {
+    "name": "新潟",
+    "turf_type": "japanese",
+    "straight_m": 659,
+    "has_hill": false,
+    "course_size": "large",
+    "turn": "left",
+    "notes": "外回り直線659m(日本最長)/内回り359m。DBでは区別不可のため外回り値を採用"
+  },
+  "05": {
+    "name": "東京",
+    "turf_type": "japanese",
+    "straight_m": 526,
+    "has_hill": true,
+    "hill_height_m": 2.0,
+    "course_size": "large",
+    "turn": "left"
+  },
+  "06": {
+    "name": "中山",
+    "turf_type": "japanese",
+    "straight_m": 310,
+    "has_hill": true,
+    "hill_height_m": 2.2,
+    "course_size": "small",
+    "turn": "right",
+    "notes": "JRA最大高低差5.3m（スタートからゴールまで）"
+  },
+  "07": {
+    "name": "中京",
+    "turf_type": "japanese",
+    "straight_m": 413,
+    "has_hill": true,
+    "hill_height_m": 2.0,
+    "course_size": "medium",
+    "turn": "left",
+    "notes": "高低差3.5m、直線途中に急坂"
+  },
+  "08": {
+    "name": "京都",
+    "turf_type": "japanese",
+    "straight_m": 404,
+    "has_hill": false,
+    "course_size": "large",
+    "turn": "right",
+    "notes": "外回り直線404m/内回り328m。3-4角下り坂→平坦直線。直線自体に坂なし"
+  },
+  "09": {
+    "name": "阪神",
+    "turf_type": "japanese",
+    "straight_m": 474,
+    "has_hill": true,
+    "hill_height_m": 1.8,
+    "course_size": "large",
+    "turn": "right",
+    "notes": "外回り直線473.6m/内回り356.5m。外直線で急坂"
+  },
+  "10": {
+    "name": "小倉",
+    "turf_type": "japanese",
+    "straight_m": 293,
+    "has_hill": false,
+    "course_size": "small",
+    "turn": "right",
+    "notes": "平坦小回り。開催後半は外差し有利"
+  }
+}
