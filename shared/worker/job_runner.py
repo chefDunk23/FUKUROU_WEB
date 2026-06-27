@@ -66,6 +66,9 @@ _SCHEDULES = [
     # 日曜 08:30 — 当日レース再計算をジョブキューに投入
     {"kind": "enqueue", "day_of_week": "sun",  "hour": 8,  "minute": 30,
      "job_type": "recompute_predictions", "params": {"mode": "today"}},
+    # 月曜 07:00 — 先週末の実績を tipster_results に取り込む
+    {"kind": "enqueue", "day_of_week": "mon",  "hour": 7,  "minute": 0,
+     "job_type": "update_tipster_results", "params": {}},
 ]
 
 # ── ジョブハンドラ登録 ─────────────────────────────────────────────────────────
@@ -698,6 +701,135 @@ def _handle_run_tipster_evaluation(params: dict, ctx: JobContext) -> None:
     ctx.report_progress(100)
     ctx.append_log(
         f"[run_tipster_evaluation] 完了: 成功={len(evaluations)} / 失敗={failed} / 出力={summary_path}"
+    )
+
+
+@register("update_tipster_results")
+def _handle_update_tipster_results(params: dict, ctx: JobContext) -> None:
+    """直近の確定レースに tipster 戦略を適用し、実績を tipster_results テーブルに UPSERT する。
+
+    params:
+        from_date:   str | None — "YYYY-MM-DD"。省略時は 14日前
+        to_date:     str | None — "YYYY-MM-DD"。省略時は昨日
+        strategy:    str | None — 戦略名（デフォルト "honmei_v6"）
+    """
+    import datetime as _dt
+    import json as _json
+
+    import psycopg2 as _pg2
+    import psycopg2.extras as _extras
+    from sqlalchemy import text as _text
+
+    from tipster.engine import evaluate_race_context, fetch_race_context, load_strategy
+    from shared.config import DB_V2
+
+    strategy_name: str = params.get("strategy", "honmei_v6")
+    anaba_name:    str = params.get("anaba_strategy", "anaba_v5")
+
+    to_dt = _dt.date.fromisoformat(params["to_date"]) if params.get("to_date") else \
+            _dt.date.today() - _dt.timedelta(days=1)
+    from_dt = _dt.date.fromisoformat(params["from_date"]) if params.get("from_date") else \
+              to_dt - _dt.timedelta(days=14)
+
+    ctx.append_log(f"[update_tipster_results] strategy={strategy_name} {from_dt}〜{to_dt}")
+    ctx.report_progress(5)
+
+    # 確定済みレース（kakutei_chakujun が存在する）を取得
+    from ml.db import engine as _engine
+    with _engine.connect() as _conn:
+        rows = _conn.execute(_text("""
+            SELECT DISTINCT r.id AS race_id, r.date AS race_date
+            FROM   races r
+            JOIN   race_entries e ON e.race_id = r.id
+            WHERE  r.date BETWEEN :start AND :end
+              AND  e.confirmed_rank IS NOT NULL AND e.confirmed_rank > 0
+              AND  r.place_code <= '10'
+              AND  r.course_type IN ('芝', 'ダート')
+            ORDER  BY r.date, r.id
+        """), {"start": from_dt, "end": to_dt}).fetchall()
+
+    race_ids = [(r[0], r[1]) for r in rows]
+    ctx.append_log(f"  対象レース: {len(race_ids)} 件")
+
+    _STRATEGIES_DIR = Path(__file__).parent.parent.parent / "tipster/strategies"
+
+    try:
+        honmei_strat = load_strategy(_STRATEGIES_DIR / f"{strategy_name}.json")
+        anaba_strat  = load_strategy(_STRATEGIES_DIR / f"{anaba_name}.json")
+    except Exception as e:
+        raise RuntimeError(f"戦略ロード失敗: {e}") from e
+
+    rank_labels = ["一押し", "二押し", "三押し"]
+    upsert_rows: list[tuple] = []
+    failed = 0
+
+    for i, (race_id, race_date) in enumerate(race_ids):
+        try:
+            race_ctx    = fetch_race_context(race_id)
+            honmei_eval = evaluate_race_context(race_ctx, honmei_strat)
+            anaba_eval  = evaluate_race_context(race_ctx, anaba_strat)
+        except Exception as e:
+            ctx.append_log(f"  skip race_id={race_id}: {e}")
+            failed += 1
+            ctx.report_progress(5 + int(85 * (i + 1) / max(len(race_ids), 1)))
+            continue
+
+        honmei_ids: set[str] = set()
+        picks: list[tuple[str, str]] = []  # (horse_id, rank_label)
+
+        for j, cand in enumerate(honmei_eval.candidates[:3]):
+            picks.append((cand.horse_id, rank_labels[j]))
+            honmei_ids.add(cand.horse_id)
+
+        for cand in anaba_eval.candidates:
+            if cand.horse_id not in honmei_ids:
+                picks.append((cand.horse_id, "穴推奨"))
+                break
+
+        # 実際の着順・オッズを取得
+        with _engine.connect() as _conn:
+            result_rows = _conn.execute(_text("""
+                SELECT horse_id, confirmed_rank, tan_odds
+                FROM   race_entries
+                WHERE  race_id = :rid
+            """), {"rid": race_id}).fetchall()
+        result_map = {r[0]: (r[1], r[2]) for r in result_rows}
+
+        for horse_id, label in picks:
+            final_rank, tan_odds = result_map.get(horse_id, (None, None))
+            is_win    = (final_rank == 1)    if final_rank is not None else None
+            is_placed = (final_rank <= 3)    if final_rank is not None else None
+            upsert_rows.append((
+                race_id, horse_id, race_date, strategy_name, label,
+                is_placed, is_win, final_rank, tan_odds,
+            ))
+
+        ctx.report_progress(5 + int(85 * (i + 1) / max(len(race_ids), 1)))
+
+    # UPSERT
+    if upsert_rows:
+        db_conn = _pg2.connect(**DB_V2)
+        try:
+            _extras.execute_values(db_conn.cursor(), """
+                INSERT INTO tipster_results
+                    (race_id, horse_id, race_date, strategy, rank_label,
+                     is_placed, is_win, final_rank, tan_odds)
+                VALUES %s
+                ON CONFLICT (race_id, horse_id, strategy) DO UPDATE SET
+                    rank_label  = EXCLUDED.rank_label,
+                    is_placed   = EXCLUDED.is_placed,
+                    is_win      = EXCLUDED.is_win,
+                    final_rank  = EXCLUDED.final_rank,
+                    tan_odds    = EXCLUDED.tan_odds,
+                    recorded_at = now()
+            """, upsert_rows, page_size=200)
+            db_conn.commit()
+        finally:
+            db_conn.close()
+
+    ctx.report_progress(100)
+    ctx.append_log(
+        f"[update_tipster_results] 完了: UPSERT={len(upsert_rows)} 行 / 失敗レース={failed}"
     )
 
 

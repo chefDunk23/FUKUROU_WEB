@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_v2.deps import verify_api_key
-from api_v2.routers import prediction, public_races, race_level, races
+from api_v2.routers import prediction, public_races, race_level, races, tipster
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -83,6 +83,7 @@ _auth = [Depends(verify_api_key)]
 app.include_router(races.router,         dependencies=_auth)
 app.include_router(race_level.router,    dependencies=_auth)
 app.include_router(prediction.router,    dependencies=_auth)
+app.include_router(tipster.router,       dependencies=_auth)
 # 公開エンドポイント: 認証不要（/api/v2/public/*）
 app.include_router(public_races.router)
 # admin 系は api_admin (port 8003) に移設済み — docs/deploy.md 参照

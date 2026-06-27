@@ -1,11 +1,12 @@
 import type { MouseEvent } from 'react'
 
 // ── 型 / 定数 ─────────────────────────────────────────────────────────────────
-export type AppRoute = 'home' | 'races' | 'analysis' | 'datalab' | 'myai'
+export type AppRoute = 'home' | 'races' | 'analysis' | 'datalab' | 'myai' | 'week'
 
 const NAV_ITEMS: { id: AppRoute; label: string; href: string }[] = [
   { id: 'home',     label: 'ホーム',     href: '/' },
   { id: 'races',    label: 'レース一覧', href: '/races' },
+  { id: 'week',     label: '今週',       href: '/week' },
   { id: 'analysis', label: '血統分析',   href: '/analysis' },
   { id: 'datalab',  label: '週次概況',   href: '/datalab' },
   { id: 'myai',     label: '戦略管理',   href: '/myai' },

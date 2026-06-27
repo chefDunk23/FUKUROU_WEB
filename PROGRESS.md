@@ -10,6 +10,11 @@ TR-1: 完了
 PHASE-1: 完了（2026-06-27）
 PHASE-B-1: 完了（2026-06-27）
 PHASE-B-2: 完了（2026-06-27）
+P1-A: 完了（2026-06-27）
+P1-B: 完了（2026-06-27）
+P1-C: 完了（2026-06-27）
+P2-A: 完了（2026-06-27）
+P2-B: 完了（2026-06-27）
 
 ---
 
@@ -44,6 +49,68 @@ PHASE-B-2: 完了（2026-06-27）
 - GlobalHeader.tsx: ログインボタン削除（個人利用なので不要）
 - RaceDetailView.tsx: `fetchPublicRaceDetail` → `fetchRaceDetail`（認証付きエンドポイントに切替）
 - frontend/src/api/raceDetail.ts: 廃止済み `fetchPublicRaceDetail` 関数と関連型を削除（140行削減）
+- pytest 647件 全件 PASS
+
+---
+
+## P1-A 週末予想レポート完了（2026-06-27）
+
+### 作業内容
+- `scripts/generate_picks_report.py` 新規作成
+- honmei_v6 + anaba_v5 戦略で週末レースを評価
+- 一押し/二押し/三押し/穴推奨のランク付きHTML出力: `data/output/tipster/picks_report.html`
+- 各馬の条件クリア状況・reason・なぜ効くかの解説を含む
+- pytest 647件 全件 PASS
+
+---
+
+## P1-B 実績蓄積完了（2026-06-27）
+
+### 作業内容
+- `scripts/migrate_add_tipster_results.sql` 新規作成（要手動実行: `psql -d fukurou_keiba_v2 -f scripts/migrate_add_tipster_results.sql`）
+- `api_v2/routers/tipster.py` 新規作成
+  - `GET /api/v2/tipster/recent-results` — 直近の予測実績一覧
+  - `GET /api/v2/tipster/cumulative-stats` — ランク別累計複勝率
+- `api_v2/main.py` に tipster router 追加
+- `shared/worker/job_runner.py` に `update_tipster_results` ジョブ追加
+  - 月曜 07:00 JST に自動スケジュール登録（先週末の実績を取り込む）
+- pytest 647件 全件 PASS
+
+---
+
+## P1-C 週次レース全体像ビュー完了（2026-06-27）
+
+### 作業内容
+- `GET /api/v2/tipster/weekly-overview` 実装済み（tipster.py 内）
+- `frontend/src/views/WeeklyOverviewView.tsx` 新規作成
+  - 今週の全レース一覧（日付別グルーピング）
+  - 推奨馬マーク（ランクラベル付き）
+  - 荒れ指数（荒れそう/やや荒れ/堅め）
+- `frontend/src/App.tsx` に `/week` ルート追加
+- `frontend/src/components/GlobalHeader.tsx` に「今週」ナビ追加
+- pytest 647件 全件 PASS
+
+---
+
+## P2-A SNSログ出力完了（2026-06-27）
+
+### 作業内容
+- `POST /api/v2/tipster/log` — 予想記録を `data/output/tipster/sns_log/YYYY-MM-DD.json` に書き出す
+- `GET /api/v2/tipster/log?log_date=YYYY-MM-DD` — ログ一覧を返す
+- ファイルストレージ設計: 条件変更後も過去記録は保持される
+- pytest 647件 全件 PASS
+
+---
+
+## P2-B DB状態管理ビュー完了（2026-06-27）
+
+### 作業内容
+- `frontend/src/views/AdminView.tsx` 新規作成
+  - `GET http://localhost:8003/health/dashboard` でDB状態表示
+  - `GET http://localhost:8003/jobs` でジョブ一覧表示
+  - `POST http://localhost:8003/jobs/{id}/cancel` でジョブキャンセル
+- `frontend/src/App.tsx` に `/admin` ルート追加（GlobalHeader には非表示）
+- admin_frontend (5174) は既に廃止済みのため、メインFEから直接 api_admin (8003) を呼ぶ設計
 - pytest 647件 全件 PASS
 
 ---

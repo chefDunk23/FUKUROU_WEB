@@ -5,13 +5,15 @@ import RaceLevelView    from './views/race/RaceLevelView'
 import UserHomeView      from './views/UserHomeView'
 import RaceListView      from './views/race/RaceListView'
 import RaceDetailView    from './views/race/RaceDetailView'
-import AnalysisPage      from './views/analysis/AnalysisPage'
+import AnalysisPage          from './views/analysis/AnalysisPage'
+import WeeklyOverviewView    from './views/WeeklyOverviewView'
+import AdminView             from './views/AdminView'
 
 import { GlobalHeader }  from './components/GlobalHeader'
 import type { AppRoute } from './components/GlobalHeader'
 
 // ── ルーティング ──────────────────────────────────────────────────────────────
-type Route = AppRoute | 'race' | 'race-level'
+type Route = AppRoute | 'race' | 'race-level' | 'week' | 'admin'
 
 function getRoute(): Route {
   const p = window.location.pathname
@@ -21,6 +23,8 @@ function getRoute(): Route {
   if (p.startsWith('/analysis'))     return 'analysis'
   if (p.startsWith('/datalab'))      return 'datalab'
   if (p.startsWith('/myai'))         return 'myai'
+  if (p.startsWith('/week'))         return 'week'
+  if (p.startsWith('/admin'))        return 'admin'
   return 'home'
 }
 
@@ -75,6 +79,8 @@ export default function App() {
       {route === 'race'       && <RaceDetailView raceId={raceId ?? undefined} onBack={() => navigate('/')} />}
       {route === 'race-level' && <RaceLevelView raceId={raceLevelId ?? undefined} onBack={() => window.history.back()} />}
       {route === 'analysis'   && <AnalysisPage />}
+      {route === 'week'       && <WeeklyOverviewView />}
+      {route === 'admin'      && <AdminView />}
       {route === 'datalab'    && <ComingSoonView title="週次概況" />}
       {route === 'myai'       && <ComingSoonView title="戦略管理" />}
     </div>
