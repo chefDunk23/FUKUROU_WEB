@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api_v2.routers.races import get_weekend_races
+import tipster.conditions_v2  # noqa: F401 — v2_* 条件を CONDITION_REGISTRY に登録するため先にimport
 from tipster.engine import evaluate_race_context, evaluate_race, fetch_race_context, load_strategy
 from tipster.models import HorseEvaluation, RaceEvaluation
 
@@ -133,6 +134,8 @@ def _build_race_section(
     honmei_eval: RaceEvaluation,
     anaba_eval: RaceEvaluation,
     race_name: str,
+    honmei_strat=None,
+    anaba_strat=None,
 ) -> str:
     """1レース分の HTML セクションを生成する。"""
     # 一押し〜三押しの馬IDセット
@@ -162,11 +165,11 @@ def _build_race_section(
     for idx, horse in enumerate(honmei_candidates):
         label = _RANK_LABELS[idx]
         color = _RANK_COLORS[idx]
-        lines.append(_horse_card(horse, label, color, honmei_eval))
+        lines.append(_horse_card(horse, label, color, honmei_eval, honmei_strat))
 
     # 穴推奨
     if anaba_pick:
-        lines.append(_horse_card(anaba_pick, "穴推奨", _ANABA_COLOR, anaba_eval))
+        lines.append(_horse_card(anaba_pick, "穴推奨", _ANABA_COLOR, anaba_eval, anaba_strat))
 
     if not honmei_candidates and not anaba_pick:
         lines.append('    <div class="no-pick">このレースには推奨馬がありません</div>')
@@ -180,21 +183,14 @@ def _horse_card(
     label: str,
     color: str,
     race_eval: RaceEvaluation,
+    strategy=None,
 ) -> str:
     """馬1頭分のカードHTMLを生成する。"""
-    # 馬番マップ (race_eval 内には直接入っていないが horse_name で代替)
     name = _esc(horse.horse_name or horse.horse_id)
-
-    # クリアした条件
-    cleared = [c for c in horse.conditions if c.passed is True]
-    failed  = [c for c in horse.conditions if c.passed is False]
-
-    # 対応する条件IDリスト (strategyのconditions順)
-    strat_cond_ids = [
-        cond.id for cond in race_eval.model_fields_set  # will be overridden below
-    ]
-    # conditions順は HorseEvaluation.conditions のインデックスと strategy の conditions順が対応
-    # 各 ConditionResult には id がないため、インデックスで strategy.conditions[i].id を参照する
+    # strategy から条件IDリストを取得（「なぜ効くか」表示用）
+    strat_cond_ids: list[str] = (
+        [c.id for c in strategy.conditions if c.enabled] if strategy else []
+    )
 
     lines = [
         f'<div class="horse-card" style="border-left: 4px solid {color}">',
@@ -224,13 +220,18 @@ def _horse_card(
                 icon = "⚪"
                 cls = "cond-none"
 
-            why = _esc(cond_result.reason) if cond_result.reason else ""
-            lines.append(
-                f'    <div class="cond-row {cls}">'
-                f'      <span class="cond-icon">{icon}</span>'
-                f'      <span class="cond-reason">{why}</span>'
-                f'    </div>'
-            )
+            cond_id   = strat_cond_ids[i] if i < len(strat_cond_ids) else ""
+            cond_name = _esc(_cond_label(cond_id)) if cond_id else ""
+            reason    = _esc(cond_result.reason) if cond_result.reason else ""
+            why_text  = _esc(_cond_why(cond_id)) if cond_id else ""
+            lines.append(f'    <div class="cond-row {cls}">')
+            lines.append(f'      <span class="cond-icon">{icon}</span>')
+            if cond_name:
+                lines.append(f'      <span class="cond-label">{cond_name}</span>')
+            lines.append(f'      <span class="cond-reason">{reason}</span>')
+            if why_text and cond_result.passed is True:
+                lines.append(f'      <span class="cond-why">{why_text}</span>')
+            lines.append(f'    </div>')
         lines.append('  </div>')
     else:
         lines.append('  <div class="cond-list"><span class="no-data">条件データなし</span></div>')
@@ -317,7 +318,9 @@ h1 {
 .cond-fail { background: #fff5f5; opacity: 0.7; }
 .cond-none { background: #f8f9fa; opacity: 0.7; }
 .cond-icon { flex-shrink: 0; }
-.cond-reason { color: #444; }
+.cond-label { font-weight: 600; color: #333; white-space: nowrap; }
+.cond-reason { color: #444; flex: 1; }
+.cond-why { font-size: 11px; color: #777; border-left: 2px solid #d1fae5; padding-left: 6px; margin-top: 2px; display: block; }
 .no-data { color: #aaa; font-size: 13px; }
 .footer {
   text-align: center;
@@ -380,7 +383,7 @@ def main() -> None:
             honmei_eval = evaluate_race_context(race_ctx, honmei_strat)
             anaba_eval  = evaluate_race_context(race_ctx, anaba_strat)
             race_name = race_ctx.race_name or rid
-            sections.append(_build_race_section(rid, honmei_eval, anaba_eval, race_name))
+            sections.append(_build_race_section(rid, honmei_eval, anaba_eval, race_name, honmei_strat, anaba_strat))
             ok += 1
         except Exception as e:
             print(f"  [picks] race_id={rid} 失敗: {e}")
