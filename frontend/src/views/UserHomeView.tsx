@@ -126,7 +126,7 @@ function BetaBanner() {
       <div className="max-w-screen-xl mx-auto px-6 py-2.5 flex items-center justify-center gap-2">
         <Info className="w-4 h-4 text-emerald-600 flex-shrink-0" />
         <p className="text-sm text-emerald-700">
-          Fukurou AI は現在オープンベータ版です。すべての予測機能が無料でご利用いただけます
+          フクロウ AI — 個人利用の競馬予測システム
         </p>
       </div>
     </div>
@@ -501,7 +501,7 @@ export default function UserHomeView() {
       {/* フッター */}
       <footer className="border-t border-gray-200 bg-white mt-8 py-6">
         <div className="max-w-screen-xl mx-auto px-6 flex items-center justify-between flex-wrap gap-2">
-          <span className="text-xs text-gray-400">© 2026 Fukurou AI — 競馬予測は参考情報です</span>
+          <span className="text-xs text-gray-400">© 2026 フクロウ AI — 競馬予測は参考情報です</span>
           <div className="flex items-center gap-1.5 text-xs text-emerald-600">
             <Cpu className="w-3.5 h-3.5" />
             <span>AI予測エンジン 稼働中</span>

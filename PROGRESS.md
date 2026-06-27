@@ -9,6 +9,7 @@ TR-0: 完了
 TR-1: 完了
 PHASE-1: 完了（2026-06-27）
 PHASE-B-1: 完了（2026-06-27）
+PHASE-B-2: 完了（2026-06-27）
 
 ---
 
@@ -33,6 +34,17 @@ PHASE-B-1: 完了（2026-06-27）
 ### Evaluator確認
 - pytest 647件 全件 PASS
 - ポート構成: 5173 / 8002 / 8003 の3本に整理完了
+
+---
+
+## PHASE-B B-2 不整合修正完了（2026-06-27）
+
+### 作業内容
+- UserHomeView.tsx: 「Fukurou AI」→「フクロウ AI」に統一（BetaBanner・フッター）
+- GlobalHeader.tsx: ログインボタン削除（個人利用なので不要）
+- RaceDetailView.tsx: `fetchPublicRaceDetail` → `fetchRaceDetail`（認証付きエンドポイントに切替）
+- frontend/src/api/raceDetail.ts: 廃止済み `fetchPublicRaceDetail` 関数と関連型を削除（140行削減）
+- pytest 647件 全件 PASS
 
 ---
 
