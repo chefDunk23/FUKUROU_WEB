@@ -37,14 +37,14 @@ _SUPP_SQL = text("""
       AND r.course_type IN ('芝','ダート') AND r.place_code <= '10'
 """)
 _SIRE_SQL = text("""
-    SELECT DISTINCT ON (sire_id) sire_id, top3_rate AS sire_top3_rate,
+    SELECT sire_id, target_date, top3_rate AS sire_top3_rate,
            venue_01_top3_rate,venue_01_count, venue_02_top3_rate,venue_02_count,
            venue_03_top3_rate,venue_03_count, venue_04_top3_rate,venue_04_count,
            venue_05_top3_rate,venue_05_count, venue_06_top3_rate,venue_06_count,
            venue_07_top3_rate,venue_07_count, venue_08_top3_rate,venue_08_count,
            venue_09_top3_rate,venue_09_count, venue_10_top3_rate,venue_10_count,
            surface_turf_top3_rate AS sire_sfs_turf_top3, surface_dirt_top3_rate AS sire_sfs_dirt_top3
-    FROM sire_feature_store ORDER BY sire_id, target_date DESC
+    FROM sire_feature_store ORDER BY sire_id, target_date
 """)
 
 # DB上の最新日を取得
@@ -79,15 +79,34 @@ load_start = FROM_DATE - timedelta(days=_LOOKBACK_DAYS)
 FULL_FROM  = date.fromisoformat("2025-06-27")
 
 # ─── データ読み込み ────────────────────────────────────────────────────────
+def _merge_sire_pit(df: pd.DataFrame, sire_df: pd.DataFrame) -> pd.DataFrame:
+    """PIT (Point-In-Time) 種牡馬特性マージ: レース日より前の最新スナップショットを使用"""
+    sire_df = sire_df.copy()
+    sire_df["target_date"] = pd.to_datetime(sire_df["target_date"]).astype("datetime64[us]")
+    sire_cols = [c for c in sire_df.columns if c not in ("sire_id", "target_date")]
+    race_keys = df[["race_id", "sire_id", "date"]].drop_duplicates().copy()
+    race_keys["date"] = race_keys["date"].astype("datetime64[us]")
+    race_keys = race_keys.sort_values("date").reset_index(drop=True)
+    sire_sorted = sire_df.sort_values("target_date").reset_index(drop=True)
+    pit = pd.merge_asof(
+        race_keys, sire_sorted,
+        left_on="date", right_on="target_date",
+        by="sire_id", direction="backward",
+    )
+    pit = pit[["race_id", "sire_id"] + sire_cols]
+    return df.merge(pit, on=["race_id", "sire_id"], how="left")
+
+
 print("[sim] ベースデータ読み込み...")
 base = _load_bulk_data(load_start, TO_DATE)
 supp = pd.read_sql(_SUPP_SQL, _engine, params={"start": load_start, "end": TO_DATE})
+print("[sim] 種牡馬特性読み込み (PIT)...")
 sire_df = pd.read_sql(_SIRE_SQL, _engine)
 horse_names = pd.read_sql(text("SELECT id AS horse_id, name AS horse_name FROM horses"), _engine)
 jockey_names = pd.read_sql(text("SELECT id AS jockey_id, name AS jockey_name FROM jockeys"), _engine)
 
 df = base.merge(supp, on=["race_id","horse_id"], how="left")
-df = df.merge(sire_df, on="sire_id", how="left")
+df = _merge_sire_pit(df, sire_df)
 df = df.merge(horse_names, on="horse_id", how="left")
 df = df.merge(jockey_names, on="jockey_id", how="left")
 

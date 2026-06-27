@@ -7,6 +7,8 @@ import RaceListView      from './views/race/RaceListView'
 import RaceDetailView    from './views/race/RaceDetailView'
 import AnalysisPage          from './views/analysis/AnalysisPage'
 import WeeklyOverviewView    from './views/WeeklyOverviewView'
+import PicksView             from './views/PicksView'
+import DbStatusView          from './views/DbStatusView'
 import AdminView             from './views/AdminView'
 
 import { GlobalHeader }  from './components/GlobalHeader'
@@ -24,6 +26,8 @@ function getRoute(): Route {
   if (p.startsWith('/datalab'))      return 'datalab'
   if (p.startsWith('/myai'))         return 'myai'
   if (p.startsWith('/week'))         return 'week'
+  if (p.startsWith('/picks'))        return 'picks'
+  if (p.startsWith('/db-status'))    return 'db-status'
   if (p.startsWith('/admin'))        return 'admin'
   return 'home'
 }
@@ -80,6 +84,8 @@ export default function App() {
       {route === 'race-level' && <RaceLevelView raceId={raceLevelId ?? undefined} onBack={() => window.history.back()} />}
       {route === 'analysis'   && <AnalysisPage />}
       {route === 'week'       && <WeeklyOverviewView />}
+      {route === 'picks'      && <PicksView />}
+      {route === 'db-status'  && <DbStatusView />}
       {route === 'admin'      && <AdminView />}
       {route === 'datalab'    && <ComingSoonView title="週次概況" />}
       {route === 'myai'       && <ComingSoonView title="戦略管理" />}

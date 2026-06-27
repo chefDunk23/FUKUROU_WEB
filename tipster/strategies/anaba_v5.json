@@ -1,0 +1,93 @@
+{
+  "name": "穴馬抽出 v5 (第2層嵌まり度特化・人気落ち馬向け)",
+  "tipster": "fukurou",
+  "type": "anaba",
+  "version": "5.0",
+  "_comment": "Phase 1 新条件群 (conditions_v2.py) による穴馬抽出戦略。第1層（ポテンシャル確認）を必須とせず、第2層（嵌まり度：騎手・斤量・間隔・馬場・距離）を全条件スコア化。機能B（--min-ninki 4以降）と組み合わせ、能力外理由で人気落ちした馬を発掘する。required=false で全条件スコア積み上げ方式。",
+  "conditions": [
+    {
+      "id": "v2_class_change",
+      "enabled": true,
+      "required": false,
+      "_comment": "降級馬を優先評価（+1）。昇級はNone（保留）で事実上スルー",
+      "params": {
+        "downgrade_bonus": 1.5,
+        "upgrade_as_none": true
+      }
+    },
+    {
+      "id": "v2_jockey_positive",
+      "enabled": true,
+      "required": false,
+      "_comment": "継続騎乗+0.5 / リーディング替わり+1.5（大幅加点） / 非リーディング替わり=false",
+      "params": {
+        "top_jockey_threshold": 30,
+        "base_score": 0.5,
+        "upgrade_bonus": 1.5
+      }
+    },
+    {
+      "id": "v2_weight_favor",
+      "enabled": true,
+      "required": false,
+      "_comment": "斤量軽減が穴馬の強みの一つ",
+      "params": {
+        "decrease_threshold": 0.5,
+        "increase_threshold": 0.5,
+        "decrease_bonus": 1.0,
+        "increase_penalty": -0.5
+      }
+    },
+    {
+      "id": "v2_interval_optimal",
+      "enabled": true,
+      "required": false,
+      "_comment": "適正間隔（15〜28日）でしっかり調整できている穴馬",
+      "params": {
+        "optimal_min": 15,
+        "optimal_max": 28,
+        "bonus_score": 0.5,
+        "long_rest_min": 60
+      }
+    },
+    {
+      "id": "v2_surface_history",
+      "enabled": true,
+      "required": false,
+      "_comment": "馬場適性がある穴馬は危険",
+      "params": {
+        "lookback": 5,
+        "min_place_rank": 3,
+        "bonus_score": 0.5
+      }
+    },
+    {
+      "id": "v2_distance_match",
+      "enabled": true,
+      "required": false,
+      "_comment": "距離変化による妙味（大幅短縮/延長で適性回復期待の穴馬）",
+      "params": {
+        "band_big": 400,
+        "band_margin": 200,
+        "bonus_score": 0.5,
+        "lookback": 3
+      }
+    },
+    {
+      "id": "v2_past_margin",
+      "enabled": true,
+      "required": false,
+      "_comment": "第1層は任意（穴馬は着差が広くてもOK）。閾値を緩めて1.5秒以内でも加点",
+      "params": {
+        "lookback": 3,
+        "max_sec": 1.5,
+        "bonus_score": 0.5
+      }
+    }
+  ],
+  "ranking": {
+    "primary": "condition_clear_count",
+    "secondary": "ai_score",
+    "max_selections": 3
+  }
+}

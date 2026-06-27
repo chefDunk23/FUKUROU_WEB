@@ -9,6 +9,8 @@ api_v2/routers/tipster.py
   P1-C  GET  /api/v2/tipster/weekly-overview      今週のレース全体像 + 推奨馬マーク
   P2-A  POST /api/v2/tipster/log                  SNS出力用ログ記録
   P2-A  GET  /api/v2/tipster/log                  SNS出力用ログ一覧（日付指定）
+        GET  /api/v2/tipster/weekend               picks_race_data.json を返す
+        POST /api/v2/tipster/refresh               picks_race_data.json を再生成
 
 tipster/ 配下のロジックは変更しない。
 このルーターは薄いラッパーとして呼び出すだけ。
@@ -17,6 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +42,7 @@ _ROOT = Path(__file__).parent.parent.parent
 _STRATEGY_HONMEI = _ROOT / "tipster/strategies/honmei_v6.json"
 _STRATEGY_ANABA  = _ROOT / "tipster/strategies/anaba_v5.json"
 _SNS_LOG_DIR     = _ROOT / "data/output/tipster/sns_log"
+_PICKS_CACHE     = _ROOT / "data/output/tipster/picks_race_data.json"
 
 # ── 共通ユーティリティ ────────────────────────────────────────────────────────
 
@@ -275,14 +280,14 @@ def get_weekly_overview(target_date: str | None = Query(None)):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT r.id AS race_id, r.date AS race_date, r.race_num,
-                       r.place_code, r.distance, r.course_type AS surface,
-                       COALESCE(r.name, r.name_short_10) AS race_name,
-                       r.head_count
+                SELECT r.id AS race_id, r.race_date, r.race_num,
+                       r.keibajo_code, r.distance, r.track_code AS surface,
+                       COALESCE(NULLIF(TRIM(r.race_name_hondai), ''), r.race_name_short_10) AS race_name,
+                       r.syusso_tosu AS head_count
                 FROM   races r
-                WHERE  r.date BETWEEN %s AND %s
-                  AND  r.place_code <= '10'
-                ORDER  BY r.date, r.place_code, r.race_num
+                WHERE  r.race_date BETWEEN %s AND %s
+                  AND  r.keibajo_code::int <= 10
+                ORDER  BY r.race_date, r.keibajo_code, r.race_num
             """, (week_start, week_end))
             race_rows = cur.fetchall()
     except Exception as e:
@@ -291,11 +296,42 @@ def get_weekly_overview(target_date: str | None = Query(None)):
     finally:
         conn.close()
 
-    # 各レースの picks をまとめてチェック（tipster_results から引く。未確定レースは engine 呼び出し）
     race_ids = [r["race_id"] for r in race_rows]
+    race_id_set = set(race_ids)
 
-    # tipster_results から既存のピックを一括取得
+    # ── picks_race_data.json（新形式）から今週分ピックを先読み ──────────────────
     picks_by_race: dict[str, list[str]] = {}
+    if _PICKS_CACHE.exists():
+        try:
+            cache = json.loads(_PICKS_CACHE.read_text(encoding="utf-8"))
+            for race in cache.get("race_data", []):
+                rid = race.get("race_id", "")
+                if rid not in race_id_set:
+                    continue
+                labels: list[str] = []
+                for horse in race.get("horses", []):
+                    lbl = horse.get("pick_label")
+                    if lbl:
+                        labels.append(lbl)
+                if labels:
+                    picks_by_race[rid] = labels
+        except Exception as exc:
+            logger.warning("picks_race_data.json 読み込み失敗: %s", exc)
+
+    # ── picks_this_week.json（旧形式）フォールバック ─────────────────────────────
+    _picks_this_week = _PICKS_CACHE.parent / "picks_this_week.json"
+    if not picks_by_race and _picks_this_week.exists():
+        try:
+            pw = json.loads(_picks_this_week.read_text(encoding="utf-8"))
+            for entry in pw.get("picks", []):
+                rid = entry.get("race_id", "")
+                lbl = entry.get("label")
+                if rid in race_id_set and lbl:
+                    picks_by_race.setdefault(rid, []).append(lbl)
+        except Exception as exc:
+            logger.warning("picks_this_week.json 読み込み失敗: %s", exc)
+
+    # ── tipster_results（過去確定実績）でさらに補完 ──────────────────────────────
     if race_ids:
         try:
             conn2 = psycopg2.connect(**DB_V2)
@@ -305,18 +341,32 @@ def get_weekly_overview(target_date: str | None = Query(None)):
                     (race_ids,)
                 )
                 for row in cur.fetchall():
-                    picks_by_race.setdefault(row["race_id"], []).append(row["rank_label"])
+                    rid2 = row["race_id"]
+                    # 確定実績があればそちらを優先（上書き）
+                    if rid2 not in picks_by_race:
+                        picks_by_race[rid2] = []
+                    if row["rank_label"] not in picks_by_race[rid2]:
+                        picks_by_race[rid2].append(row["rank_label"])
             conn2.close()
         except Exception:
             pass
 
+    _LABEL_ORDER = {"一押し": 0, "二押し": 1, "三押し": 2, "穴推奨": 3}
+
     weekly_races: list[WeeklyRace] = []
     for r in race_rows:
         rid = r["race_id"]
-        labels = picks_by_race.get(rid, [])
+        raw_labels = picks_by_race.get(rid, [])
+        # 重複排除 + 表示順ソート
+        seen: set[str] = set()
+        labels: list[str] = []
+        for lbl in sorted(raw_labels, key=lambda x: _LABEL_ORDER.get(x, 9)):
+            if lbl not in seen:
+                seen.add(lbl)
+                labels.append(lbl)
         hc = r.get("head_count")
         has_p = len(labels) > 0
-        keibajo = _KEIBAJO_NAME.get((r.get("place_code") or "").strip().zfill(2), r.get("place_code") or "")
+        keibajo = _KEIBAJO_NAME.get((r.get("keibajo_code") or "").strip().zfill(2), r.get("keibajo_code") or "")
         weekly_races.append(WeeklyRace(
             race_id      = rid,
             race_date    = r["race_date"],
@@ -384,3 +434,70 @@ def get_sns_log(log_date: str | None = Query(None)):
         raise HTTPException(500, f"ログ読み込み失敗: {e}")
 
     return {"date": target_date.isoformat(), "entries": entries}
+
+
+# ── 予想レポート（週末picks）────────────────────────────────────────────────────
+
+@router.get("/weekend")
+def get_picks_weekend():
+    """週末picks_race_data.json を返す。未生成の場合は 404。"""
+    if not _PICKS_CACHE.exists():
+        raise HTTPException(
+            404,
+            "picks_race_data.json が未生成です。"
+            " scripts/generate_picks_report.py を実行してください。",
+        )
+    try:
+        data = json.loads(_PICKS_CACHE.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"キャッシュ読み込み失敗: {e}")
+    return data
+
+
+# ── picks再生成 ──────────────────────────────────────────────────────────────
+
+_GENERATE_SCRIPT = _ROOT / "scripts" / "generate_picks_report.py"
+
+
+@router.post("/refresh")
+def post_refresh_picks():
+    """picks_race_data.json を再生成する（generate_picks_report.py を実行）。
+    完了まで数分かかる場合があります。タイムアウトは 10 分。"""
+    if not _GENERATE_SCRIPT.exists():
+        raise HTTPException(500, f"生成スクリプトが見つかりません: {_GENERATE_SCRIPT}")
+
+    logger.info("picks refresh 開始: %s", _GENERATE_SCRIPT)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_GENERATE_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "picks再生成がタイムアウトしました（10分超過）")
+    except Exception as e:
+        raise HTTPException(500, f"スクリプト実行失敗: {e}")
+
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "")[-800:]
+        logger.error("picks refresh 失敗:\n%s", tail)
+        raise HTTPException(500, f"picks再生成エラー: {tail}")
+
+    logger.info("picks refresh 完了")
+
+    # 更新されたキャッシュの情報を返す
+    if _PICKS_CACHE.exists():
+        try:
+            cached = json.loads(_PICKS_CACHE.read_text(encoding="utf-8"))
+            return {
+                "status": "ok",
+                "generated_at": cached.get("generated_at"),
+                "stats": cached.get("stats", {}),
+                "race_count": len(cached.get("race_data", [])),
+            }
+        except Exception:
+            pass
+
+    return {"status": "ok", "generated_at": None, "stats": {}, "race_count": 0}

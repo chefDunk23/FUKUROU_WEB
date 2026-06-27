@@ -1,0 +1,105 @@
+{
+  "name": "本命抽出 v6 (第1層ポテンシャル確認 + 第2層嵌まり度)",
+  "tipster": "fukurou",
+  "type": "honmei",
+  "version": "6.0",
+  "_comment": "Phase 1 新条件群 (conditions_v2.py) による本命抽出戦略。第1層（v2_past_margin + v2_race_quality）を required=true で絞り込み、第2層（距離・騎手・斤量・間隔・馬場）をスコア加算。G1-G5b 横断的基準を維持。honmei_v1/v5 との比較用バリアント。",
+  "conditions": [
+    {
+      "id": "v2_past_margin",
+      "enabled": true,
+      "required": true,
+      "_comment": "第1層: 過去3走以内に勝ち馬差≤1秒の好走歴（必須）",
+      "params": {
+        "lookback": 3,
+        "max_sec": 1.0,
+        "bonus_score": 1.0
+      }
+    },
+    {
+      "id": "v2_race_quality",
+      "enabled": true,
+      "required": true,
+      "_comment": "第1層: 前走上位3頭の次走複勝率≥35%（レースレベル必須）",
+      "params": {
+        "top_n": 3,
+        "min_next_horses": 3,
+        "min_place_rate": 0.35,
+        "bonus_score": 1.0
+      }
+    },
+    {
+      "id": "v2_class_change",
+      "enabled": true,
+      "required": false,
+      "_comment": "第1層: クラス変化評価（昇級=様子見None / 降級=積極評価+1）",
+      "params": {
+        "downgrade_bonus": 1.0,
+        "upgrade_as_none": true
+      }
+    },
+    {
+      "id": "v2_jockey_positive",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 継続騎乗+0.5 / リーディング替わり+1.0 / 非リーディング替わり=false",
+      "params": {
+        "top_jockey_threshold": 30,
+        "base_score": 0.5,
+        "upgrade_bonus": 1.0
+      }
+    },
+    {
+      "id": "v2_weight_favor",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 斤量軽減+0.5 / 増量=false",
+      "params": {
+        "decrease_threshold": 0.5,
+        "increase_threshold": 0.5,
+        "decrease_bonus": 0.5,
+        "increase_penalty": -0.5
+      }
+    },
+    {
+      "id": "v2_interval_optimal",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 中2〜3週（15〜28日）が適正間隔",
+      "params": {
+        "optimal_min": 15,
+        "optimal_max": 28,
+        "bonus_score": 0.5,
+        "long_rest_min": 60
+      }
+    },
+    {
+      "id": "v2_surface_history",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 同馬場（芝/ダート）での過去好走歴+0.5",
+      "params": {
+        "lookback": 5,
+        "min_place_rank": 3,
+        "bonus_score": 0.5
+      }
+    },
+    {
+      "id": "v2_distance_match",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 距離適性（大幅変化=適性回復期待 / 同距離帯好走歴）",
+      "params": {
+        "band_big": 400,
+        "band_margin": 200,
+        "bonus_score": 0.5,
+        "lookback": 3
+      }
+    }
+  ],
+  "ranking": {
+    "primary": "condition_clear_count",
+    "secondary": "ai_score",
+    "max_selections": 3
+  }
+}

@@ -99,13 +99,11 @@ _SUPP_SQL = text("""
            r.track_condition,
            b.sire_turf_wr, b.sire_dirt_wr,
            b.sire_sprint_wr, b.sire_mile_wr, b.sire_middle_wr, b.sire_long_wr,
-           b.sire_heavy_wr,
-           j.yr_wins AS jockey_yr_wins_db
+           b.sire_heavy_wr
     FROM race_entries e
     JOIN races r ON e.race_id = r.id
     LEFT JOIN bloodline_feature_store b
            ON b.horse_id = e.horse_id AND b.race_id = e.race_id
-    LEFT JOIN jockeys j ON j.id = e.jockey_id
     WHERE r.date BETWEEN :start AND :end
       AND e.confirmed_rank IS NOT NULL AND e.confirmed_rank > 0
       AND r.course_type IN ('芝','ダート')
@@ -165,12 +163,10 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["cond_class_ok"] = cl_ok.astype(object)
     df.loc[df["prev1_class"].isna(), "cond_class_ok"] = None
 
-    # ─── CONDITION 2: jockey_ok (継続 or リーディング) ──────────────────
-    yr_wins = df["jockey_yr_wins_db"]
+    # ─── CONDITION 2: jockey_ok (継続騎手) ──────────────────────────────
+    # ※ yr_wins はレース当日の通算勝利数でリークリスク有り → cont のみ使用
     cont = df["jockey_id"] == df["prev_jockey_id"]
-    lead = yr_wins >= 30
-    jok = cont | lead
-    df["cond_jockey_ok"] = jok.astype(object)
+    df["cond_jockey_ok"] = cont.astype(object)
     df.loc[df["prev_jockey_id"].isna(), "cond_jockey_ok"] = None
 
     # ─── CONDITION 3: weight_ok (斤量増量なし) ───────────────────────────

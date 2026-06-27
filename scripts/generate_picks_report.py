@@ -1499,15 +1499,28 @@ document.addEventListener('DOMContentLoaded', function() {
 
 # ─── エントリポイント ──────────────────────────────────────────────────────────
 
-def main() -> None:
+# ─── DecimalEncoder（モジュールレベル）──────────────────────────────────────────
+
+class _DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
+
+
+# ─── コアデータ生成（Phase 1-4）─────────────────────────────────────────────────
+
+def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int, int]:
+    """Phase 1-4 を実行。
+    Returns: (sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng)
+    """
     print("[picks] 戦略ロード中...")
     try:
         honmei_strat = load_strategy(_STRATEGY_HONMEI)
         anaba_strat  = load_strategy(_STRATEGY_ANABA)
         s1_strat     = load_strategy(_STRATEGY_S1)
     except FileNotFoundError as e:
-        print(f"[picks] 戦略ファイルが見つかりません: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"戦略ファイルが見つかりません: {e}") from e
 
     # BET-7: 馬場別戦略（params.babaを各馬場に設定したコピー）
     baba_strats = {baba: _make_baba_strategy(honmei_strat, baba) for baba in _BABA_CONDITIONS}
@@ -1791,13 +1804,36 @@ def main() -> None:
     print(f"[picks] 三押し暫定: {tier_counts['other']}レース")
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stats = {**tier_counts, "total": ok}
-    class _DecimalEncoder(json.JSONEncoder):
-        def default(self, o):
-            if isinstance(o, Decimal):
-                return float(o)
-            return super().default(o)
+    return sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng
 
+
+# ─── 共通データ生成（CLI / API 共用）────────────────────────────────────────────
+
+def build_picks_json() -> tuple[list[dict], dict, str]:
+    """CLIとAPIの共通データ生成関数。(race_data_list, stats, generated_at) を返す。
+    副作用: data/output/tipster/picks_race_data.json を書き出す。"""
+    _sections, race_data_list, picks_data, tier_counts, generated_at, ok, _ng = _run_picks_core()
+    stats = {**tier_counts, "total": ok}
+    cache_path = _OUTPUT_PATH.parent / "picks_race_data.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(
+            {"generated_at": generated_at, "race_data": race_data_list, "stats": stats},
+            ensure_ascii=False,
+            cls=_DecimalEncoder,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"[picks] キャッシュ保存: {cache_path}")
+    return race_data_list, stats, generated_at
+
+
+# ─── エントリーポイント ────────────────────────────────────────────────────────
+
+def main() -> None:
+    sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng = _run_picks_core()
+    stats = {**tier_counts, "total": ok}
     race_data_json = json.dumps(race_data_list, ensure_ascii=False, cls=_DecimalEncoder)
     html_content = _render_html(sections, race_data_json, generated_at, stats)
 
@@ -1807,6 +1843,19 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"[picks] ピック保存: {picks_json_path} ({len(picks_data)}件)")
+
+    cache_path = _OUTPUT_PATH.parent / "picks_race_data.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(
+            {"generated_at": generated_at, "race_data": race_data_list, "stats": stats},
+            ensure_ascii=False,
+            cls=_DecimalEncoder,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"[picks] キャッシュ保存: {cache_path}")
 
     _OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     _OUTPUT_PATH.write_text(html_content, encoding="utf-8")

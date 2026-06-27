@@ -1,7 +1,7 @@
 {
   "name": "S-1パターン（ダート中距離|坂あり）",
   "tipster": "fukurou",
-  "type": "honmei",
+  "type": "segment",
   "version": "1.0",
   "_comment": "Phase 2 S-1パターン: 5条件ALL-True必須。candidates[*] で clear_count==5 のみ有効とし、最人気（tan_odds最小）を選択する。複勝率65.0% / 123R（2025-06-01〜2026-06-27）。",
   "conditions": [
