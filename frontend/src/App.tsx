@@ -1,30 +1,20 @@
 import { useEffect, useState } from 'react'
 import { navigate } from './utils/router'
 import RaceLevelView    from './views/race/RaceLevelView'
-import PredictionView    from './views/PredictionView'
-import EvAnalysisView   from './views/EvAnalysisView'
-import ClassicVideoView  from './views/video/ClassicVideoView'
-import VideoGenView      from './views/video/VideoGenView'
-import VideoShortView    from './views/video/VideoShortView'
-import DevView           from './views/DevView'
 // ── ユーザー向けビュー ─────────────────────────────────────────────────────────
 import UserHomeView      from './views/UserHomeView'
 import RaceListView      from './views/race/RaceListView'
 import RaceDetailView    from './views/race/RaceDetailView'
 import AnalysisPage      from './views/analysis/AnalysisPage'
 
-// ── 開発者向けビュー（ユーザー向けとは完全独立） ──────────────────────────────
-import DevRaceDetailView from './views/dev/DevRaceDetailView'
-
 import { GlobalHeader }  from './components/GlobalHeader'
 import type { AppRoute } from './components/GlobalHeader'
 
 // ── ルーティング ──────────────────────────────────────────────────────────────
-type Route = AppRoute | 'dev' | 'race' | 'race-level'
+type Route = AppRoute | 'race' | 'race-level'
 
 function getRoute(): Route {
   const p = window.location.pathname
-  if (p.startsWith('/dev'))          return 'dev'
   if (p.startsWith('/race-level/'))  return 'race-level'
   if (p.startsWith('/race/') || p === '/race') return 'race'
   if (p.startsWith('/races'))        return 'races'
@@ -42,59 +32,6 @@ function getRaceId(): string | null {
 function getRaceLevelId(): string | null {
   const m = window.location.pathname.match(/^\/race-level\/(.+)$/)
   return m ? m[1] : null
-}
-
-
-// ── 開発者ダッシュボード ───────────────────────────────────────────────────────
-const DEV_MODE = import.meta.env.VITE_DEV_MODE === 'true'
-type Tab = 'prediction' | 'ev' | 'short' | 'classic' | 'race-verify' | 'video' | 'dev'
-
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'prediction',  label: 'レース予想' },
-  { id: 'ev',          label: 'EV分析' },
-  { id: 'short',       label: 'ショート動画' },
-  { id: 'classic',     label: 'Classic動画' },
-  { id: 'race-verify', label: 'レース検証' },   // DevRaceDetailView
-  ...(DEV_MODE ? [
-    { id: 'video' as Tab, label: '動画生成 (DEV)' },
-    { id: 'dev'   as Tab, label: '開発者画面 (DEV)' },
-  ] : []),
-]
-
-function DevDashboard({ onHome }: { onHome: () => void }) {
-  const [tab, setTab] = useState<Tab>('prediction')
-
-  return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      <header className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <button onClick={onHome} className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-            <span className="text-xl font-bold text-blue-600">🦉 福朗 AI</span>
-            <span className="text-xs text-slate-400 font-normal hidden sm:inline">V2 競馬予測ダッシュボード</span>
-          </button>
-          <nav className="flex gap-1">
-            {TABS.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-                  tab === t.id ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
-                }`}>
-                {t.label}
-              </button>
-            ))}
-          </nav>
-        </div>
-      </header>
-      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-6">
-        {tab === 'prediction'  && <PredictionView />}
-        {tab === 'ev'          && <EvAnalysisView />}
-        {tab === 'short'       && <VideoShortView />}
-        {tab === 'classic'     && <ClassicVideoView />}
-        {tab === 'race-verify' && <DevRaceDetailView />}
-        {tab === 'video'       && DEV_MODE && <VideoGenView />}
-        {tab === 'dev'         && DEV_MODE && <DevView />}
-      </main>
-    </div>
-  )
 }
 
 // ── 未実装ページのスタブ ──────────────────────────────────────────────────────
@@ -125,12 +62,6 @@ export default function App() {
     return () => window.removeEventListener('popstate', handler)
   }, [])
 
-  const goHome = () => navigate('/')
-  const goDev  = () => navigate('/dev')
-
-  // 開発者ダッシュボードは独立したレイアウト（GlobalHeader なし）
-  if (route === 'dev') return <DevDashboard onHome={goHome} />
-
   const handleNavigate = (href: string) => navigate(href)
 
   return (
@@ -138,15 +69,14 @@ export default function App() {
       <GlobalHeader
         currentRoute={route}
         onNavigate={handleNavigate}
-        onDevClick={goDev}
       />
       {route === 'home'       && <UserHomeView />}
       {route === 'races'      && <RaceListView />}
       {route === 'race'       && <RaceDetailView raceId={raceId ?? undefined} onBack={() => navigate('/')} />}
       {route === 'race-level' && <RaceLevelView raceId={raceLevelId ?? undefined} onBack={() => window.history.back()} />}
       {route === 'analysis'   && <AnalysisPage />}
-      {route === 'datalab'    && <ComingSoonView title="データラボ" />}
-      {route === 'myai'       && <ComingSoonView title="MyAI作成" />}
+      {route === 'datalab'    && <ComingSoonView title="週次概況" />}
+      {route === 'myai'       && <ComingSoonView title="戦略管理" />}
     </div>
   )
 }

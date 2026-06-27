@@ -57,7 +57,7 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="福郎 管理 API（内部専用）",
+    title="フクロウ 管理 API（内部専用）",
     description="ジョブキュー管理。127.0.0.1 バインド専用。外部公開禁止。",
     version="1.0.0",
     docs_url="/docs" if DEV_MODE else None,
@@ -65,10 +65,10 @@ app = FastAPI(
     lifespan=_lifespan,
 )
 
-# CORS: admin_frontend (5174) のみ許可。外部オリジンは絶対に追加しない
+# CORS: メインフロントエンド (5173) のみ許可。外部オリジンは絶対に追加しない
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174"],
+    allow_origins=["http://localhost:5173"],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
