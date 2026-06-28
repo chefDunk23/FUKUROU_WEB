@@ -10,6 +10,7 @@ import WeeklyOverviewView    from './views/WeeklyOverviewView'
 import PicksView             from './views/PicksView'
 import DbStatusView          from './views/DbStatusView'
 import AdminView             from './views/AdminView'
+import LabView               from './views/lab/LabView'
 
 import { GlobalHeader }  from './components/GlobalHeader'
 import type { AppRoute } from './components/GlobalHeader'
@@ -25,6 +26,7 @@ function getRoute(): Route {
   if (p.startsWith('/analysis'))     return 'analysis'
   if (p.startsWith('/datalab'))      return 'datalab'
   if (p.startsWith('/myai'))         return 'myai'
+  if (p.startsWith('/lab'))          return 'lab'
   if (p.startsWith('/week'))         return 'week'
   if (p.startsWith('/picks'))        return 'picks'
   if (p.startsWith('/db-status'))    return 'db-status'
@@ -87,6 +89,7 @@ export default function App() {
       {route === 'picks'      && <PicksView />}
       {route === 'db-status'  && <DbStatusView />}
       {route === 'admin'      && <AdminView />}
+      {route === 'lab'        && <LabView />}
       {route === 'datalab'    && <ComingSoonView title="週次概況" />}
       {route === 'myai'       && <ComingSoonView title="戦略管理" />}
     </div>

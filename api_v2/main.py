@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_v2.deps import verify_api_key
-from api_v2.routers import db_status, prediction, public_races, race_level, races, tipster
+from api_v2.routers import db_status, lab, prediction, public_races, race_level, races, tipster
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -75,7 +75,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -85,6 +85,7 @@ app.include_router(race_level.router,    dependencies=_auth)
 app.include_router(prediction.router,    dependencies=_auth)
 app.include_router(tipster.router,       dependencies=_auth)
 app.include_router(db_status.router,     dependencies=_auth)
+app.include_router(lab.router,           dependencies=_auth)
 # 公開エンドポイント: 認証不要（/api/v2/public/*）
 app.include_router(public_races.router)
 # admin 系は api_admin (port 8003) に移設済み — docs/deploy.md 参照
