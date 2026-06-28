@@ -58,8 +58,58 @@ export interface ConditionSet {
   description: string
   conditions: ConditionEntry[]
   ranking: RankingConfig
+  source_strategy_id?: string
   created_at: string
   updated_at: string
+}
+
+// ── 戦略情報 ──────────────────────────────────────────────────────────────
+
+export interface StrategyCondition {
+  id: string
+  enabled: boolean
+  required: boolean
+  params: Record<string, unknown>
+  _comment?: string
+}
+
+export interface StrategyStats {
+  place_rate?: number
+  holdout_place_rate?: number
+  race_count?: number
+  holdout_count?: number
+  holdout_period?: string
+  tan_roi?: number
+  c_period_roi_all?: number
+  c_period_roi_78?: number
+  c_period_place_all?: number
+  c_period?: string
+  segment?: string
+  source?: string
+}
+
+export interface StrategyTrainingPriority {
+  priority: number
+  label: string
+}
+
+export interface StrategyAiSubmodel {
+  name: string
+  contribution: number
+}
+
+export interface LabStrategy {
+  id: string
+  display_type: 'segment' | 'honmei' | 'anaba' | 'training' | 'ai'
+  label: string
+  name?: string
+  version?: string
+  description?: string
+  conditions: StrategyCondition[]
+  ranking?: Record<string, unknown>
+  stats: StrategyStats
+  training_priorities?: StrategyTrainingPriority[]
+  ai_submodels?: StrategyAiSubmodel[]
 }
 
 export interface ComboStats {
@@ -248,5 +298,29 @@ export async function startCompareBacktest(body: {
 export async function fetchBacktestResult(jobId: string): Promise<BacktestJob> {
   const res = await apiFetch(`${BASE}/backtest/result/${jobId}`)
   if (!res.ok) throw new Error(`結果取得失敗: ${res.status}`)
+  return res.json()
+}
+
+// ── 戦略 API ──────────────────────────────────────────────────────────────
+
+export async function fetchStrategies(): Promise<{ strategies: LabStrategy[] }> {
+  const res = await apiFetch(`${BASE}/strategies`)
+  if (!res.ok) throw new Error(`戦略取得失敗: ${res.status}`)
+  return res.json()
+}
+
+export async function copyStrategyToExperiment(
+  strategyId: string,
+  name: string,
+): Promise<ConditionSet> {
+  const res = await apiFetch(`${BASE}/strategies/${strategyId}/copy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail ?? `コピー失敗: ${res.status}`)
+  }
   return res.json()
 }

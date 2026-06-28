@@ -316,3 +316,114 @@ def test_builtin_conditions_catalog():
     pm = next(c for c in BUILTIN_CONDITIONS if c["id"] == "v2_past_margin")
     assert "params_schema" in pm
     assert "lookback" in pm["params_schema"]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 戦略情報 API のテスト
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_strategies_returns_all(client):
+    """GET /strategies は5戦略すべてを返す。"""
+    res = client.get("/api/v2/lab/strategies")
+    assert res.status_code == 200
+    body = res.json()
+    assert "strategies" in body
+    strategies = body["strategies"]
+    ids = [s["id"] for s in strategies]
+    assert "s1_pattern" in ids
+    assert "honmei_v7" in ids
+    assert "anaba_v5" in ids
+    assert "training_tr1" in ids
+    assert "anaba_ai_v1" in ids
+    assert len(strategies) == 5
+
+
+def test_get_strategies_s1_has_verified_stats(client):
+    """s1_pattern には検証済み数値が付属する。"""
+    res = client.get("/api/v2/lab/strategies")
+    assert res.status_code == 200
+    strats = {s["id"]: s for s in res.json()["strategies"]}
+    s1 = strats["s1_pattern"]
+    assert s1["stats"]["place_rate"] == pytest.approx(0.650, abs=0.001)
+    assert s1["stats"]["holdout_place_rate"] == pytest.approx(0.706, abs=0.001)
+    assert s1["stats"]["race_count"] == 123
+
+
+def test_get_strategies_s1_has_conditions(client):
+    """s1_pattern には5条件が含まれる。"""
+    res = client.get("/api/v2/lab/strategies")
+    strats = {s["id"]: s for s in res.json()["strategies"]}
+    s1 = strats["s1_pattern"]
+    assert len(s1["conditions"]) == 5
+    cond_ids = [c["id"] for c in s1["conditions"]]
+    assert "v2_past_margin" in cond_ids
+
+
+def test_get_strategies_training_has_priorities(client):
+    """training_tr1 には優先度リスト(7件)が含まれる。"""
+    res = client.get("/api/v2/lab/strategies")
+    strats = {s["id"]: s for s in res.json()["strategies"]}
+    tr = strats["training_tr1"]
+    assert "training_priorities" in tr
+    assert len(tr["training_priorities"]) == 7
+    priorities = [p["priority"] for p in tr["training_priorities"]]
+    assert priorities == sorted(priorities)
+
+
+def test_get_strategies_ai_has_submodels(client):
+    """anaba_ai_v1 には5サブモデルが含まれる。"""
+    res = client.get("/api/v2/lab/strategies")
+    strats = {s["id"]: s for s in res.json()["strategies"]}
+    ai = strats["anaba_ai_v1"]
+    assert "ai_submodels" in ai
+    assert len(ai["ai_submodels"]) == 5
+    total_contribution = sum(m["contribution"] for m in ai["ai_submodels"])
+    assert abs(total_contribution - 1.0) < 0.01
+
+
+def test_copy_strategy_to_experiment(client, tmp_path, monkeypatch):
+    """POST /strategies/{id}/copy は条件セットを作成する。"""
+    import json
+    from pathlib import Path
+    data_file = tmp_path / "conditions.json"
+    data_file.write_text(
+        json.dumps({"custom_conditions": [], "condition_sets": []}),
+        encoding="utf-8",
+    )
+    import api_v2.routers.lab as lab_module
+    monkeypatch.setattr(lab_module, "_DATA_FILE", Path(data_file))
+
+    res = client.post("/api/v2/lab/strategies/s1_pattern/copy", json={"name": "S-1テスト"})
+    assert res.status_code == 201
+    body = res.json()
+    assert body["name"] == "S-1テスト"
+    assert body["source_strategy_id"] == "s1_pattern"
+    assert len(body["conditions"]) == 5
+    cond_ids = [c["condition_id"] for c in body["conditions"]]
+    assert "v2_past_margin" in cond_ids
+
+
+def test_copy_strategy_unknown_returns_404(client):
+    """存在しない戦略IDは 404 を返す。"""
+    res = client.post("/api/v2/lab/strategies/nonexistent/copy", json={"name": "test"})
+    assert res.status_code == 404
+
+
+def test_create_condition_set_stores_source_strategy_id(client, tmp_path, monkeypatch):
+    """CreateConditionSet に source_strategy_id を指定すると保存される。"""
+    import json
+    from pathlib import Path
+    data_file = tmp_path / "conditions.json"
+    data_file.write_text(
+        json.dumps({"custom_conditions": [], "condition_sets": []}),
+        encoding="utf-8",
+    )
+    import api_v2.routers.lab as lab_module
+    monkeypatch.setattr(lab_module, "_DATA_FILE", Path(data_file))
+
+    body = {"name": "テストセット", "source_strategy_id": "s1_pattern"}
+    res = client.post("/api/v2/lab/condition-sets", json=body)
+    assert res.status_code == 201
+    result = res.json()
+    assert result["source_strategy_id"] == "s1_pattern"

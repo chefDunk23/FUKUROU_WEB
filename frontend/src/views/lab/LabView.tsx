@@ -1,1100 +1,760 @@
 /**
  * frontend/src/views/lab/LabView.tsx
  * ====================================
- * 条件ラボ — 条件管理 + バックテスト実行。
- * /lab ルートで表示される。
+ * 条件ラボ — 実運用戦略一覧 + 実験 + バックテスト。
+ * /lab ルートで表示される。タブなし・1ページスクロール構成。
  */
-
 import { useEffect, useRef, useState } from 'react'
 import type {
   BacktestJob,
-  BacktestPeriodResult,
   BuiltinCondition,
   ComboStats,
-  CompareResult,
-  ConditionEntry,
   ConditionSet,
-  CustomCondition,
+  LabStrategy,
+  StrategyAiSubmodel,
+  StrategyCondition,
+  StrategyStats,
+  StrategyTrainingPriority,
 } from '../../api/lab'
 import {
-  createCondition,
-  createConditionSet,
-  deleteCondition,
+  copyStrategyToExperiment,
   deleteConditionSet,
   fetchBacktestResult,
   fetchConditionSets,
   fetchConditions,
+  fetchStrategies,
   startBacktest,
-  startCompareBacktest,
-  updateConditionSet,
 } from '../../api/lab'
 
-// ── ユーティリティ ────────────────────────────────────────────────────────
+// ── ユーティリティ ─────────────────────────────────────────────────────────
 
-function roi(s: ComboStats): string {
+function pct(v: number | undefined): string {
+  return v !== undefined ? `${(v * 100).toFixed(1)}%` : '―'
+}
+
+function roiStr(s: ComboStats): string {
   if (s.bet_count === 0) return '―'
   return `${(s.return_rate * 100).toFixed(1)}%`
 }
-function hitRate(s: ComboStats): string {
+
+function hitStr(s: ComboStats): string {
   if (s.bet_count === 0) return '―'
   return `${((s.hit_count / s.bet_count) * 100).toFixed(1)}%`
 }
-function lowSample(s: ComboStats): boolean {
-  return s.race_count < 30
+
+const PERIOD_LABELS: Record<string, string> = {
+  '3m': '直近3ヶ月',
+  '6m': '直近6ヶ月',
+  '1y': '直近1年',
 }
 
-const PERIOD_LABELS: Record<string, string> = { '3m': '直近3ヶ月', '6m': '直近6ヶ月', '1y': '直近1年' }
+const TYPE_BADGE: Record<string, { label: string; cls: string }> = {
+  segment:  { label: 'セグメント', cls: 'bg-purple-50 text-purple-700 border-purple-200' },
+  honmei:   { label: '本命',       cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  anaba:    { label: '穴馬',       cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  training: { label: '調教',       cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  ai:       { label: 'AI',         cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+}
+
 const LAYER_COLORS: Record<string, string> = {
-  '第1層: ポテンシャル確認': 'bg-blue-50 text-blue-700 border-blue-200',
-  '第2層: 今回レース嵌まり度': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Phase2 S-1/B-2': 'bg-purple-50 text-purple-700 border-purple-200',
-  'BET-7 馬場別': 'bg-orange-50 text-orange-700 border-orange-200',
+  '第1層: ポテンシャル確認':    'bg-blue-50 text-blue-700 border-blue-200',
+  '第2層: 今回レース嵌まり度':  'bg-emerald-50 text-emerald-700 border-emerald-200',
+  'Phase2 S-1/B-2':             'bg-purple-50 text-purple-700 border-purple-200',
+  'BET-7 馬場別':               'bg-orange-50 text-orange-700 border-orange-200',
+  '展開・枠順':                 'bg-teal-50 text-teal-700 border-teal-200',
 }
 
-// ── 小コンポーネント ──────────────────────────────────────────────────────
+// ── 共通 Badge ────────────────────────────────────────────────────────────
 
-function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function Badge({ text, cls }: { text: string; cls?: string }) {
   return (
-    <button
-      onClick={onClick}
-      className={`px-5 py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors ${
-        active
-          ? 'border-emerald-500 text-emerald-700 bg-white'
-          : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-      }`}
-    >
-      {label}
-    </button>
-  )
-}
-
-function Badge({ text, color }: { text: string; color?: string }) {
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${color ?? 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls ?? 'bg-gray-50 text-gray-600 border-gray-200'}`}>
       {text}
     </span>
   )
 }
 
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-sm font-semibold text-gray-700 mb-3">{children}</h3>
-}
-
-function Card({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${className ?? ''}`}>
-      {children}
-    </div>
-  )
-}
-
-// ── 組み込み条件一覧 ──────────────────────────────────────────────────────
-
-function BuiltinConditionRow({ cond }: { cond: BuiltinCondition }) {
-  const [open, setOpen] = useState(false)
-  const layerColor = LAYER_COLORS[cond.layer] ?? 'bg-gray-50 text-gray-600 border-gray-200'
-
-  return (
-    <div className="border-b border-gray-100 last:border-0">
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors"
-      >
-        <span className="text-gray-400 text-xs w-4">{open ? '▼' : '▶'}</span>
-        <span className="font-medium text-gray-800 text-sm flex-1">{cond.name}</span>
-        <Badge text={cond.layer} color={layerColor} />
-        <Badge text={cond.type === 'scoring' ? 'スコアリング' : '足切り'} />
-      </button>
-      {open && (
-        <div className="px-8 pb-4 text-xs text-gray-600 space-y-2">
-          <p className="text-gray-500">{cond.description}</p>
-          <div className="grid grid-cols-2 gap-2 mt-2">
-            {Object.entries(cond.params_schema).map(([key, schema]) => (
-              <div key={key} className="bg-gray-50 rounded px-3 py-1.5">
-                <span className="text-gray-500">{schema.label}: </span>
-                <span className="font-mono text-gray-700">{String(schema.default)}</span>
-                {schema.min !== undefined && (
-                  <span className="text-gray-400 ml-1">({schema.min}〜{schema.max})</span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── カスタム条件フォーム ───────────────────────────────────────────────────
-
-function CreateCustomConditionForm({
-  builtins,
-  onCreated,
-  onCancel,
-}: {
-  builtins: BuiltinCondition[]
-  onCreated: (c: CustomCondition) => void
-  onCancel: () => void
-}) {
-  const [name, setName] = useState('')
-  const [desc, setDesc] = useState('')
-  const [baseId, setBaseId] = useState(builtins[0]?.id ?? '')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const base = builtins.find(b => b.id === baseId)
-  const [params, setParams] = useState<Record<string, unknown>>({})
-
-  useEffect(() => {
-    if (!base) return
-    const defaults: Record<string, unknown> = {}
-    for (const [k, s] of Object.entries(base.params_schema)) {
-      defaults[k] = s.default
-    }
-    setParams(defaults)
-  }, [baseId])
-
-  const handleParamChange = (key: string, val: string) => {
-    const schema = base?.params_schema[key]
-    if (!schema) return
-    let parsed: unknown = val
-    if (schema.type === 'int') parsed = parseInt(val, 10) || 0
-    else if (schema.type === 'float') parsed = parseFloat(val) || 0
-    else if (schema.type === 'bool') parsed = val === 'true'
-    setParams(p => ({ ...p, [key]: parsed }))
-  }
-
-  const handleSubmit = async () => {
-    if (!name.trim()) { setError('名前を入力してください'); return }
-    setSaving(true); setError(null)
-    try {
-      const c = await createCondition({ name: name.trim(), description: desc, base_condition_id: baseId, params })
-      onCreated(c)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '不明なエラー')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-1">条件名</label>
-        <input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          placeholder="例: 前走着差0.3秒以内"
-        />
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-1">説明（任意）</label>
-        <input
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-        />
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-1">ベース条件</label>
-        <select
-          value={baseId}
-          onChange={e => setBaseId(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-        >
-          {builtins.map(b => (
-            <option key={b.id} value={b.id}>{b.name}</option>
-          ))}
-        </select>
-      </div>
-      {base && (
-        <div>
-          <label className="block text-xs font-medium text-gray-700 mb-2">パラメータ</label>
-          <div className="grid grid-cols-2 gap-3">
-            {Object.entries(base.params_schema).map(([key, schema]) => (
-              <div key={key}>
-                <label className="block text-xs text-gray-500 mb-0.5">{schema.label}</label>
-                {schema.choices ? (
-                  <select
-                    value={String(params[key] ?? schema.default)}
-                    onChange={e => handleParamChange(key, e.target.value)}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
-                  >
-                    {schema.choices.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                ) : schema.type === 'bool' ? (
-                  <select
-                    value={String(params[key] ?? schema.default)}
-                    onChange={e => handleParamChange(key, e.target.value)}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
-                  >
-                    <option value="true">有効</option>
-                    <option value="false">無効</option>
-                  </select>
-                ) : (
-                  <input
-                    type="number"
-                    value={String(params[key] ?? schema.default)}
-                    min={schema.min}
-                    max={schema.max}
-                    step={schema.type === 'float' ? 0.01 : 1}
-                    onChange={e => handleParamChange(key, e.target.value)}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm"
-                  />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {error && <p className="text-red-600 text-xs">{error}</p>}
-      <div className="flex gap-2 justify-end pt-2">
-        <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">キャンセル</button>
-        <button
-          onClick={handleSubmit}
-          disabled={saving}
-          className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
-        >
-          {saving ? '保存中...' : '保存'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── 条件セットエディタ ────────────────────────────────────────────────────
-
-function ConditionSetEditor({
-  builtins,
-  customs,
-  initial,
-  onSaved,
-  onCancel,
-}: {
-  builtins: BuiltinCondition[]
-  customs: CustomCondition[]
-  initial?: ConditionSet
-  onSaved: (s: ConditionSet) => void
-  onCancel: () => void
-}) {
-  const [name, setName] = useState(initial?.name ?? '')
-  const [desc, setDesc] = useState(initial?.description ?? '')
-  const [entries, setEntries] = useState<ConditionEntry[]>(initial?.conditions ?? [])
-  const [maxSel, setMaxSel] = useState(initial?.ranking.max_selections ?? 3)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const allConds = [
-    ...builtins.map(b => ({ id: b.id, name: b.name, source: '組み込み' })),
-    ...customs.map(c => ({ id: c.id, name: c.name, source: 'カスタム' })),
-  ]
-
-  const addCondition = (condId: string) => {
-    if (entries.some(e => e.condition_id === condId)) return
-    const builtin = builtins.find(b => b.id === condId)
-    const custom = customs.find(c => c.id === condId)
-    const defaults: Record<string, unknown> = {}
-    if (builtin) {
-      for (const [k, s] of Object.entries(builtin.params_schema)) defaults[k] = s.default
-    } else if (custom) {
-      Object.assign(defaults, custom.params)
-    }
-    setEntries(prev => [...prev, { condition_id: condId, mode: 'scoring', enabled: true, params: defaults }])
-  }
-
-  const removeCondition = (idx: number) => {
-    setEntries(prev => prev.filter((_, i) => i !== idx))
-  }
-
-  const toggleMode = (idx: number) => {
-    setEntries(prev => prev.map((e, i) =>
-      i === idx ? { ...e, mode: e.mode === 'scoring' ? 'filter' : 'scoring' } : e
-    ))
-  }
-
-  const toggleEnabled = (idx: number) => {
-    setEntries(prev => prev.map((e, i) =>
-      i === idx ? { ...e, enabled: !e.enabled } : e
-    ))
-  }
-
-  const handleSubmit = async () => {
-    if (!name.trim()) { setError('名前を入力してください'); return }
-    setSaving(true); setError(null)
-    try {
-      const body = { name: name.trim(), description: desc, conditions: entries, ranking: { primary: 'condition_clear_count', secondary: 'ai_score', max_selections: maxSel } }
-      const result = initial
-        ? await updateConditionSet(initial.id, body)
-        : await createConditionSet(body)
-      onSaved(result)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '不明なエラー')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-xs font-medium text-gray-700 mb-1">セット名</label>
-          <input
-            value={name}
-            onChange={e => setName(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-            placeholder="例: S-1パターン"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-700 mb-1">最大選出頭数</label>
-          <input
-            type="number" min={1} max={10} value={maxSel}
-            onChange={e => setMaxSel(Number(e.target.value))}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          />
-        </div>
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-1">説明（任意）</label>
-        <input
-          value={desc}
-          onChange={e => setDesc(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-        />
-      </div>
-
-      {/* 条件追加 */}
-      <div>
-        <label className="block text-xs font-medium text-gray-700 mb-2">条件を追加</label>
-        <div className="flex gap-2">
-          <select
-            id="cond-add-select"
-            className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-            defaultValue=""
-          >
-            <option value="" disabled>条件を選択…</option>
-            {allConds.map(c => (
-              <option key={c.id} value={c.id}>[{c.source}] {c.name}</option>
-            ))}
-          </select>
-          <button
-            onClick={() => {
-              const sel = (document.getElementById('cond-add-select') as HTMLSelectElement).value
-              if (sel) addCondition(sel)
-            }}
-            className="px-3 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700"
-          >
-            追加
-          </button>
-        </div>
-      </div>
-
-      {/* 条件リスト */}
-      {entries.length > 0 && (
-        <div>
-          <label className="block text-xs font-medium text-gray-700 mb-2">設定中の条件</label>
-          <div className="space-y-2">
-            {entries.map((entry, idx) => {
-              const cond = allConds.find(c => c.id === entry.condition_id)
-              return (
-                <div key={idx} className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${entry.enabled ? 'border-gray-200 bg-white' : 'border-gray-100 bg-gray-50 opacity-60'}`}>
-                  <input
-                    type="checkbox"
-                    checked={entry.enabled}
-                    onChange={() => toggleEnabled(idx)}
-                    className="rounded"
-                  />
-                  <span className="text-sm text-gray-700 flex-1">{cond?.name ?? entry.condition_id}</span>
-                  <button
-                    onClick={() => toggleMode(idx)}
-                    className={`px-2 py-0.5 text-xs rounded border font-medium ${
-                      entry.mode === 'filter'
-                        ? 'bg-red-50 text-red-700 border-red-200'
-                        : 'bg-blue-50 text-blue-700 border-blue-200'
-                    }`}
-                  >
-                    {entry.mode === 'filter' ? '足切り型' : 'スコアリング'}
-                  </button>
-                  <button onClick={() => removeCondition(idx)} className="text-gray-400 hover:text-red-500 text-xs px-1">✕</button>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {error && <p className="text-red-600 text-xs">{error}</p>}
-      <div className="flex gap-2 justify-end pt-2">
-        <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">キャンセル</button>
-        <button
-          onClick={handleSubmit}
-          disabled={saving}
-          className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
-        >
-          {saving ? '保存中...' : initial ? '更新' : '作成'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── 条件管理タブ ──────────────────────────────────────────────────────────
-
-function ConditionManagementTab({
-  builtins,
-  customs,
-  conditionSets,
-  onCustomsChanged,
-  onSetsChanged,
-}: {
-  builtins: BuiltinCondition[]
-  customs: CustomCondition[]
-  conditionSets: ConditionSet[]
-  onCustomsChanged: () => void
-  onSetsChanged: () => void
-}) {
-  const [showCreateCustom, setShowCreateCustom] = useState(false)
-  const [showCreateSet, setShowCreateSet] = useState(false)
-  const [editingSet, setEditingSet] = useState<ConditionSet | null>(null)
-
-  const handleDeleteCustom = async (id: string) => {
-    if (!confirm('このカスタム条件を削除しますか？')) return
-    await deleteCondition(id)
-    onCustomsChanged()
-  }
-
-  const handleDeleteSet = async (id: string) => {
-    if (!confirm('この条件セットを削除しますか？')) return
-    await deleteConditionSet(id)
-    onSetsChanged()
-  }
-
-  return (
-    <div className="space-y-6">
-      {/* 組み込み条件一覧 */}
-      <Card>
-        <div className="px-4 pt-4 pb-2 flex items-center justify-between">
-          <SectionTitle>組み込み条件（{builtins.length}件）</SectionTitle>
-          <span className="text-xs text-gray-400">読み取り専用</span>
-        </div>
-        <div className="divide-y divide-gray-50">
-          {builtins.map(c => <BuiltinConditionRow key={c.id} cond={c} />)}
-        </div>
-      </Card>
-
-      {/* カスタム条件 */}
-      <Card>
-        <div className="px-4 pt-4 pb-2 flex items-center justify-between">
-          <SectionTitle>カスタム条件（{customs.length}件）</SectionTitle>
-          {!showCreateCustom && (
-            <button
-              onClick={() => setShowCreateCustom(true)}
-              className="text-xs px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
-            >
-              + 新規作成
-            </button>
-          )}
-        </div>
-        {showCreateCustom && (
-          <div className="px-4 pb-4 border-t border-gray-100 pt-4">
-            <CreateCustomConditionForm
-              builtins={builtins}
-              onCreated={() => { onCustomsChanged(); setShowCreateCustom(false) }}
-              onCancel={() => setShowCreateCustom(false)}
-            />
-          </div>
-        )}
-        {customs.length === 0 && !showCreateCustom ? (
-          <p className="px-4 pb-4 text-sm text-gray-400">カスタム条件はありません。</p>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {customs.map(c => (
-              <div key={c.id} className="px-4 py-3 flex items-start gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-800">{c.name}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">ベース: {c.base_condition_id}</p>
-                  {c.description && <p className="text-xs text-gray-500 mt-0.5">{c.description}</p>}
-                </div>
-                <button
-                  onClick={() => handleDeleteCustom(c.id)}
-                  className="text-xs text-red-400 hover:text-red-600 flex-shrink-0"
-                >
-                  削除
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      {/* 条件セット */}
-      <Card>
-        <div className="px-4 pt-4 pb-2 flex items-center justify-between">
-          <SectionTitle>条件セット（{conditionSets.length}件）</SectionTitle>
-          {!showCreateSet && !editingSet && (
-            <button
-              onClick={() => setShowCreateSet(true)}
-              className="text-xs px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
-            >
-              + 新規作成
-            </button>
-          )}
-        </div>
-
-        {(showCreateSet || editingSet) && (
-          <div className="px-4 pb-4 border-t border-gray-100 pt-4">
-            <p className="text-xs font-semibold text-gray-600 mb-3">
-              {editingSet ? `「${editingSet.name}」を編集` : '新規条件セット'}
-            </p>
-            <ConditionSetEditor
-              builtins={builtins}
-              customs={customs}
-              initial={editingSet ?? undefined}
-              onSaved={() => {
-                onSetsChanged()
-                setShowCreateSet(false)
-                setEditingSet(null)
-              }}
-              onCancel={() => { setShowCreateSet(false); setEditingSet(null) }}
-            />
-          </div>
-        )}
-
-        {conditionSets.length === 0 && !showCreateSet ? (
-          <p className="px-4 pb-4 text-sm text-gray-400">条件セットはありません。</p>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {conditionSets.map(s => (
-              <div key={s.id} className="px-4 py-3">
-                <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800">{s.name}</p>
-                    {s.description && <p className="text-xs text-gray-500 mt-0.5">{s.description}</p>}
-                    <p className="text-xs text-gray-400 mt-1">
-                      条件 {s.conditions.length}件 / 最大選出 {s.ranking.max_selections}頭
-                    </p>
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {s.conditions.slice(0, 5).map(e => (
-                        <Badge
-                          key={e.condition_id}
-                          text={e.condition_id.replace(/^v2_/, '')}
-                          color={e.mode === 'filter' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-blue-50 text-blue-700 border-blue-200'}
-                        />
-                      ))}
-                      {s.conditions.length > 5 && (
-                        <span className="text-xs text-gray-400">+{s.conditions.length - 5}件</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => { setEditingSet(s); setShowCreateSet(false) }}
-                      className="text-xs text-blue-500 hover:text-blue-700"
-                    >
-                      編集
-                    </button>
-                    <button
-                      onClick={() => handleDeleteSet(s.id)}
-                      className="text-xs text-red-400 hover:text-red-600"
-                    >
-                      削除
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-    </div>
-  )
-}
-
 // ── バックテスト結果テーブル ───────────────────────────────────────────────
 
-function BacktestResultTable({
-  results,
-  label,
-}: {
-  results: Record<string, BacktestPeriodResult>
-  label?: string
-}) {
-  const periods = Object.keys(results)
-  if (periods.length === 0) return null
-
-  const betTypes: Array<{ key: keyof BacktestPeriodResult; label: string }> = [
-    { key: 'tansho', label: '単勝' },
-    { key: 'fukusho', label: '複勝' },
-    { key: 'umaren', label: '馬連' },
-    { key: 'wide', label: 'ワイド' },
-    { key: 'sanrenpuku', label: '三連複' },
-  ]
-
+function BacktestResultTable({ result }: { result: BacktestJob['result'] }) {
+  if (!result || result.type !== 'single') return null
   return (
-    <div>
-      {label && <p className="text-xs font-semibold text-gray-600 mb-2">{label}</p>}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs border-collapse">
-          <thead>
-            <tr className="bg-gray-50">
-              <th className="px-3 py-2 text-left text-gray-600 font-medium border border-gray-200">期間</th>
-              {betTypes.map(b => (
-                <th key={b.key} colSpan={2} className="px-3 py-2 text-center text-gray-600 font-medium border border-gray-200">
-                  {b.label}
-                </th>
-              ))}
-              <th className="px-3 py-2 text-left text-gray-600 font-medium border border-gray-200">レース数</th>
-            </tr>
-            <tr className="bg-gray-50">
-              <th className="px-3 py-2 border border-gray-200" />
-              {betTypes.map(b => (
-                <>
-                  <th key={`${b.key}-roi`} className="px-2 py-1 text-gray-500 font-normal border border-gray-200">ROI</th>
-                  <th key={`${b.key}-hit`} className="px-2 py-1 text-gray-500 font-normal border border-gray-200">的中率</th>
-                </>
-              ))}
-              <th className="px-3 py-2 border border-gray-200" />
-            </tr>
-          </thead>
-          <tbody>
-            {periods.map(period => {
-              const r = results[period]
-              return (
-                <tr key={period} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 font-medium text-gray-700 border border-gray-200">
-                    {PERIOD_LABELS[period] ?? period}
-                  </td>
-                  {betTypes.map(b => {
-                    const s = r[b.key]
-                    const low = lowSample(s)
-                    return (
-                      <>
-                        <td key={`${b.key}-roi`} className={`px-2 py-2 text-center border border-gray-200 ${
-                          s.return_rate >= 1.0 ? 'text-emerald-600 font-semibold' :
-                          s.return_rate >= 0.8 ? 'text-yellow-600' : 'text-red-500'
-                        }`}>
-                          {roi(s)}
-                          {low && <span className="ml-0.5 text-orange-400">⚠</span>}
-                        </td>
-                        <td key={`${b.key}-hit`} className="px-2 py-2 text-center text-gray-600 border border-gray-200">
-                          {hitRate(s)}
-                        </td>
-                      </>
-                    )
-                  })}
-                  <td className="px-3 py-2 text-gray-500 border border-gray-200">{r.tansho.race_count}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      <p className="text-xs text-orange-500 mt-1">⚠ = サンプル30件未満（信頼性低）</p>
-    </div>
-  )
-}
-
-// ── アブレーション分析 ────────────────────────────────────────────────────
-
-function AblationPlaceholder() {
-  return (
-    <div className="bg-gray-50 border border-dashed border-gray-300 rounded-xl p-6 text-center">
-      <p className="text-sm text-gray-500">条件ごとの寄与度確認（アブレーション分析）</p>
-      <p className="text-xs text-gray-400 mt-1">バックテスト完了後、各条件を外した場合の的中率変化を表示します</p>
-    </div>
-  )
-}
-
-// ── バックテストタブ ───────────────────────────────────────────────────────
-
-function BacktestTab({ conditionSets }: { conditionSets: ConditionSet[] }) {
-  const [mode, setMode] = useState<'single' | 'compare'>('single')
-  const [selectedSetId, setSelectedSetId] = useState('')
-  const [compareSetIdA, setCompareSetIdA] = useState('')
-  const [compareSetIdB, setCompareSetIdB] = useState('')
-  const [aiteStrategy, setAiteStrategy] = useState('anaba_v5')
-  const [periods, setPeriods] = useState<string[]>(['3m', '6m', '1y'])
-  const [job, setJob] = useState<BacktestJob | null>(null)
-  const [running, setRunning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  const stopPolling = () => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
-  }
-
-  useEffect(() => () => stopPolling(), [])
-
-  const pollJob = async (id: string) => {
-    stopPolling()
-    pollRef.current = setInterval(async () => {
-      try {
-        const j = await fetchBacktestResult(id)
-        setJob(j)
-        if (j.status === 'done' || j.status === 'error') {
-          stopPolling()
-          setRunning(false)
-        }
-      } catch {
-        stopPolling()
-        setRunning(false)
-      }
-    }, 2000)
-  }
-
-  const handleRunSingle = async () => {
-    if (!selectedSetId) { setError('条件セットを選択してください'); return }
-    if (periods.length === 0) { setError('期間を選択してください'); return }
-    setError(null); setRunning(true); setJob(null)
-    try {
-      const { job_id } = await startBacktest({ condition_set_id: selectedSetId, aite_strategy: aiteStrategy, periods })
-      pollJob(job_id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '不明なエラー')
-      setRunning(false)
-    }
-  }
-
-  const handleRunCompare = async () => {
-    if (!compareSetIdA || !compareSetIdB) { setError('2つの条件セットを選択してください'); return }
-    if (compareSetIdA === compareSetIdB) { setError('異なる条件セットを選択してください'); return }
-    setError(null); setRunning(true); setJob(null)
-    try {
-      const { job_id } = await startCompareBacktest({
-        condition_set_id_a: compareSetIdA,
-        condition_set_id_b: compareSetIdB,
-        aite_strategy: aiteStrategy,
-        periods: [periods[0] ?? '3m'],
-      })
-      pollJob(job_id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '不明なエラー')
-      setRunning(false)
-    }
-  }
-
-  const togglePeriod = (p: string) => {
-    setPeriods(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p])
-  }
-
-  const trainEndDate = '2024-07-01'
-  const warnLeak = periods.some(p => {
-    if (p === '1y') return true
-    return false
-  })
-
-  return (
-    <div className="space-y-6">
-      {/* モード切替 */}
-      <div className="flex gap-1 bg-gray-100 p-1 rounded-xl w-fit">
-        {(['single', 'compare'] as const).map(m => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            className={`px-4 py-2 text-sm rounded-lg transition-colors ${mode === m ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-          >
-            {m === 'single' ? '単体バックテスト' : '比較バックテスト'}
-          </button>
-        ))}
-      </div>
-
-      <Card className="p-5">
-        <SectionTitle>バックテスト設定</SectionTitle>
-        <div className="grid grid-cols-2 gap-5">
-          {mode === 'single' ? (
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">条件セット</label>
-              <select
-                value={selectedSetId}
-                onChange={e => setSelectedSetId(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-              >
-                <option value="">選択してください…</option>
-                {conditionSets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </div>
-          ) : (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">条件セットA</label>
-                <select
-                  value={compareSetIdA}
-                  onChange={e => setCompareSetIdA(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                >
-                  <option value="">選択してください…</option>
-                  {conditionSets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">条件セットB</label>
-                <select
-                  value={compareSetIdB}
-                  onChange={e => setCompareSetIdB(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                >
-                  <option value="">選択してください…</option>
-                  {conditionSets.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-            </>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">相手戦略</label>
-            <select
-              value={aiteStrategy}
-              onChange={e => setAiteStrategy(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-            >
-              {['anaba_v1', 'anaba_v2', 'anaba_v3', 'anaba_v4', 'anaba_v5'].map(v => (
-                <option key={v} value={v}>{v}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* 期間選択 */}
-        <div className="mt-4">
-          <label className="block text-xs font-medium text-gray-700 mb-2">対象期間</label>
-          <div className="flex gap-2">
-            {Object.entries(PERIOD_LABELS).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => togglePeriod(key)}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                  periods.includes(key)
-                    ? 'bg-emerald-50 border-emerald-400 text-emerald-700 font-medium'
-                    : 'border-gray-300 text-gray-500 hover:bg-gray-50'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {warnLeak && (
-          <div className="mt-3 flex gap-2 items-start bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2">
-            <span className="text-yellow-500">⚠</span>
-            <p className="text-xs text-yellow-700">
-              「直近1年」にはTRAIN_END_DATE ({trainEndDate}) より前のデータが含まれる可能性があります。
-              学習データと重複しているため結果の解釈に注意してください。
-            </p>
-          </div>
-        )}
-
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-
-        <div className="mt-4">
-          <button
-            onClick={mode === 'single' ? handleRunSingle : handleRunCompare}
-            disabled={running || conditionSets.length === 0}
-            className="px-5 py-2.5 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {running ? (
-              <>
-                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-                実行中…
-              </>
-            ) : 'バックテスト実行'}
-          </button>
-          {conditionSets.length === 0 && (
-            <p className="text-xs text-gray-400 mt-1">先に「条件管理」タブで条件セットを作成してください。</p>
-          )}
-        </div>
-      </Card>
-
-      {/* 結果表示 */}
-      {job && (
-        <Card className="p-5">
-          <SectionTitle>バックテスト結果</SectionTitle>
-          {job.status === 'running' && (
-            <div className="flex items-center gap-3 text-gray-500 py-4">
-              <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              <span className="text-sm">バックテスト実行中です。しばらくお待ちください…</span>
-            </div>
-          )}
-          {job.status === 'error' && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-              <p className="text-sm text-red-700 font-medium">エラーが発生しました</p>
-              <p className="text-xs text-red-600 mt-1">{job.error}</p>
-            </div>
-          )}
-          {job.status === 'done' && job.result && (
-            <>
-              {job.result.type === 'single' && (
-                <BacktestResultTable results={(job.result as ReturnType<typeof Object.create>).results} />
-              )}
-              {job.result.type === 'compare' && (() => {
-                const r = job.result as CompareResult
-                return (
-                  <div className="space-y-6">
-                    <BacktestResultTable results={r.set_a.results} label={`A: ${r.set_a.name}`} />
-                    <BacktestResultTable results={r.set_b.results} label={`B: ${r.set_b.name}`} />
-                    <CompareHighlight ra={r.set_a.results} rb={r.set_b.results} nameA={r.set_a.name} nameB={r.set_b.name} />
-                  </div>
-                )
-              })()}
-              <div className="mt-6">
-                <AblationPlaceholder />
-              </div>
-            </>
-          )}
-        </Card>
-      )}
-    </div>
-  )
-}
-
-// ── 比較ハイライト ────────────────────────────────────────────────────────
-
-function CompareHighlight({
-  ra, rb, nameA, nameB,
-}: {
-  ra: Record<string, BacktestPeriodResult>
-  rb: Record<string, BacktestPeriodResult>
-  nameA: string
-  nameB: string
-}) {
-  const period = Object.keys(ra)[0]
-  if (!period || !ra[period] || !rb[period]) return null
-  const a = ra[period]
-  const b = rb[period]
-
-  const rows: Array<{ label: string; keyA: number; keyB: number }> = [
-    { label: '単勝ROI', keyA: a.tansho.return_rate, keyB: b.tansho.return_rate },
-    { label: '複勝ROI', keyA: a.fukusho.return_rate, keyB: b.fukusho.return_rate },
-    { label: '馬連ROI', keyA: a.umaren.return_rate, keyB: b.umaren.return_rate },
-  ]
-
-  return (
-    <div className="border-t border-gray-100 pt-4">
-      <p className="text-xs font-semibold text-gray-600 mb-3">
-        比較サマリー（{PERIOD_LABELS[period] ?? period}）
-      </p>
-      <table className="text-xs w-full max-w-md">
+    <div className="overflow-x-auto mt-3">
+      <table className="text-xs w-full">
         <thead>
-          <tr className="text-gray-500">
-            <th className="text-left py-1 pr-4">指標</th>
-            <th className="text-right py-1 pr-4">A: {nameA}</th>
-            <th className="text-right py-1">B: {nameB}</th>
+          <tr className="text-gray-500 border-b border-gray-200">
+            <th className="text-left pb-1">期間</th>
+            <th className="pb-1">賭式</th>
+            <th className="pb-1 text-right">件数</th>
+            <th className="pb-1 text-right">的中率</th>
+            <th className="pb-1 text-right">ROI</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map(r => {
-            const aWins = r.keyA > r.keyB
-            const bWins = r.keyB > r.keyA
-            return (
-              <tr key={r.label} className="border-t border-gray-100">
-                <td className="py-1.5 pr-4 text-gray-600">{r.label}</td>
-                <td className={`py-1.5 pr-4 text-right font-mono ${aWins ? 'text-emerald-600 font-semibold' : 'text-gray-600'}`}>
-                  {(r.keyA * 100).toFixed(1)}%
-                </td>
-                <td className={`py-1.5 text-right font-mono ${bWins ? 'text-emerald-600 font-semibold' : 'text-gray-600'}`}>
-                  {(r.keyB * 100).toFixed(1)}%
-                </td>
-              </tr>
-            )
-          })}
+          {Object.entries(result.results).map(([period, r]) =>
+            (['fukusho', 'tansho'] as const).map((bet, bi) => {
+              const s = r[bet]
+              if (s.bet_count === 0) return null
+              const roiCls =
+                s.return_rate >= 1
+                  ? 'text-emerald-600 font-semibold'
+                  : s.return_rate >= 0.8
+                    ? 'text-amber-600'
+                    : 'text-red-500'
+              return (
+                <tr key={`${period}-${bet}`} className="border-b border-gray-50">
+                  {bi === 0 && (
+                    <td rowSpan={2} className="py-1.5 text-gray-500 align-top pr-2">
+                      {PERIOD_LABELS[period] ?? period}
+                    </td>
+                  )}
+                  <td className="py-1.5 pl-2">{bet === 'fukusho' ? '複勝' : '単勝'}</td>
+                  <td className="py-1.5 text-right">{s.bet_count}</td>
+                  <td className="py-1.5 text-right">{hitStr(s)}</td>
+                  <td className={`py-1.5 text-right ${roiCls}`}>{roiStr(s)}</td>
+                </tr>
+              )
+            })
+          )}
         </tbody>
       </table>
     </div>
   )
 }
 
-// ── メインビュー ──────────────────────────────────────────────────────────
+// ── インラインバックテストパネル ──────────────────────────────────────────
+
+function BacktestPanel({ setId, onClose }: { setId: string; onClose: () => void }) {
+  const [periods, setPeriods] = useState<string[]>(['3m', '6m'])
+  const [job, setJob] = useState<BacktestJob | null>(null)
+  const [running, setRunning] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const stopPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+  useEffect(() => () => stopPoll(), [])
+
+  const toggle = (p: string) =>
+    setPeriods(prev => (prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]))
+
+  const run = async () => {
+    setRunning(true)
+    setJob(null)
+    try {
+      const { job_id } = await startBacktest({ condition_set_id: setId, periods })
+      stopPoll()
+      pollRef.current = setInterval(async () => {
+        const j = await fetchBacktestResult(job_id)
+        setJob(j)
+        if (j.status === 'done' || j.status === 'error') {
+          stopPoll()
+          setRunning(false)
+        }
+      }, 2000)
+    } catch (e) {
+      setJob({ status: 'error', type: 'single', result: null, error: String(e) })
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 border border-gray-200 rounded-lg p-3 bg-gray-50">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-gray-600 font-medium">期間:</span>
+        {(['3m', '6m', '1y'] as const).map(p => (
+          <button
+            key={p}
+            onClick={() => toggle(p)}
+            className={`px-2 py-0.5 rounded text-xs border transition-colors ${
+              periods.includes(p)
+                ? 'bg-emerald-600 text-white border-emerald-600'
+                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+            }`}
+          >
+            {PERIOD_LABELS[p]}
+          </button>
+        ))}
+        <button
+          onClick={run}
+          disabled={running || periods.length === 0}
+          className="ml-auto px-3 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+        >
+          {running ? '実行中...' : '▶ 実行'}
+        </button>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xs px-1">
+          ✕
+        </button>
+      </div>
+
+      {job?.status === 'error' && (
+        <p className="mt-2 text-xs text-red-600">エラー: {job.error}</p>
+      )}
+      {job?.status === 'running' && (
+        <p className="mt-2 text-xs text-gray-500 animate-pulse">計算中...</p>
+      )}
+      {job?.status === 'done' && <BacktestResultTable result={job.result} />}
+    </div>
+  )
+}
+
+// ── 条件一覧表示 ──────────────────────────────────────────────────────────
+
+function StrategyConditionList({ conditions }: { conditions: StrategyCondition[] }) {
+  if (!conditions.length) return null
+  return (
+    <div className="space-y-1.5 mt-3 pt-3 border-t border-gray-100">
+      {conditions.map((c, i) => (
+        <div key={i} className="flex items-start gap-2 text-xs">
+          <span
+            className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] ${
+              c.required ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'
+            }`}
+          >
+            {c.required ? '必' : '加'}
+          </span>
+          <div className="min-w-0">
+            <span className="font-mono text-gray-700">{c.id}</span>
+            {Object.keys(c.params ?? {}).length > 0 && (
+              <span className="ml-2 text-gray-400 break-all">
+                {Object.entries(c.params)
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(', ')}
+              </span>
+            )}
+            {c._comment && <p className="text-gray-400 mt-0.5">{c._comment}</p>}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function TrainingPriorityList({ priorities }: { priorities: StrategyTrainingPriority[] }) {
+  return (
+    <div className="space-y-1 mt-3 pt-3 border-t border-gray-100">
+      {priorities.map(p => (
+        <div key={p.priority} className="flex gap-2 text-xs">
+          <span className="flex-shrink-0 w-5 h-5 rounded bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-[10px]">
+            {p.priority}
+          </span>
+          <span className="text-gray-600">{p.label}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AiSubmodelList({ submodels }: { submodels: StrategyAiSubmodel[] }) {
+  return (
+    <div className="space-y-2 mt-3 pt-3 border-t border-gray-100">
+      {submodels.map(m => (
+        <div key={m.name} className="flex items-center gap-2 text-xs">
+          <span className="font-mono text-gray-700 w-24 flex-shrink-0">{m.name}</span>
+          <div className="flex-1 h-1.5 bg-gray-100 rounded-full">
+            <div
+              className="h-1.5 bg-rose-400 rounded-full"
+              style={{ width: `${(m.contribution * 100).toFixed(0)}%` }}
+            />
+          </div>
+          <span className="text-gray-500 w-10 text-right">{(m.contribution * 100).toFixed(1)}%</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── 戦略スタッツ行 ────────────────────────────────────────────────────────
+
+function StrategyStatsRow({ id, stats }: { id: string; stats: StrategyStats }) {
+  if (id === 's1_pattern') {
+    return (
+      <div className="flex flex-wrap gap-3 text-xs mt-1.5 text-gray-600">
+        <span>
+          複勝率 <strong className="text-emerald-600">{pct(stats.place_rate)}</strong>
+          <span className="text-gray-400 ml-1">({stats.race_count}R)</span>
+        </span>
+        <span>
+          HO複勝 <strong className="text-emerald-600">{pct(stats.holdout_place_rate)}</strong>
+          <span className="text-gray-400 ml-1">({stats.holdout_count}R)</span>
+        </span>
+      </div>
+    )
+  }
+  if (id === 'anaba_v5') {
+    return (
+      <div className="text-xs mt-1.5 text-gray-600">
+        単勝ROI <strong className="text-amber-600">{pct(stats.tan_roi)}</strong>
+      </div>
+    )
+  }
+  if (id === 'anaba_ai_v1') {
+    return (
+      <div className="flex flex-wrap gap-3 text-xs mt-1.5 text-gray-600">
+        <span>
+          7-9人気ROI <strong className="text-rose-600">{pct(stats.c_period_roi_78)}</strong>
+        </span>
+        <span>
+          全体ROI <strong className="text-gray-700">{pct(stats.c_period_roi_all)}</strong>
+        </span>
+        {stats.c_period && <span className="text-gray-400">({stats.c_period})</span>}
+      </div>
+    )
+  }
+  return null
+}
+
+// ── 戦略カード ────────────────────────────────────────────────────────────
+
+function StrategyCard({
+  strategy,
+  onCopyRequest,
+  onBtCopied,
+}: {
+  strategy: LabStrategy
+  onCopyRequest: (s: LabStrategy) => void
+  onBtCopied: () => Promise<void>
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [btSetId, setBtSetId] = useState<string | null>(null)
+  const [copying, setCopying] = useState(false)
+  const badge = TYPE_BADGE[strategy.display_type] ?? TYPE_BADGE.honmei
+  const hasConditions = strategy.conditions.length > 0
+  const canBacktest = hasConditions
+  const hasExpandable = hasConditions || !!strategy.training_priorities || !!strategy.ai_submodels
+
+  const handleBt = async () => {
+    if (btSetId) {
+      setBtSetId(null)
+      return
+    }
+    setCopying(true)
+    try {
+      const now = new Date().toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
+      const set = await copyStrategyToExperiment(strategy.id, `${strategy.label} BT ${now}`)
+      setBtSetId(set.id)
+      await onBtCopied()
+    } catch (e) {
+      console.error('BT copy failed', e)
+    } finally {
+      setCopying(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 flex flex-col">
+      <div className="flex items-center gap-2 mb-1">
+        <Badge text={badge.label} cls={badge.cls} />
+        {strategy.version && (
+          <span className="text-xs text-gray-400">v{strategy.version}</span>
+        )}
+      </div>
+      <h3 className="text-sm font-semibold text-gray-900">{strategy.name ?? strategy.label}</h3>
+
+      <StrategyStatsRow id={strategy.id} stats={strategy.stats} />
+
+      {strategy.stats.segment && (
+        <p className="text-xs text-gray-400 mt-1">{strategy.stats.segment}</p>
+      )}
+      {strategy.description && (
+        <p className="text-xs text-gray-500 mt-1 line-clamp-2">{strategy.description}</p>
+      )}
+
+      <div className="flex flex-wrap gap-1.5 mt-3">
+        {hasExpandable && (
+          <button
+            onClick={() => setExpanded(v => !v)}
+            className="px-2.5 py-1 text-xs rounded border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+          >
+            {expanded ? '▲ 閉じる' : '▶ 条件を見る'}
+            {hasConditions && (
+              <span className="ml-1 text-gray-400">({strategy.conditions.length})</span>
+            )}
+            {strategy.training_priorities && (
+              <span className="ml-1 text-gray-400">({strategy.training_priorities.length})</span>
+            )}
+          </button>
+        )}
+        {hasConditions && (
+          <button
+            onClick={() => onCopyRequest(strategy)}
+            className="px-2.5 py-1 text-xs rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50 transition-colors"
+          >
+            コピーして編集
+          </button>
+        )}
+        {canBacktest && (
+          <button
+            onClick={handleBt}
+            disabled={copying}
+            className={`px-2.5 py-1 text-xs rounded border transition-colors disabled:opacity-50 ${
+              btSetId
+                ? 'border-blue-300 text-blue-700 bg-blue-50'
+                : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            {copying ? '準備中...' : btSetId ? '▲ BTを閉じる' : 'バックテスト'}
+          </button>
+        )}
+      </div>
+
+      {expanded && (
+        <>
+          {hasConditions && <StrategyConditionList conditions={strategy.conditions} />}
+          {strategy.training_priorities && (
+            <TrainingPriorityList priorities={strategy.training_priorities} />
+          )}
+          {strategy.ai_submodels && <AiSubmodelList submodels={strategy.ai_submodels} />}
+        </>
+      )}
+
+      {btSetId && <BacktestPanel setId={btSetId} onClose={() => setBtSetId(null)} />}
+    </div>
+  )
+}
+
+// ── コピーモーダル ────────────────────────────────────────────────────────
+
+function CopyModal({
+  strategy,
+  onSave,
+  onClose,
+}: {
+  strategy: LabStrategy
+  onSave: (name: string) => Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(`${strategy.label} のコピー`)
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!name.trim()) return
+    setSaving(true)
+    try {
+      await onSave(name.trim())
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md"
+        onClick={e => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-gray-900 mb-1">条件セットとして保存</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          <strong>{strategy.name ?? strategy.label}</strong>{' '}
+          の条件をコピーして実験用セットを作成します。
+          保存後「実験中の条件セット」に表示されます。
+        </p>
+        <label className="block text-xs text-gray-600 mb-1 font-medium">セット名</label>
+        <input
+          type="text"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && handleSave()}
+          maxLength={60}
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+        />
+        <div className="flex justify-end gap-2 mt-4">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50"
+          >
+            キャンセル
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || !name.trim()}
+            className="px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── 実験カード ────────────────────────────────────────────────────────────
+
+function ExperimentCard({
+  set,
+  strategies,
+  onDelete,
+}: {
+  set: ConditionSet
+  strategies: LabStrategy[]
+  onDelete: () => void
+}) {
+  const [btOpen, setBtOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const source = strategies.find(s => s.id === set.source_strategy_id)
+
+  const handleDelete = async () => {
+    if (!window.confirm(`「${set.name}」を削除しますか？`)) return
+    setDeleting(true)
+    try {
+      await deleteConditionSet(set.id)
+      onDelete()
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4">
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-900 truncate">{set.name}</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {set.conditions.length}条件
+            {source && (
+              <>
+                {' · '}
+                <span className="text-blue-500">{source.label}</span> からコピー
+              </>
+            )}
+          </p>
+        </div>
+        <div className="flex gap-1.5 flex-shrink-0">
+          <button
+            onClick={() => setBtOpen(v => !v)}
+            className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+              btOpen
+                ? 'border-blue-300 text-blue-700 bg-blue-50'
+                : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            {btOpen ? '▲ 閉じる' : 'バックテスト'}
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="px-2.5 py-1 text-xs rounded border border-red-100 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
+          >
+            削除
+          </button>
+        </div>
+      </div>
+
+      {set.conditions.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {set.conditions.map((c, i) => (
+            <span
+              key={i}
+              className={`text-[11px] px-1.5 py-0.5 rounded border ${
+                c.mode === 'filter'
+                  ? 'bg-red-50 text-red-600 border-red-100'
+                  : 'bg-gray-50 text-gray-500 border-gray-100'
+              }`}
+            >
+              {c.condition_id}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {btOpen && <BacktestPanel setId={set.id} onClose={() => setBtOpen(false)} />}
+    </div>
+  )
+}
+
+// ── 条件ライブラリ（折りたたみ） ──────────────────────────────────────────
+
+function LibrarySection({ conditions }: { conditions: BuiltinCondition[] }) {
+  const [open, setOpen] = useState(false)
+  const byLayer: Record<string, BuiltinCondition[]> = {}
+  for (const c of conditions) {
+    ;(byLayer[c.layer] ??= []).push(c)
+  }
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 hover:bg-gray-100 transition-colors"
+      >
+        <span className="text-sm font-semibold text-gray-700">
+          条件ライブラリ
+          <span className="ml-2 text-xs font-normal text-gray-400">
+            ({conditions.length}件の組み込み条件)
+          </span>
+        </span>
+        <span className="text-gray-400 text-sm">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-4">
+          {Object.entries(byLayer).map(([layer, conds]) => (
+            <div key={layer}>
+              <Badge
+                text={layer}
+                cls={`mb-2 ${LAYER_COLORS[layer] ?? 'bg-gray-50 text-gray-600 border-gray-200'}`}
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                {conds.map(c => (
+                  <div key={c.id} className="border border-gray-100 rounded-lg p-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs text-gray-700">{c.id}</span>
+                      <span
+                        className={`text-[10px] px-1 rounded border ${
+                          c.type === 'filter'
+                            ? 'bg-red-50 text-red-500 border-red-100'
+                            : 'bg-gray-50 text-gray-400 border-gray-100'
+                        }`}
+                      >
+                        {c.type === 'filter' ? 'フィルタ' : 'スコア'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">{c.name}</p>
+                    {Object.keys(c.params_schema ?? {}).length > 0 && (
+                      <p className="text-[11px] text-gray-400 mt-0.5">
+                        params: {Object.keys(c.params_schema).join(', ')}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ── LabView (メイン) ──────────────────────────────────────────────────────
 
 export default function LabView() {
-  const [tab, setTab] = useState<'conditions' | 'backtest'>('conditions')
-  const [builtins, setBuiltins] = useState<BuiltinCondition[]>([])
-  const [customs, setCustoms] = useState<CustomCondition[]>([])
+  const [strategies, setStrategies] = useState<LabStrategy[]>([])
   const [conditionSets, setConditionSets] = useState<ConditionSet[]>([])
-  const [loading, setLoading] = useState(true)
+  const [builtins, setBuiltins] = useState<BuiltinCondition[]>([])
+  const [copyTarget, setCopyTarget] = useState<LabStrategy | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  const loadAll = async () => {
-    setLoading(true)
-    setError(null)
+  const load = async () => {
     try {
-      const [condsRes, setsRes] = await Promise.all([fetchConditions(), fetchConditionSets()])
-      setBuiltins(condsRes.builtin)
-      setCustoms(condsRes.custom)
-      setConditionSets(setsRes.condition_sets)
+      const [stratRes, setRes, condRes] = await Promise.all([
+        fetchStrategies(),
+        fetchConditionSets(),
+        fetchConditions(),
+      ])
+      setStrategies(stratRes.strategies)
+      setConditionSets(setRes.condition_sets)
+      setBuiltins(condRes.builtin)
+      setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'データ取得失敗')
+      setError(String(e))
     } finally {
       setLoading(false)
     }
   }
 
-  const reloadConditions = async () => {
-    const res = await fetchConditions()
-    setBuiltins(res.builtin)
-    setCustoms(res.custom)
-  }
+  useEffect(() => { load() }, [])
 
-  const reloadSets = async () => {
+  const handleCopyAndEdit = async (name: string) => {
+    if (!copyTarget) return
+    await copyStrategyToExperiment(copyTarget.id, name)
+    setCopyTarget(null)
     const res = await fetchConditionSets()
     setConditionSets(res.condition_sets)
   }
 
-  useEffect(() => { loadAll() }, [])
+  const handleBtCopied = async () => {
+    const res = await fetchConditionSets()
+    setConditionSets(res.condition_sets)
+  }
+
+  const handleDelete = async () => {
+    const res = await fetchConditionSets()
+    setConditionSets(res.condition_sets)
+  }
 
   return (
-    <div className="max-w-5xl mx-auto px-6 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">条件ラボ</h1>
-        <p className="text-sm text-gray-500 mt-1">条件の管理・バックテストによる検証を行います。既存の戦略（tipster/）には影響しません。</p>
+    <div className="max-w-4xl mx-auto px-4 py-6 space-y-8">
+      {/* ヘッダ */}
+      <div>
+        <h1 className="text-xl font-bold text-gray-900">条件ラボ</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          戦略の条件詳細確認・コピー編集・バックテスト実行。
+        </p>
       </div>
 
-      {/* タブ */}
-      <div className="flex border-b border-gray-200 mb-6">
-        <TabButton label="条件管理" active={tab === 'conditions'} onClick={() => setTab('conditions')} />
-        <TabButton label="バックテスト" active={tab === 'backtest'} onClick={() => setTab('backtest')} />
-      </div>
-
-      {loading && (
-        <div className="flex items-center justify-center py-20 text-gray-400">
-          <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <span className="text-sm">読み込み中…</span>
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+          読み込みエラー: {error}
+          <button onClick={load} className="ml-3 underline text-xs">
+            再試行
+          </button>
         </div>
       )}
 
-      {error && !loading && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex items-start gap-3">
-          <span className="text-red-500">⚠</span>
-          <div>
-            <p className="text-sm text-red-700 font-medium">データ取得エラー</p>
-            <p className="text-xs text-red-600 mt-0.5">{error}</p>
-            <button onClick={loadAll} className="text-xs text-red-500 underline mt-1">再試行</button>
+      {/* Section 1: 現在の戦略 */}
+      <section>
+        <h2 className="text-base font-semibold text-gray-800 mb-3">現在の戦略</h2>
+        {loading ? (
+          <div className="text-sm text-gray-400 animate-pulse">読み込み中...</div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {strategies.map(s => (
+              <StrategyCard
+                key={s.id}
+                strategy={s}
+                onCopyRequest={setCopyTarget}
+                onBtCopied={handleBtCopied}
+              />
+            ))}
           </div>
-        </div>
-      )}
+        )}
+      </section>
 
-      {!loading && !error && tab === 'conditions' && (
-        <ConditionManagementTab
-          builtins={builtins}
-          customs={customs}
-          conditionSets={conditionSets}
-          onCustomsChanged={reloadConditions}
-          onSetsChanged={reloadSets}
+      {/* Section 3: 実験中の条件セット */}
+      <section>
+        <h2 className="text-base font-semibold text-gray-800 mb-3">
+          実験中の条件セット
+          <span className="ml-2 text-xs font-normal text-gray-400">{conditionSets.length}件</span>
+        </h2>
+        {conditionSets.length === 0 ? (
+          <div className="border border-dashed border-gray-200 rounded-xl p-6 text-center">
+            <p className="text-sm text-gray-400">実験中の条件セットはありません。</p>
+            <p className="text-xs text-gray-300 mt-1">
+              上の戦略カードの「コピーして編集」から作成できます。
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {conditionSets.map(set => (
+              <ExperimentCard
+                key={set.id}
+                set={set}
+                strategies={strategies}
+                onDelete={handleDelete}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Section 4: 条件ライブラリ */}
+      <LibrarySection conditions={builtins} />
+
+      {/* コピーモーダル */}
+      {copyTarget && (
+        <CopyModal
+          strategy={copyTarget}
+          onSave={handleCopyAndEdit}
+          onClose={() => setCopyTarget(null)}
         />
-      )}
-
-      {!loading && !error && tab === 'backtest' && (
-        <BacktestTab conditionSets={conditionSets} />
       )}
     </div>
   )

@@ -101,6 +101,7 @@ class CreateConditionSetRequest(BaseModel):
     description: str = ""
     conditions: list[ConditionEntry] = Field(default_factory=list)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
+    source_strategy_id: str | None = None   # 戦略コピー時の元戦略ID
 
 
 class UpdateConditionSetRequest(BaseModel):
@@ -246,7 +247,7 @@ def list_condition_sets() -> dict:
 def create_condition_set(req: CreateConditionSetRequest) -> dict:
     """条件セットを新規作成する。"""
     data = _load_data()
-    new_set = {
+    new_set: dict[str, Any] = {
         "id": f"set_{uuid.uuid4().hex[:8]}",
         "name": req.name,
         "description": req.description,
@@ -255,6 +256,8 @@ def create_condition_set(req: CreateConditionSetRequest) -> dict:
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
+    if req.source_strategy_id is not None:
+        new_set["source_strategy_id"] = req.source_strategy_id
     data["condition_sets"].append(new_set)
     _save_data(data)
     return new_set
@@ -378,3 +381,155 @@ def get_backtest_result(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"ジョブ '{job_id}' が見つかりません")
     return job
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 戦略情報エンドポイント
+# ─────────────────────────────────────────────────────────────────────────
+
+_STRATEGIES_DIR = Path(__file__).parent.parent.parent / "tipster" / "strategies"
+_TRAINING_CONFIG_PATH = Path(__file__).parent.parent.parent / "tipster" / "training_ranker_config.json"
+
+# 検証済み数値（BACKTEST_FINAL_VALIDATION.md / PROGRESS.md / ANABA_AI_RESULTS.md）
+_VERIFIED_STATS: dict[str, dict[str, Any]] = {
+    "s1_pattern": {
+        "place_rate": 0.650,
+        "holdout_place_rate": 0.706,
+        "race_count": 123,
+        "holdout_count": 51,
+        "holdout_period": "2026-01〜06",
+        "segment": "ダート>1400m + 坂あり会場（福島/東京/中山/中京/阪神）",
+        "source": "BACKTEST_FINAL_VALIDATION.md — 最人気選択時",
+    },
+    "honmei_v7": {
+        "segment": "全会場・全馬場（4馬場評価対応）",
+        "source": "honmei_v7.json BET-7",
+    },
+    "anaba_v5": {
+        "tan_roi": 1.973,
+        "segment": "芝短距離 + 野芝コース（4番人気以降）",
+        "source": "PROGRESS.md",
+    },
+    "training_tr1": {
+        "segment": "全会場（坂路/ウッドタイム判定）",
+        "source": "training_ranker_config.json",
+    },
+    "anaba_ai_v1": {
+        "c_period_roi_all": 0.686,
+        "c_period_roi_78": 0.869,
+        "c_period_place_all": 0.365,
+        "c_period": "2024-07以降",
+        "source": "ANABA_AI_RESULTS.md",
+    },
+}
+
+_STRATEGY_META: list[dict[str, Any]] = [
+    {"id": "s1_pattern",    "file": "s1_pattern.json",  "display_type": "segment",  "label": "S-1（ダート中距離|坂あり）"},
+    {"id": "honmei_v7",     "file": "honmei_v7.json",   "display_type": "honmei",   "label": "本命条件 v7"},
+    {"id": "anaba_v5",      "file": "anaba_v5.json",    "display_type": "anaba",    "label": "穴馬条件 v5"},
+    {"id": "training_tr1",  "file": None,                "display_type": "training", "label": "TR-1 調教フィルタ"},
+    {"id": "anaba_ai_v1",   "file": None,                "display_type": "ai",       "label": "穴馬AI v1"},
+]
+
+_AI_SUBMODELS = [
+    {"name": "speed_v1",    "contribution": 0.291},
+    {"name": "aptitude_v1", "contribution": 0.219},
+    {"name": "breed_v1",    "contribution": 0.211},
+    {"name": "human_v1",    "contribution": 0.140},
+    {"name": "form_v1",     "contribution": 0.138},
+]
+
+
+def _load_strategy_file(filename: str) -> dict | None:
+    path = _STRATEGIES_DIR / filename
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_training_priorities() -> list[dict[str, Any]]:
+    if not _TRAINING_CONFIG_PATH.exists():
+        return []
+    config = json.loads(_TRAINING_CONFIG_PATH.read_text(encoding="utf-8"))
+    return [
+        {"priority": int(k), "label": v.get("_label", "")}
+        for k, v in sorted(config.get("conditions", {}).items(), key=lambda x: int(x[0]))
+    ]
+
+
+@router.get("/strategies")
+def get_strategies() -> dict:
+    """現在運用中の戦略一覧と検証済み数値を返す。"""
+    strategies = []
+    for meta in _STRATEGY_META:
+        stats = _VERIFIED_STATS.get(meta["id"], {})
+        entry: dict[str, Any] = {
+            "id": meta["id"],
+            "display_type": meta["display_type"],
+            "label": meta["label"],
+            "stats": stats,
+            "conditions": [],
+        }
+
+        if meta["file"]:
+            data = _load_strategy_file(meta["file"])
+            if data:
+                entry["name"] = data.get("name", meta["label"])
+                entry["version"] = data.get("version", "")
+                entry["description"] = data.get("_comment", "")
+                entry["conditions"] = data.get("conditions", [])
+                entry["ranking"] = data.get("ranking", {})
+
+        if meta["id"] == "training_tr1":
+            entry["name"] = "TR-1 調教フィルタ"
+            entry["version"] = "1.0"
+            entry["training_priorities"] = _load_training_priorities()
+
+        if meta["id"] == "anaba_ai_v1":
+            entry["name"] = "穴馬AI v1"
+            entry["version"] = "1.0"
+            entry["ai_submodels"] = _AI_SUBMODELS
+
+        strategies.append(entry)
+
+    return {"strategies": strategies}
+
+
+class CopyStrategyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+
+
+@router.post("/strategies/{strategy_id}/copy", status_code=201)
+def copy_strategy_to_experiment(strategy_id: str, req: CopyStrategyRequest) -> dict:
+    """戦略を実験中の条件セットとしてコピー保存する。"""
+    meta = next((m for m in _STRATEGY_META if m["id"] == strategy_id), None)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"戦略 '{strategy_id}' が見つかりません")
+
+    conditions: list[dict[str, Any]] = []
+    if meta["file"]:
+        raw = _load_strategy_file(meta["file"])
+        if raw:
+            for c in raw.get("conditions", []):
+                conditions.append({
+                    "condition_id": c["id"],
+                    "mode": "filter" if c.get("required") else "scoring",
+                    "enabled": c.get("enabled", True),
+                    "params": c.get("params", {}),
+                })
+
+    data = _load_data()
+    new_set: dict[str, Any] = {
+        "id": f"set_{uuid.uuid4().hex[:8]}",
+        "name": req.name,
+        "description": f"{meta['label']}からのコピー",
+        "conditions": conditions,
+        "ranking": {"primary": "condition_clear_count", "secondary": "ai_score", "max_selections": 3},
+        "source_strategy_id": strategy_id,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    data["condition_sets"].append(new_set)
+    _save_data(data)
+    logger.info("戦略コピー: %s → %s", strategy_id, new_set["id"])
+    return new_set
