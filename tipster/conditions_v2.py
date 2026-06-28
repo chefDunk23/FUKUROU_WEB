@@ -904,3 +904,288 @@ def check_v2_heavy_track_stamina(
         reason=f"道悪中程度: 重/不良合算 {total_placed}/{total_runs}回 ({rate:.0%})",
         detail={"runs": total_runs, "placed": total_placed, "rate": rate},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 追加条件（2026-06-28）: 展開予測 / 枠順有利不利 / 開催進行度 / 相手勝ち上がり
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@register_condition("v2_pace_match")
+def check_v2_pace_match(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """展開予測: 出走馬の脚質分布から今回の展開を推定し対象馬との適合を判定。
+
+    逃げ馬（position_tendency < front_cut）が solo_front 頭以下
+      → 逃げ/先行馬に有利（単騎/少数逃げ展開）
+    逃げ馬が crowded_front 頭以上
+      → ハイペース → 差し/追込馬に有利
+
+    params:
+        front_cut     (float, default 0.25): position_tendency がこれ未満を逃げ/先行に分類
+        stalker_cut   (float, default 0.60): これ以上を差し/追込に分類
+        solo_front    (int,   default 1):    単騎逃げと判定する逃げ馬頭数上限
+        crowded_front (int,   default 3):    ハイペース判定の逃げ馬頭数下限
+        bonus_score   (float, default 1.0):  マッチした場合の加点
+    """
+    front_cut     = float(params.get("front_cut", 0.25))
+    stalker_cut   = float(params.get("stalker_cut", 0.60))
+    solo_front    = int(params.get("solo_front", 1))
+    crowded_front = int(params.get("crowded_front", 3))
+    bonus_score   = float(params.get("bonus_score", 1.0))
+
+    my_tend = horse.position_tendency
+    if my_tend is None:
+        return ConditionResult(passed=None, score=0.0, reason="脚質データなし（判定保留）")
+
+    valid_horses = [h for h in race_ctx.horses if h.position_tendency is not None]
+    if len(valid_horses) < max(3, len(race_ctx.horses) // 2):
+        return ConditionResult(passed=None, score=0.0, reason="脚質データ不足（判定保留）")
+
+    front_count = sum(1 for h in valid_horses if h.position_tendency < front_cut)
+    is_front_runner   = my_tend < front_cut
+    is_stalker_closer = my_tend >= stalker_cut
+
+    if front_count <= solo_front and is_front_runner:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"単騎/少数逃げ展開: 逃げ/先行馬{front_count}頭のみ → 前付け有利",
+            detail={"front_count": front_count, "position_tendency": my_tend},
+        )
+    if front_count >= crowded_front and is_stalker_closer:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"多頭逃げのハイペース展開: 逃げ馬{front_count}頭 → 差し/追込有利",
+            detail={"front_count": front_count, "position_tendency": my_tend},
+        )
+    if front_count <= solo_front and is_stalker_closer:
+        return ConditionResult(
+            passed=False,
+            score=0.0,
+            reason=f"スローペース想定: 差し/追込馬には不向き（逃げ{front_count}頭）",
+            detail={"front_count": front_count, "position_tendency": my_tend},
+        )
+    if front_count >= crowded_front and is_front_runner:
+        return ConditionResult(
+            passed=False,
+            score=0.0,
+            reason=f"ハイペース想定: 前付け馬には苦しい展開（逃げ{front_count}頭）",
+            detail={"front_count": front_count, "position_tendency": my_tend},
+        )
+    return ConditionResult(
+        passed=None,
+        score=0.0,
+        reason=f"展開中立: 逃げ馬{front_count}頭（明確な有利不利なし）",
+        detail={"front_count": front_count, "position_tendency": my_tend},
+    )
+
+
+@register_condition("v2_bracket_bias")
+def check_v2_bracket_bias(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """枠順の有利不利: inner_bias_pit（コースバイアス）と枠番の組み合わせで判定。
+
+    inner_bias_pit > threshold: 内枠有利 → 枠番1〜inner_cut が加点対象
+    inner_bias_pit < -threshold: 外枠有利 → 枠番outer_cut〜8 が加点対象
+    ダートでバイアスデータなし: 内枠不利の経験則を適用（dirt_inner_penalty=True 時）
+
+    params:
+        bias_threshold     (float, default 0.1):  bias_pit の絶対値がこれ以上で有意とみなす
+        inner_cut          (int,   default 3):    内枠と判定する枠番上限
+        outer_cut          (int,   default 7):    外枠と判定する枠番下限
+        dirt_inner_penalty (bool,  default True): ダート内枠不利をデフォルト適用するか
+        bonus_score        (float, default 0.8):  有利枠の加点
+        penalty_score      (float, default -0.5): 不利枠の減点
+    """
+    bias_threshold     = float(params.get("bias_threshold", 0.1))
+    inner_cut          = int(params.get("inner_cut", 3))
+    outer_cut          = int(params.get("outer_cut", 7))
+    dirt_inner_penalty = bool(params.get("dirt_inner_penalty", True))
+    bonus_score        = float(params.get("bonus_score", 0.8))
+    penalty_score      = float(params.get("penalty_score", -0.5))
+
+    wakuban = horse.wakuban
+    if wakuban is None:
+        return ConditionResult(passed=None, score=0.0, reason="枠番データなし（判定保留）")
+
+    bias        = race_ctx.inner_bias_pit
+    surface     = race_ctx.surface or ""
+    bias_source = race_ctx.bias_source
+
+    if bias is None or abs(bias) < bias_threshold:
+        if surface == "ダート" and dirt_inner_penalty and bias_source == "none":
+            if wakuban <= inner_cut:
+                return ConditionResult(
+                    passed=False,
+                    score=penalty_score,
+                    reason=f"ダート内枠不利（経験則）: 枠{wakuban}番 — バイアスデータなし",
+                    detail={"wakuban": wakuban, "bias": bias, "source": bias_source},
+                )
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"枠順バイアス中立: 有利不利なし（inner_bias={bias}）",
+            detail={"wakuban": wakuban, "bias": bias},
+        )
+
+    is_inner = wakuban <= inner_cut
+    is_outer = wakuban >= outer_cut
+
+    if bias > bias_threshold and is_inner:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"内枠有利バイアス: 枠{wakuban}番（inner_bias={bias:+.2f}）",
+            detail={"wakuban": wakuban, "bias": bias, "source": bias_source},
+        )
+    if bias < -bias_threshold and is_outer:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"外枠有利バイアス: 枠{wakuban}番（inner_bias={bias:+.2f}）",
+            detail={"wakuban": wakuban, "bias": bias, "source": bias_source},
+        )
+    if bias > bias_threshold and is_outer:
+        return ConditionResult(
+            passed=False,
+            score=penalty_score,
+            reason=f"内枠有利バイアスで外枠不利: 枠{wakuban}番（inner_bias={bias:+.2f}）",
+            detail={"wakuban": wakuban, "bias": bias, "source": bias_source},
+        )
+    if bias < -bias_threshold and is_inner:
+        return ConditionResult(
+            passed=False,
+            score=penalty_score,
+            reason=f"外枠有利バイアスで内枠不利: 枠{wakuban}番（inner_bias={bias:+.2f}）",
+            detail={"wakuban": wakuban, "bias": bias, "source": bias_source},
+        )
+    return ConditionResult(
+        passed=None,
+        score=0.0,
+        reason=f"中枠（バイアスあるが中間枠）: 枠{wakuban}番",
+        detail={"wakuban": wakuban, "bias": bias},
+    )
+
+
+@register_condition("v2_race_order")
+def check_v2_race_order(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """開催進行度: 後半レース（R9以降）での差し馬有利を評価する。
+
+    JRA race_id は YYYYMMDDPPNN 形式（末尾2桁がレース番号）。
+    後半レースは馬場が荒れやすく、差し/追込馬が有利になる傾向がある。
+
+    params:
+        late_race_num  (int,   default 9):    後半開催と判定するレース番号下限
+        front_cut      (float, default 0.35): position_tendency がこれ未満を前付け馬
+        bonus_score    (float, default 0.6):  後半×差し/追込で加点
+        penalty_score  (float, default -0.3): 後半×逃げ/先行で減点
+    """
+    late_race_num = int(params.get("late_race_num", 9))
+    front_cut     = float(params.get("front_cut", 0.35))
+    bonus_score   = float(params.get("bonus_score", 0.6))
+    penalty_score = float(params.get("penalty_score", -0.3))
+
+    race_id = race_ctx.race_id
+    if not race_id or len(race_id) < 2:
+        return ConditionResult(passed=None, score=0.0, reason="race_id が不正（判定保留）")
+
+    try:
+        race_num = int(race_id[-2:])
+    except ValueError:
+        return ConditionResult(passed=None, score=0.0, reason="race_id からレース番号取得失敗（判定保留）")
+
+    if not (1 <= race_num <= 12):
+        return ConditionResult(passed=None, score=0.0, reason=f"レース番号が範囲外: {race_num}（判定保留）")
+
+    is_late = race_num >= late_race_num
+    if not is_late:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"前半開催（R{race_num}）: 馬場荒れ前のため中立",
+            detail={"race_num": race_num},
+        )
+
+    my_tend = horse.position_tendency
+    if my_tend is None:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"後半開催（R{race_num}）: 脚質データなし（判定保留）",
+            detail={"race_num": race_num},
+        )
+
+    if my_tend >= front_cut:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"後半開催（R{race_num}）×差し/追込: 荒れ馬場で有利な展開",
+            detail={"race_num": race_num, "position_tendency": my_tend},
+        )
+    return ConditionResult(
+        passed=False,
+        score=penalty_score,
+        reason=f"後半開催（R{race_num}）×前付け: 荒れ馬場では前が苦しくなる可能性",
+        detail={"race_num": race_num, "position_tendency": my_tend},
+    )
+
+
+@register_condition("v2_opponent_winners")
+def check_v2_opponent_winners(
+    horse: HorseContext, race_ctx: RaceContext, params: dict
+) -> ConditionResult:
+    """過去相手の勝ち上がり頭数: 前走対戦相手のうちその後のレースで勝った馬が多いほど前走レベルが高い。
+
+    PastRaceInfo.opponents_next_races の next_race_rank == 1 を集計。
+    タイムラグ（2〜3週）があるため next_race_rank が None の相手は除外。
+
+    params:
+        lookback      (int,   default 1):  過去何走をチェックするか（1=前走のみ）
+        min_winners   (int,   default 2):  passed=True とする勝ち馬頭数下限
+        min_known     (int,   default 4):  次走結果が判明している対戦相手の最小数
+        bonus_score   (float, default 1.0): passed=True 時の加点
+    """
+    lookback    = int(params.get("lookback", 1))
+    min_winners = int(params.get("min_winners", 2))
+    min_known   = int(params.get("min_known", 4))
+    bonus_score = float(params.get("bonus_score", 1.0))
+
+    total_known   = 0
+    total_winners = 0
+
+    for i in range(min(lookback, len(horse.past_races))):
+        pr = horse.past_races[i]
+        for opp in pr.opponents_next_races:
+            if opp.next_race_rank is None:
+                continue
+            total_known += 1
+            if opp.next_race_rank == 1:
+                total_winners += 1
+
+    if total_known < min_known:
+        return ConditionResult(
+            passed=None,
+            score=0.0,
+            reason=f"次走結果判明馬が少ない（{total_known}/{min_known}頭以上必要）（判定保留）",
+            detail={"known": total_known, "winners": total_winners},
+        )
+
+    if total_winners >= min_winners:
+        return ConditionResult(
+            passed=True,
+            score=bonus_score,
+            reason=f"前走対戦馬の勝ち上がり: {total_winners}頭勝利 — 前走レベル高",
+            detail={"known": total_known, "winners": total_winners},
+        )
+    return ConditionResult(
+        passed=False,
+        score=0.0,
+        reason=f"前走対戦馬の勝ち上がり少: {total_winners}頭（{min_winners}頭未満）",
+        detail={"known": total_known, "winners": total_winners},
+    )

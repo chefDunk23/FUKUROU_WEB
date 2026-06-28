@@ -19,8 +19,12 @@ from tipster.conditions import (
     check_weight_change,
 )
 from tipster.conditions_v2 import (
+    check_v2_bracket_bias,
     check_v2_f3_top,
     check_v2_hill_fit,
+    check_v2_opponent_winners,
+    check_v2_pace_match,
+    check_v2_race_order,
     check_v2_sire_venue,
 )
 from tipster.models import HorseContext, PastRaceInfo, PastRaceOpponent, RaceContext
@@ -739,4 +743,200 @@ def test_v2_sire_venue_neutral_when_place_code_missing():
     horse = _horse(sire_venue_top3={"overall": 0.30, "05": 0.40})
     race = _race(place_code=None)
     result = check_v2_sire_venue(horse, race, {})
+    assert result.passed is None
+
+
+# ── v2_pace_match ────────────────────────────────────────────────────────────
+
+
+def _horse_with_tendency(tend: float, **overrides) -> HorseContext:
+    return _horse(position_tendency=tend, **overrides)
+
+
+def _race_with_horses(horses: list[HorseContext], **overrides) -> RaceContext:
+    return _race(horses=horses, **overrides)
+
+
+def test_v2_pace_match_solo_front_benefits_front_runner():
+    front = _horse_with_tendency(0.1, horse_id="H1")
+    others = [_horse_with_tendency(0.7, horse_id=f"H{i}") for i in range(2, 9)]
+    race = _race_with_horses([front] + others)
+    result = check_v2_pace_match(front, race, {})
+    assert result.passed is True
+    assert result.score > 0
+
+
+def test_v2_pace_match_crowded_front_benefits_closer():
+    fronts = [_horse_with_tendency(0.15, horse_id=f"H{i}") for i in range(1, 5)]
+    closer = _horse_with_tendency(0.75, horse_id="H5")
+    rest   = [_horse_with_tendency(0.8, horse_id=f"H{i}") for i in range(6, 9)]
+    race   = _race_with_horses(fronts + [closer] + rest)
+    result = check_v2_pace_match(closer, race, {})
+    assert result.passed is True
+
+
+def test_v2_pace_match_solo_front_penalises_closer():
+    front  = _horse_with_tendency(0.1, horse_id="H1")
+    closer = _horse_with_tendency(0.8, horse_id="H2")
+    rest   = [_horse_with_tendency(0.7, horse_id=f"H{i}") for i in range(3, 9)]
+    race   = _race_with_horses([front, closer] + rest)
+    result = check_v2_pace_match(closer, race, {})
+    assert result.passed is False
+
+
+def test_v2_pace_match_neutral_when_no_tendency():
+    horse = _horse(position_tendency=None)
+    race  = _race_with_horses([horse])
+    result = check_v2_pace_match(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_pace_match_neutral_when_insufficient_data():
+    horse = _horse_with_tendency(0.1, horse_id="H1")
+    race  = _race_with_horses([horse])  # only 1 horse with data (< 3)
+    result = check_v2_pace_match(horse, race, {})
+    assert result.passed is None
+
+
+# ── v2_bracket_bias ──────────────────────────────────────────────────────────
+
+
+def test_v2_bracket_bias_inner_favored_inner_horse():
+    horse = _horse(wakuban=2)
+    race  = _race(inner_bias_pit=0.3, bias_source="track_bias_pit", surface="芝")
+    result = check_v2_bracket_bias(horse, race, {})
+    assert result.passed is True
+    assert result.score > 0
+
+
+def test_v2_bracket_bias_inner_favored_outer_horse():
+    horse = _horse(wakuban=8)
+    race  = _race(inner_bias_pit=0.3, bias_source="track_bias_pit", surface="芝")
+    result = check_v2_bracket_bias(horse, race, {})
+    assert result.passed is False
+
+
+def test_v2_bracket_bias_outer_favored_outer_horse():
+    horse = _horse(wakuban=8)
+    race  = _race(inner_bias_pit=-0.25, bias_source="course_profile_store", surface="芝")
+    result = check_v2_bracket_bias(horse, race, {})
+    assert result.passed is True
+
+
+def test_v2_bracket_bias_neutral_when_bias_small():
+    horse = _horse(wakuban=1)
+    race  = _race(inner_bias_pit=0.05, bias_source="track_bias_pit", surface="芝")
+    result = check_v2_bracket_bias(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_bracket_bias_dirt_inner_penalty_applied():
+    horse = _horse(wakuban=2)
+    race  = _race(inner_bias_pit=None, bias_source="none", surface="ダート")
+    result = check_v2_bracket_bias(horse, race, {"dirt_inner_penalty": True})
+    assert result.passed is False
+
+
+def test_v2_bracket_bias_no_wakuban_is_none():
+    horse = _horse(wakuban=None)
+    result = check_v2_bracket_bias(horse, _race(), {})
+    assert result.passed is None
+
+
+# ── v2_race_order ────────────────────────────────────────────────────────────
+
+
+def test_v2_race_order_late_race_closer_benefits():
+    horse = _horse(position_tendency=0.7)
+    race  = _race(race_id="202506280109")  # R09
+    result = check_v2_race_order(horse, race, {})
+    assert result.passed is True
+    assert result.score > 0
+
+
+def test_v2_race_order_late_race_front_runner_penalised():
+    horse = _horse(position_tendency=0.2)
+    race  = _race(race_id="202506280112")  # R12
+    result = check_v2_race_order(horse, race, {})
+    assert result.passed is False
+
+
+def test_v2_race_order_early_race_is_neutral():
+    horse = _horse(position_tendency=0.7)
+    race  = _race(race_id="202506280105")  # R05
+    result = check_v2_race_order(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_race_order_invalid_race_id_is_none():
+    horse = _horse(position_tendency=0.7)
+    race  = _race(race_id="")
+    result = check_v2_race_order(horse, race, {})
+    assert result.passed is None
+
+
+def test_v2_race_order_no_tendency_late_race_is_none():
+    horse = _horse(position_tendency=None)
+    race  = _race(race_id="202506280110")
+    result = check_v2_race_order(horse, race, {})
+    assert result.passed is None
+
+
+# ── v2_opponent_winners ───────────────────────────────────────────────────────
+
+
+def _prev_with_opponents(opps: list[tuple[str, int | None]]) -> PastRaceInfo:
+    opponents = [
+        PastRaceOpponent(horse_id=hid, this_rank=i + 1, this_margin=0.1 * i, next_race_rank=nxt)
+        for i, (hid, nxt) in enumerate(opps)
+    ]
+    return PastRaceInfo(
+        race_id="PR1", date="2026-05-01", rank=5, distance=1600, surface="芝",
+        head_count=8, race_name="前走", class_score=10.0, time_score=10.0,
+        member_level_score=10.0, opponents_next_races=opponents,
+    )
+
+
+def test_v2_opponent_winners_passes_when_enough_winners():
+    prev = _prev_with_opponents([
+        ("A", 1), ("B", 1), ("C", 2), ("D", 3), ("E", 4),
+    ])
+    horse = _horse(past_races=[prev])
+    result = check_v2_opponent_winners(horse, _race(), {})
+    assert result.passed is True
+    assert result.detail["winners"] == 2
+
+
+def test_v2_opponent_winners_fails_when_few_winners():
+    prev = _prev_with_opponents([
+        ("A", 5), ("B", 6), ("C", 7), ("D", 8), ("E", 9),
+    ])
+    horse = _horse(past_races=[prev])
+    result = check_v2_opponent_winners(horse, _race(), {})
+    assert result.passed is False
+    assert result.detail["winners"] == 0
+
+
+def test_v2_opponent_winners_neutral_when_few_known():
+    prev = _prev_with_opponents([
+        ("A", None), ("B", None), ("C", None),
+    ])
+    horse = _horse(past_races=[prev])
+    result = check_v2_opponent_winners(horse, _race(), {})
+    assert result.passed is None
+
+
+def test_v2_opponent_winners_excludes_unknown_next_rank():
+    prev = _prev_with_opponents([
+        ("A", 1), ("B", None), ("C", 2), ("D", None), ("E", 3),
+    ])
+    horse = _horse(past_races=[prev])
+    # min_known=4 だが known=3 のため保留
+    result = check_v2_opponent_winners(horse, _race(), {"min_known": 4})
+    assert result.passed is None
+
+
+def test_v2_opponent_winners_no_past_races_is_none():
+    horse = _horse(past_races=[])
+    result = check_v2_opponent_winners(horse, _race(), {})
     assert result.passed is None

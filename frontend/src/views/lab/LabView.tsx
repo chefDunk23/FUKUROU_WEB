@@ -716,7 +716,6 @@ function BacktestTab({ conditionSets }: { conditionSets: ConditionSet[] }) {
   const [compareSetIdB, setCompareSetIdB] = useState('')
   const [aiteStrategy, setAiteStrategy] = useState('anaba_v5')
   const [periods, setPeriods] = useState<string[]>(['3m', '6m', '1y'])
-  const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<BacktestJob | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -748,10 +747,9 @@ function BacktestTab({ conditionSets }: { conditionSets: ConditionSet[] }) {
   const handleRunSingle = async () => {
     if (!selectedSetId) { setError('条件セットを選択してください'); return }
     if (periods.length === 0) { setError('期間を選択してください'); return }
-    setError(null); setRunning(true); setJob(null); setJobId(null)
+    setError(null); setRunning(true); setJob(null)
     try {
       const { job_id } = await startBacktest({ condition_set_id: selectedSetId, aite_strategy: aiteStrategy, periods })
-      setJobId(job_id)
       pollJob(job_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : '不明なエラー')
@@ -762,7 +760,7 @@ function BacktestTab({ conditionSets }: { conditionSets: ConditionSet[] }) {
   const handleRunCompare = async () => {
     if (!compareSetIdA || !compareSetIdB) { setError('2つの条件セットを選択してください'); return }
     if (compareSetIdA === compareSetIdB) { setError('異なる条件セットを選択してください'); return }
-    setError(null); setRunning(true); setJob(null); setJobId(null)
+    setError(null); setRunning(true); setJob(null)
     try {
       const { job_id } = await startCompareBacktest({
         condition_set_id_a: compareSetIdA,
@@ -770,7 +768,6 @@ function BacktestTab({ conditionSets }: { conditionSets: ConditionSet[] }) {
         aite_strategy: aiteStrategy,
         periods: [periods[0] ?? '3m'],
       })
-      setJobId(job_id)
       pollJob(job_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : '不明なエラー')

@@ -16,6 +16,10 @@ from typing import Any
 
 from .models import ConditionConfig, RankingConfig, Strategy
 
+# conditions_v2 の @register_condition デコレータを CONDITION_REGISTRY に反映させる
+# combo_backtest.py 経由のバックテスト実行時も v2_* 条件が使えるように明示的に import
+from . import conditions_v2 as _cond_v2  # noqa: F401
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # 組み込み条件カタログ（conditions_v2.py で register_condition されたもの）
@@ -194,6 +198,62 @@ BUILTIN_CONDITIONS: list[dict[str, Any]] = [
             "fail_rate":     {"type": "float", "default": 0.15,   "min": 0.0, "max": 1.0, "label": "不合格複勝率"},
             "bonus_score":   {"type": "float", "default": 1.0,    "min": 0.0, "max": 3.0, "label": "加点"},
             "penalty_score": {"type": "float", "default": -1.5,   "min": -3.0, "max": 0.0, "label": "減点"},
+        },
+    },
+    # ── 追加条件（2026-06-28）────────────────────────────────────────────────
+    {
+        "id": "v2_pace_match",
+        "name": "展開予測（脚質×頭数）",
+        "description": "出走馬の脚質分布から展開を推定し対象馬との適合を判定。単騎逃げは前付け有利、多頭逃げは差し有利",
+        "layer": "展開・枠順",
+        "type": "scoring",
+        "params_schema": {
+            "front_cut":     {"type": "float", "default": 0.25, "min": 0.1, "max": 0.5,  "label": "逃げ/先行判定閾値"},
+            "stalker_cut":   {"type": "float", "default": 0.60, "min": 0.3, "max": 0.9,  "label": "差し/追込判定閾値"},
+            "solo_front":    {"type": "int",   "default": 1,    "min": 1,   "max": 3,    "label": "単騎逃げ判定頭数"},
+            "crowded_front": {"type": "int",   "default": 3,    "min": 2,   "max": 6,    "label": "多頭逃げ判定頭数"},
+            "bonus_score":   {"type": "float", "default": 1.0,  "min": 0.0, "max": 3.0,  "label": "加点"},
+        },
+    },
+    {
+        "id": "v2_bracket_bias",
+        "name": "枠順有利不利",
+        "description": "コースバイアス(inner_bias_pit)と枠番の組み合わせで有利不利を判定。ダートは内枠不利の経験則も適用",
+        "layer": "展開・枠順",
+        "type": "scoring",
+        "params_schema": {
+            "bias_threshold":     {"type": "float", "default": 0.1,  "min": 0.0, "max": 0.5,  "label": "バイアス有意閾値"},
+            "inner_cut":          {"type": "int",   "default": 3,    "min": 1,   "max": 4,    "label": "内枠判定上限"},
+            "outer_cut":          {"type": "int",   "default": 7,    "min": 5,   "max": 8,    "label": "外枠判定下限"},
+            "dirt_inner_penalty": {"type": "bool",  "default": True,             "label": "ダート内枠不利適用"},
+            "bonus_score":        {"type": "float", "default": 0.8,  "min": 0.0, "max": 3.0,  "label": "有利枠加点"},
+            "penalty_score":      {"type": "float", "default": -0.5, "min": -3.0, "max": 0.0, "label": "不利枠減点"},
+        },
+    },
+    {
+        "id": "v2_race_order",
+        "name": "開催進行度（馬場変化）",
+        "description": "後半レース（R9以降）は馬場が荒れやすく差し/追込有利。前付け馬は減点",
+        "layer": "展開・枠順",
+        "type": "scoring",
+        "params_schema": {
+            "late_race_num": {"type": "int",   "default": 9,    "min": 7,   "max": 12,   "label": "後半判定レース番号"},
+            "front_cut":     {"type": "float", "default": 0.35, "min": 0.1, "max": 0.6,  "label": "前付け判定閾値"},
+            "bonus_score":   {"type": "float", "default": 0.6,  "min": 0.0, "max": 3.0,  "label": "差し/追込加点"},
+            "penalty_score": {"type": "float", "default": -0.3, "min": -3.0, "max": 0.0, "label": "前付け減点"},
+        },
+    },
+    {
+        "id": "v2_opponent_winners",
+        "name": "前走相手の勝ち上がり頭数",
+        "description": "前走対戦相手のうちその後に勝ったのが多い → 前走レベルが高い証拠",
+        "layer": "第1層: ポテンシャル確認",
+        "type": "scoring",
+        "params_schema": {
+            "lookback":    {"type": "int",   "default": 1,   "min": 1,   "max": 3,    "label": "参照走数"},
+            "min_winners": {"type": "int",   "default": 2,   "min": 1,   "max": 5,    "label": "勝ち上がり頭数下限"},
+            "min_known":   {"type": "int",   "default": 4,   "min": 2,   "max": 10,   "label": "次走結果判明最小頭数"},
+            "bonus_score": {"type": "float", "default": 1.0, "min": 0.0, "max": 3.0,  "label": "加点"},
         },
     },
 ]
