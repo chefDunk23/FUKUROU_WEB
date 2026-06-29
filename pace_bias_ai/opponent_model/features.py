@@ -1,15 +1,21 @@
 """
-前走メンバーレベル特徴量の生成モジュール（v2: 前々走ベース + competitiveness_score）。
+前走メンバーレベル特徴量の生成モジュール（v3: 前々走ベース + クラス変動対策）。
 
 全特徴量はPIT-safe（当該レース結果を使わない）。
 opponent_next_* は「予測日より前に次走を走った馬のみ」でカウント。
 
-v2の主な変更:
-- prev2（前々走）ベースのopponent_next系を追加（欠損率改善・頭数+45%）
-- prev1（前走）ベースも維持し、AIに両者を使い分けさせる
-- competitiveness_score: レースレベル × 着差の複合指標
-- prev_grade_rank, prev2_grade_rank: グレード連続値
-- grade_change: グレード変化方向
+v3の主な変更（v2からの追加）:
+- 対策1: クラス変動の明示
+    prev2_to_now_class_change: 前々走→今走のクラス差（正=昇級）
+    won_between: 前々走〜今走の間に勝利したか（前走1着フラグ）
+- 対策2: 前々走の条件適合度
+    prev2_dist_diff: 前々走と今走の距離差（絶対値）
+    prev2_surface_same: 前々走と今走が同じ馬場か（0/1）
+    prev2_venue_same: 前々走と今走が同じ競馬場か（0/1）
+- 対策3: 前々走の古さ
+    prev2_days_ago: 前々走から今走までの経過日数
+- 対策4: 前走が叩き台か
+    prev_was_step: 前走着順 > 前々走着順のとき1（前々走の方が好走）
 
 クラス序列（class_rank: 低いほど上位）:
   1=G1, 2=G2, 3=G3, 4=OP/L, 5=3勝, 6=2勝, 7=1勝, 8=未勝利, 9=新馬
@@ -39,7 +45,7 @@ JYOKEN_TO_CLASS: dict[str, int] = {
 
 FEATURE_COLS: list[str] = [
     # ── 前走パフォーマンス ───────────────────────────────────────────────────
-    'prev_rank_norm',       # 前走着順/出走頭数（最重要シグナル）
+    'prev_rank_norm',       # 前走着順/出走頭数（正規化）
     'prev_rank',            # 前走着順（生値）
     'prev_margin',          # 前走勝ち馬との着差（秒）
 
@@ -56,12 +62,27 @@ FEATURE_COLS: list[str] = [
     'prev1_opp_count',      # 前走の対戦相手の次走データ数（PIT後）
 
     # ── レースレベル × 着差（複合指標） ─────────────────────────────────────
-    'competitiveness_score',  # prev2_opp_top3_rate / (1 + prev_margin)
+    'competitiveness_score',  # prev2_opp_top3_rate / (1 + prev2_margin)
+
+    # ── 対策1: クラス変動の明示 ──────────────────────────────────────────────
+    'prev2_to_now_class_change',  # 前々走→今走のクラス差（正=昇級、負=格下げ）
+    'won_between',                # 前走1着フラグ（前々走〜今走の間に勝利）
+
+    # ── 対策2: 前々走の条件適合度 ─────────────────────────────────────────
+    'prev2_dist_diff',      # 前々走と今走の距離差（m）
+    'prev2_surface_same',   # 前々走と今走が同じ馬場か（1=同じ）
+    'prev2_venue_same',     # 前々走と今走が同じ競馬場か（1=同じ）
+
+    # ── 対策3: 前々走の古さ ────────────────────────────────────────────────
+    'prev2_days_ago',       # 前々走から今走までの経過日数
+
+    # ── 対策4: 前走が叩き台か ─────────────────────────────────────────────
+    'prev_was_step',        # 前走着順 > 前々走着順のとき1（前々走の方が好走）
 
     # ── クラス情報 ────────────────────────────────────────────────────────
-    'prev_grade_rank',      # 前走クラス連続値（G1=1〜条件戦=5）
+    'prev_grade_rank',      # 前走クラス連続値（G1=1〜条件戦=9）
     'prev2_grade_rank',     # 前々走クラス連続値
-    'grade_change',         # 今走vs前走のクラス変化（正=格上げ、負=格下げ）
+    'grade_change',         # 今走vs前走のクラス変化
     'cur_class_rank',
     'class_change',
     'class_up',
@@ -72,7 +93,7 @@ FEATURE_COLS: list[str] = [
     'kinryo_change',
     'kinryo_vs_field',
 
-    # ── 条件変化 ─────────────────────────────────────────────────────────
+    # ── 条件変化（前走→今走） ──────────────────────────────────────────────
     'distance_change',
     'surface_changed',
     'venue_changed',
@@ -192,6 +213,7 @@ def build_opponent_features(
 ) -> pd.DataFrame:
     """
     前々走ベース + 前走ベースの opponent_next 特徴量を vectorized で付与する。
+    v3: クラス変動対策7特徴量を追加。
 
     Args:
         df_target : 対象馬のDataFrame。必要列:
@@ -251,6 +273,7 @@ def build_opponent_features(
     ent['prev1_race_id']   = ent.groupby('blood_no')['race_id'].shift(1)
     ent['prev2_race_id']   = ent.groupby('blood_no')['race_id'].shift(2)
     ent['prev1_chaku']     = ent.groupby('blood_no')['kakutei_chakujun'].shift(1)
+    ent['prev2_chaku']     = ent.groupby('blood_no')['kakutei_chakujun'].shift(2)
     ent['prev1_kinryo']    = ent.groupby('blood_no')['kinryo'].shift(1)
     ent['prev1_race_time'] = ent.groupby('blood_no')['race_time'].shift(1)
     ent['next_race_id']    = ent.groupby('blood_no')['race_id'].shift(-1)
@@ -261,8 +284,8 @@ def build_opponent_features(
     midx = pd.MultiIndex.from_arrays(
         [tgt['_bn'].values, tgt['_rid'].values], names=['blood_no', 'race_id']
     )
-    fetch_cols = ['prev1_race_id', 'prev2_race_id', 'prev1_chaku', 'prev1_kinryo',
-                  'prev1_race_time', 'kinryo', 'horse_age', 'race_time']
+    fetch_cols = ['prev1_race_id', 'prev2_race_id', 'prev1_chaku', 'prev2_chaku',
+                  'prev1_kinryo', 'prev1_race_time', 'kinryo', 'horse_age', 'race_time']
     prev_vals = ent_idx.reindex(midx)[fetch_cols].values
     prev_df = pd.DataFrame(prev_vals, columns=fetch_cols, index=tgt.index)
     prev_df.rename(columns={'kinryo': 'kinryo_ent', 'horse_age': 'horse_age_ent',
@@ -313,7 +336,7 @@ def build_opponent_features(
     tgt['prev2_grade_rank'] = prev2_cr
     tgt['grade_change']     = cur_cr - prev1_cr
 
-    # ── 距離・馬場・競馬場変化 ────────────────────────────────────────────
+    # ── 距離・馬場・競馬場変化（前走→今走） ──────────────────────────────
     tgt['distance_change'] = (
         pd.to_numeric(tgt['cur_distance'],    errors='coerce') -
         pd.to_numeric(tgt['prev1_distance'],  errors='coerce')
@@ -353,6 +376,46 @@ def build_opponent_features(
         pd.to_numeric(tgt['prev1_race_time'], errors='coerce') -
         pd.to_numeric(tgt['_win_time'],       errors='coerce')
     )
+
+    # ── 対策1: クラス変動の明示 ───────────────────────────────────────────
+    # prev2_to_now_class_change: 前々走→今走のクラス変化
+    # class_rankは低いほど上位（1=G1）。昇級なら今走のclass_rankが小さい
+    # 「正=昇級」に合わせて: prev2_class_rank - cur_class_rank
+    tgt['prev2_to_now_class_change'] = (prev2_cr - cur_cr).where(prev2_rid.notna())
+
+    # won_between: 前走が1着（前々走〜今走の間に勝利）
+    tgt['won_between'] = (
+        pd.to_numeric(tgt['prev1_chaku'], errors='coerce') == 1
+    ).astype(float).where(prev1_rid.notna())
+
+    # ── 対策2: 前々走の条件適合度 ────────────────────────────────────────
+    cur_dist  = pd.to_numeric(tgt['cur_distance'],   errors='coerce')
+    prev2_dist = pd.to_numeric(tgt['prev2_distance'], errors='coerce')
+    tgt['prev2_dist_diff'] = (cur_dist - prev2_dist).abs().where(prev2_rid.notna())
+
+    cur_surf_bin  = (~tgt['cur_track_code'].astype(str).str.startswith('1')).astype(int)
+    prev2_surf_bin = (~tgt['prev2_track_code'].astype(str).str.startswith('1')).astype(float)
+    prev2_surf_bin = prev2_surf_bin.where(prev2_rid.notna())
+    tgt['prev2_surface_same'] = (cur_surf_bin == prev2_surf_bin).astype(float).where(prev2_rid.notna())
+
+    tgt['prev2_venue_same'] = (
+        tgt['cur_keibajo'].astype(str) == tgt['prev2_keibajo'].astype(str)
+    ).astype(float).where(prev2_rid.notna())
+
+    # ── 対策3: 前々走の古さ ──────────────────────────────────────────────
+    cur_date_dt   = pd.to_datetime(tgt['_cur_date'], format='%Y%m%d', errors='coerce')
+    prev2_date_dt = pd.to_datetime(
+        prev2_rid.str[:8].fillna('19000101'), format='%Y%m%d', errors='coerce'
+    )
+    tgt['prev2_days_ago'] = (cur_date_dt - prev2_date_dt).dt.days.where(prev2_rid.notna())
+
+    # ── 対策4: 前走が叩き台か ────────────────────────────────────────────
+    prev1_chaku_n = pd.to_numeric(tgt['prev1_chaku'], errors='coerce')
+    prev2_chaku_n = pd.to_numeric(tgt['prev2_chaku'], errors='coerce')
+    # 前走着順 > 前々走着順 → 前々走の方が好走（前走は叩き台的）
+    tgt['prev_was_step'] = (
+        (prev1_chaku_n > prev2_chaku_n) & prev1_rid.notna() & prev2_rid.notna()
+    ).astype(float).where(prev1_rid.notna() & prev2_rid.notna())
 
     # ── opp_next テーブル（前走/前々走共用） ─────────────────────────────
     log.info("opp_next テーブル構築中...")
