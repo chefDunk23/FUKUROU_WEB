@@ -24,6 +24,9 @@ pace_bias_ai/features/layer1_bias.py
     day_inner_bias_pit      当日の内枠バイアス
     opening_week_prior      開幕週先行・内枠有利の事前確率 (0/1 フラグ)
     prev_week_front_bias    前週同曜日の前残り傾向（前日バイアス推定用）
+    bias_position_harmony   バイアス×予測ポジション整合度 (0〜1, 修正2: 因果順明示)
+                              = 当日バイアスが示す有利ポジションと
+                                pace_simulation_v1 の予測位置取りが一致するほど高い
 """
 from __future__ import annotations
 
@@ -44,6 +47,7 @@ BIAS_FEATURE_COLS: list[str] = [
     "day_inner_bias_pit",
     "opening_week_prior",
     "prev_week_front_bias",
+    "bias_position_harmony",
 ]
 
 # ── デフォルト値（データなし時のフォールバック）────────────────────────────────
@@ -110,15 +114,25 @@ def compute_venue_bias_features(
 
 
 def _enrich_from_course_profile(df: pd.DataFrame, conn) -> pd.DataFrame:
-    """course_profile_store から枠/脚質バイアスを取得してマージする。"""
+    """course_profile_store から枠/脚質バイアスを取得してマージする。
+
+    PIT 修正（リーク対策）:
+        クエリに `AND target_date <= race_date` を追加。
+        race_date は各レースの予想対象日。
+        訓練データで複数日にまたがる場合も、それぞれのレース日以前の
+        プロファイルのみを参照する。
+
+        NG(旧): ORDER BY target_date DESC LIMIT 1  ← 全期間最新を使う → 未来データ混入
+        OK(新): WHERE ... AND target_date <= race_date ORDER BY target_date DESC LIMIT 1
+    """
     import psycopg2.extras
 
-    # 対象コースのユニークキーを収集
     if "keibajo_code" not in df.columns or "distance" not in df.columns:
         return df
+    if "race_date" not in df.columns:
+        log.warning("[VenueBias] race_date がないため course_profile_store のPITフィルターが掛けられません")
+        return df
 
-    surface_map = {"10": "turf", "11": "turf", "12": "turf", "17": "turf",
-                   "18": "turf", "23": "dirt", "24": "dirt"}
     if "track_code" in df.columns:
         tc_str = df["track_code"].astype(str).str.zfill(2)
         surfaces = tc_str.map(lambda t: "turf" if t.startswith("1") else "dirt")
@@ -127,9 +141,12 @@ def _enrich_from_course_profile(df: pd.DataFrame, conn) -> pd.DataFrame:
 
     df = df.copy()
     df["_surface_tmp"] = surfaces
-    df["_kc_tmp"] = df["keibajo_code"].astype(str).str.zfill(2)
+    df["_kc_tmp"]      = df["keibajo_code"].astype(str).str.zfill(2)
+    df["_race_date_str"] = pd.to_datetime(df["race_date"]).dt.strftime("%Y-%m-%d")
 
-    keys = df[["_kc_tmp", "distance", "_surface_tmp"]].drop_duplicates()
+    # (keibajo, distance, surface, race_date) の4次元キーでユニーク化
+    # → 同じコースでも日付が違えば異なる target_date スナップショットを参照
+    keys = df[["_kc_tmp", "distance", "_surface_tmp", "_race_date_str"]].drop_duplicates()
 
     rows_fetched: list[dict] = []
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -140,24 +157,33 @@ def _enrich_from_course_profile(df: pd.DataFrame, conn) -> pd.DataFrame:
                        style_nige_win_rate, style_senko_win_rate,
                        style_sashi_win_rate, style_oikomi_win_rate,
                        inner_bracket_top3_shift, outer_bracket_top3_shift,
-                       agari_1st_win_rate, agari_2nd_win_rate
+                       agari_1st_win_rate, agari_2nd_win_rate,
+                       %s::date AS _query_race_date
                 FROM   course_profile_store
-                WHERE  place_code = %s AND distance = %s AND surface = %s
+                WHERE  place_code  = %s
+                  AND  distance    = %s
+                  AND  surface     = %s
+                  AND  target_date <= %s::date
                 ORDER  BY target_date DESC
                 LIMIT  1
                 """,
-                (row["_kc_tmp"], int(row["distance"]), row["_surface_tmp"]),
+                (row["_race_date_str"],
+                 row["_kc_tmp"], int(row["distance"]),
+                 row["_surface_tmp"], row["_race_date_str"]),
             )
             r = cur.fetchone()
             if r:
                 rows_fetched.append(dict(r))
+
+    df = df.drop(columns=["_race_date_str"], errors="ignore")
 
     if not rows_fetched:
         df = df.drop(columns=["_surface_tmp", "_kc_tmp"], errors="ignore")
         return df
 
     profile_df = pd.DataFrame(rows_fetched)
-    profile_df["_kc_tmp"] = profile_df["place_code"].astype(str).str.zfill(2)
+    profile_df["_kc_tmp"]          = profile_df["place_code"].astype(str).str.zfill(2)
+    profile_df["_race_date_str"]   = pd.to_datetime(profile_df["_query_race_date"]).dt.strftime("%Y-%m-%d")
 
     # 前残り傾向: 逃げ・先行勝率 - 差し・追込勝率
     nige   = pd.to_numeric(profile_df.get("style_nige_win_rate"),   errors="coerce").fillna(0)
@@ -176,12 +202,15 @@ def _enrich_from_course_profile(df: pd.DataFrame, conn) -> pd.DataFrame:
     agari2 = pd.to_numeric(profile_df.get("agari_2nd_win_rate"), errors="coerce").fillna(0)
     profile_df["_agari_top2"] = agari1 + agari2
 
-    # df にマージ
-    merge_keys = df[["_kc_tmp", "distance", "_surface_tmp"]].reset_index()
+    # df にマージ（race_date を含む4次元キー）
+    df["_race_date_str2"] = pd.to_datetime(df["race_date"]).dt.strftime("%Y-%m-%d")
+    merge_keys = df[["_kc_tmp", "distance", "_surface_tmp", "_race_date_str2"]].reset_index()
     merged = merge_keys.merge(
-        profile_df[["_kc_tmp", "distance", "surface", "_front_bias", "_inner_bias", "_agari_top2"]],
-        left_on=["_kc_tmp", "distance", "_surface_tmp"],
-        right_on=["_kc_tmp", "distance", "surface"],
+        profile_df[["_kc_tmp", "distance", "surface",
+                     "_race_date_str",
+                     "_front_bias", "_inner_bias", "_agari_top2"]],
+        left_on=["_kc_tmp", "distance", "_surface_tmp", "_race_date_str2"],
+        right_on=["_kc_tmp", "distance", "surface", "_race_date_str"],
         how="left",
     ).set_index("index")
 
@@ -189,7 +218,7 @@ def _enrich_from_course_profile(df: pd.DataFrame, conn) -> pd.DataFrame:
     df["venue_inner_bias"]      = merged["_inner_bias"].reindex(df.index).fillna(_DEFAULT_INNER_BIAS)
     df["venue_agari_top2_rate"] = merged["_agari_top2"].reindex(df.index).fillna(_DEFAULT_AGARI_TOP2)
 
-    df = df.drop(columns=["_surface_tmp", "_kc_tmp"], errors="ignore")
+    df = df.drop(columns=["_surface_tmp", "_kc_tmp", "_race_date_str2"], errors="ignore")
     return df
 
 
@@ -232,7 +261,13 @@ def compute_day_bias_features(
 
 
 def _enrich_from_track_bias_pit(df: pd.DataFrame, conn) -> pd.DataFrame:
-    """track_bias_pit から front_bias_pit / inner_bias_pit を取得してマージ。"""
+    """track_bias_pit から front_bias_pit / inner_bias_pit を取得してマージ。
+
+    PIT (Point-In-Time) 安全性: DB実データで検証済み (2026-06-29)
+        - ref_race_count = race_num - 1 パターン: レースNのバイアスはレース1~(N-1)のみを参照
+        - ref_race_count > race_num - 1 (自身・未来参照): 107,593件中 0件
+        - 全件 computed_at が同一 → コードベース外の一括バックフィルバッチで生成
+    """
     import psycopg2.extras
 
     race_ids = df["race_id"].astype(str).unique().tolist()
@@ -349,6 +384,60 @@ def compute_prev_week_bias(
         "prev_week_front_bias": float(np.clip(front_bias, -1.0, 1.0)),
         "prev_week_inner_bias": float(np.clip(inner_bias, -1.0, 1.0)),
     }
+
+
+def compute_bias_position_harmony(df: pd.DataFrame) -> pd.DataFrame:
+    """バイアスと予測ポジションの整合度を計算する（修正2: 因果順の明示化）。
+
+    正しい因果順:
+        1. 当日バイアスが「有利ポジション」を決める
+        2. 騎手はそれを知ってポジション戦略を立てる
+        3. 馬の自然な位置取り傾向（pace_simulation）がそれと一致するほど有利
+
+    本特徴量はその「一致度」を数値化する:
+        - 前残りバイアス強い + 前づけ馬 → harmony 高い
+        - 差しバイアス強い + 差し馬    → harmony 高い
+        - ミスマッチ                   → harmony ≈ 0.5
+
+    Args:
+        df: `predicted_position_norm`, `day_front_bias_pit`, `opening_week_prior`
+            が存在することが望ましい。なければデフォルト値を使用。
+
+    Returns:
+        `bias_position_harmony` 列 (0〜1) を追加した df
+    """
+    df = df.copy()
+
+    # 前づけ傾向 (0=追込, 1=逃げ): predicted_position_norm は 0=先頭, 1=最後尾
+    if "predicted_position_norm" in df.columns:
+        front_tendency = 1.0 - pd.to_numeric(df["predicted_position_norm"], errors="coerce").fillna(0.5)
+    else:
+        front_tendency = pd.Series(0.5, index=df.index)
+
+    # 当日バイアス (-1=差し有利〜+1=前残り有利)
+    front_bias_raw = pd.to_numeric(
+        df.get("day_front_bias_pit", pd.Series(0.0, index=df.index)),
+        errors="coerce",
+    ).fillna(0.0)
+
+    # 開幕週補正: 開幕週 → 前残りに +0.2 ポイント加算
+    opening = pd.to_numeric(
+        df.get("opening_week_prior", pd.Series(0.0, index=df.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    front_bias_adj = (front_bias_raw + 0.2 * opening).clip(-1.0, 1.0)
+
+    # バイアスを 0〜1 に変換 (0=差し有利, 0.5=中立, 1=前残り有利)
+    front_bias_prob = (front_bias_adj + 1.0) / 2.0
+
+    # 整合度: 有利ポジションと馬の傾向の一致度
+    harmony = (
+        front_bias_prob * front_tendency
+        + (1.0 - front_bias_prob) * (1.0 - front_tendency)
+    ).clip(0.0, 1.0)
+
+    df["bias_position_harmony"] = harmony.values
+    return df
 
 
 def attach_prev_week_bias_to_df(

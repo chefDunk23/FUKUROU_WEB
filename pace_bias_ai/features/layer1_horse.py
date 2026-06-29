@@ -4,18 +4,27 @@ pace_bias_ai/features/layer1_horse.py
 第1層（数値化）: 馬単位の特徴量
 
 新規実装:
-    versatile_type          自在タイプ判定 (先行勝ち + 差し勝ち両方あり → 1.0)
-    versatile_score         自在スコア (0〜1, キャリア浅い馬は NaN)
+    versatile_type          自在タイプ判定 (直近18ヶ月で先行好走+差し好走両方 → 1.0)
+    versatile_score         自在スコア (0〜1, キャリア浅い馬は 0.5)
     hidden_late_speed       隠れた末脚スコア (上がり4〜5番手でも実質上位)
-    weight_reduction_flag   減量騎手フラグ推算 (jockey_career_wins < 100 → 1.0)
+    weight_reduction_flag   減量騎手フラグ推算 (kinryo がレース内平均より 1.0kg 以上軽い → 1.0)
     opening_week_flag       開幕週フラグ (kaisai_nichime が 1〜2 日目 → 1.0)
-    distance_change         前走から今走の距離変化量 (m)
+    distance_change         前走から今走の距離変化量 (m, 正=延長, 負=短縮)
     distance_extended       距離延長フラグ (+200m 以上 → 1.0)
+    distance_shortened      距離短縮フラグ (-200m 以下 → 1.0)
+    jockey_continuity_flag  継続騎乗フラグ (前走と同じ騎手 → 1.0)
+    jockey_leading_flag     リーディング上位騎手フラグ (jockey_yr_wins >= 閾値 → 1.0)
+
+設計上の注意（修正2対応）:
+    騎手フラグ2種（継続騎乗・リーディング）は「騎手が狙い通りの位置を取れるか」の
+    近似として追加。完璧な積極性データは作り込まない（確率論の前提）。
 
 リーク防止方針:
     - 過去走の脚質・着順はすべて shift(1)+rolling → 当走を含まない
-    - versatile_type は先行勝ち/差し勝ちの判定に当走着順を使わない
+    - versatile_type は直近18ヶ月のみを見る（全期間 cumsum を廃止）
+      理由：加齢で脚質が変わっただけの馬を誤判定しないため
     - hidden_late_speed は「過去走の」上がりレース内順位を参照
+    - jockey_continuity_flag は前走(shift(1))の騎手と今走を比較
 
 必須カラム（入力 DataFrame）:
     horse_id           馬ID
@@ -28,11 +37,13 @@ pace_bias_ai/features/layer1_horse.py
     distance           レース距離 (m)
 
 任意カラム:
-    field_size         出走頭数（あれば優先使用）
-    kaisai_nichime     開催日次 (races_v2 テーブル由来)
-    jockey_career_wins 騎手通算勝利数 (jockeys テーブル由来)
-    kinryo             負担重量 0.1kg 単位 (race_entries_v2 由来)
-    basis_weight       斤量 kg (race_entries.basis_weight 由来)
+    field_size             出走頭数（あれば優先使用）
+    kaisai_nichime         開催日次 (races_v2 テーブル由来)
+    jockey_career_wins     騎手通算勝利数
+    kinryo                 負担重量 0.1kg 単位 (race_entries_v2 由来)
+    basis_weight           斤量 kg (race_entries.basis_weight 由来)
+    jockey_cd / jockey_id  騎手コード (継続騎乗判定用)
+    jockey_yr_wins         騎手年間勝利数 (リーディング判定用)
 """
 from __future__ import annotations
 
@@ -42,24 +53,36 @@ import pandas as pd
 # ── 定数 ──────────────────────────────────────────────────────────────────────
 
 # 自在タイプ: 先行判定の c4 正規化閾値 (0=逃げ〜1=追込)
-_FRONT_THRESH = 0.35   # 0.35 以下 → 先行とみなす
-_CLOSER_THRESH = 0.65  # 0.65 以上 → 差しとみなす
+_FRONT_THRESH  = 0.35   # 0.35 以下 → 先行とみなす
+_CLOSER_THRESH = 0.65   # 0.65 以上 → 差しとみなす
 
-# 自在スコアに最低限必要なキャリア（先行走or差し走の実績数）
+# 自在タイプ: 判定対象期間（直近1年半 = 18ヶ月 ≈ 548日）
+# 全期間累積ではなく直近期間に限定する理由:
+#   加齢で脚質が変わった馬（かつて先行→今は差し）を誤判定しないため
+_VERSATILE_WINDOW_DAYS = 548
+
+# 自在スコアに最低限必要なキャリア（有効走数）
 _MIN_CAREER_FOR_VERSATILE = 4
 
 # 開幕週判定: kaisai_nichime が何日目以内か
 _OPENING_NICHIME_MAX = 2  # 1〜2日目 = 開幕週扱い
 
-# 減量騎手の通算勝利数閾値（JRA基準: 100勝未満が減量対象）
-_APPRENTICE_WIN_THRESHOLD = 100
+# 減量騎手の kinryo 相対判定オフセット（単位: 0.1kg）
+# JRA の減量は 1〜3kg。レース内平均より 10（=1.0kg）以上軽ければ減量と判定。
+# 相対判定の理由: ハンデ戦・牝馬限定戦でも誤判定しない。
+# 参考: jockeys.career_wins は全件0（KS レコード未実装のため使用不可）。
+_KINRYO_REDUCTION_OFFSET = 10  # 0.1kg 単位: 1.0 kg 以上軽い = 減量フラグ
 
-# 距離延長閾値 (m)
-_EXTENSION_MIN_M = 200
+# 距離変化フラグの閾値 (m)
+_DIST_CHANGE_MIN_M = 200
+
+# リーディング上位騎手の年間勝利数閾値
+# JRA 年間リーディング上位20名程度 ≈ 50勝以上
+_LEADING_YR_WINS_THRESHOLD = 50
 
 # NaN 補完
-_FILL_VERSATILE = 0.5    # 判定不能（キャリア浅い）→ 中立
-_FILL_HIDDEN_LS  = 0.5   # 隠れ末脚スコア未計算 → 中立
+_FILL_VERSATILE = 0.5   # 判定不能（キャリア浅い）→ 中立
+_FILL_HIDDEN_LS = 0.5   # 隠れ末脚スコア未計算 → 中立
 
 # 公開カラム名
 LAYER1_HORSE_COLS: list[str] = [
@@ -70,6 +93,9 @@ LAYER1_HORSE_COLS: list[str] = [
     "opening_week_flag",
     "distance_change",
     "distance_extended",
+    "distance_shortened",
+    "jockey_continuity_flag",
+    "jockey_leading_flag",
 ]
 
 _REQUIRED_COLS = frozenset({
@@ -77,6 +103,59 @@ _REQUIRED_COLS = frozenset({
     "corner_4", "kakutei_chakujun", "go_3f_time",
     "umaban", "distance",
 })
+
+
+def _compute_jockey_pit_wins(
+    df: pd.DataFrame,
+    jockey_col: str | None,
+) -> tuple[pd.Series, pd.Series]:
+    """PIT 安全な騎手通算勝利数・年間勝利数を df 内履歴から集計して返す。
+
+    各レース行の値は「そのレースより前に同騎手が上げた勝利数」を表す。
+    df に当該騎手の全過去走が含まれるほど精度が高くなる。
+
+    Args:
+        df       : 時系列でソート済みの入力 DataFrame（horse_id 順でなくてよい）
+        jockey_col: 騎手コードのカラム名（None の場合は全0を返す）
+
+    Returns:
+        (pit_career_wins, pit_yr_wins) — どちらも df.index 対応の Series
+    """
+    zero = pd.Series(0.0, index=df.index)
+    if jockey_col is None or jockey_col not in df.columns:
+        return zero, zero
+    if "kakutei_chakujun" not in df.columns:
+        return zero, zero
+
+    work = df[[jockey_col, "race_id", "race_date", "kakutei_chakujun"]].copy()
+    work["_orig_idx"] = np.arange(len(work))
+    work["_date"]     = pd.to_datetime(work["race_date"])
+    work["_year"]     = work["_date"].dt.year
+    work["_win"]      = (
+        pd.to_numeric(work["kakutei_chakujun"], errors="coerce") == 1
+    ).astype(float).fillna(0.0)
+
+    # 騎手×日付×レースID でソート（同日複数騎乗に対応）
+    work = work.sort_values([jockey_col, "_date", "race_id"]).reset_index(drop=True)
+
+    jg  = work.groupby(jockey_col, sort=False)
+    jyg = work.groupby([jockey_col, "_year"], sort=False)
+
+    # career: 騎手グループ内の前走までの累積勝利数
+    work["pit_career_wins"] = jg["_win"].transform(
+        lambda x: x.shift(1).fillna(0.0).cumsum()
+    )
+
+    # yr_wins: 同一騎手・同一年グループ内の前走までの累積勝利数
+    work["pit_yr_wins"] = jyg["_win"].transform(
+        lambda x: x.shift(1).fillna(0.0).cumsum()
+    )
+
+    # 元の index 順に戻す
+    work = work.sort_values("_orig_idx").reset_index(drop=True)
+    work.index = df.index
+
+    return work["pit_career_wins"], work["pit_yr_wins"]
 
 
 def create_layer1_horse_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +188,7 @@ def create_layer1_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     denom = (field_size - 1.0).clip(lower=1.0)
 
     # ── 前処理: 無効値を NaN に ───────────────────────────────────────────────
-    c4_raw = df["corner_4"].where(df["corner_4"].notna() & (df["corner_4"] > 0))
+    c4_raw     = df["corner_4"].where(df["corner_4"].notna() & (df["corner_4"] > 0))
     rank_valid = df["kakutei_chakujun"].where(
         df["kakutei_chakujun"].notna() & (df["kakutei_chakujun"] > 0)
     )
@@ -128,31 +207,49 @@ def create_layer1_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         ))
     )
 
-    # ── 勝利フラグ ────────────────────────────────────────────────────────────
-    df["_won"] = (rank_valid == 1).astype(float)
-    # 先行勝ち: c4 正規化 ≤ 前付け閾値 かつ 1着
-    df["_front_win"] = (c4_norm <= _FRONT_THRESH) & (df["_won"] == 1)
-    df["_front_win"] = df["_front_win"].astype(float)
-    # 差し勝ち: c4 正規化 ≥ 差し閾値 かつ 1着
-    df["_closer_win"] = (c4_norm >= _CLOSER_THRESH) & (df["_won"] == 1)
-    df["_closer_win"] = df["_closer_win"].astype(float)
-    # NaN がある行はフラグも NaN に
-    df.loc[c4_norm.isna() | rank_valid.isna(), ["_front_win", "_closer_win"]] = np.nan
+    # ── 好走フラグ（3着以内）+ 脚質フラグ ────────────────────────────────────
+    placed = rank_valid <= 3
+    df["_front_placed"]  = (c4_norm <= _FRONT_THRESH)  & placed
+    df["_closer_placed"] = (c4_norm >= _CLOSER_THRESH) & placed
+    df["_front_placed"]  = df["_front_placed"].where(c4_norm.notna() & rank_valid.notna()).astype(float)
+    df["_closer_placed"] = df["_closer_placed"].where(c4_norm.notna() & rank_valid.notna()).astype(float)
+    df["_c4_valid_flag"] = c4_norm.notna().astype(float)
 
-    # ── 時系列ソート → horse_id グループ ────────────────────────────────────
+    # ── 時系列ソート ──────────────────────────────────────────────────────────
     df = df.sort_values(["horse_id", "race_date", "race_id"]).reset_index(drop=True)
-    gh = df.groupby("horse_id", sort=False)
 
-    # ── 自在タイプ ────────────────────────────────────────────────────────────
-    # shift(1) で当走を除外してから cumsum/cumcount で「これまでの実績」を算出
-    cumfrontwin  = gh["_front_win"].transform(lambda x: x.shift(1).fillna(0).cumsum())
-    cumcloserwin = gh["_closer_win"].transform(lambda x: x.shift(1).fillna(0).cumsum())
-    cum_c4_valid = gh["_c4_norm"].transform(lambda x: x.shift(1).notna().cumsum())
+    # ── 自在タイプ: 直近18ヶ月ローリングウィンドウ ───────────────────────────
+    #
+    # 「全期間 cumsum」から変更。理由:
+    #   加齢で脚質が変わっただけの馬を誤判定しないため、直近期間のみを見る。
+    #
+    # 実装: DatetimeIndex を使った time-based rolling で 548日窓を設定し、
+    #   当走を除くため rolling_sum - current_value を計算する。
+    df["_race_date_dt"] = pd.to_datetime(df["race_date"])
+    window = pd.Timedelta(days=_VERSATILE_WINDOW_DAYS)
 
-    # 先行走と差し走の両方に実績があり、かつキャリア（c4有効走数）が十分ある場合に判定
-    has_front  = cumfrontwin  > 0
-    has_closer = cumcloserwin > 0
-    career_ok  = cum_c4_valid >= _MIN_CAREER_FOR_VERSATILE
+    # DatetimeIndex でグループ rolling する内部ヘルパー
+    def _time_rolling_sum_excl_current(col: str) -> pd.Series:
+        """直近 window 日のサム（当走を除く）。shift(1) の時間版。"""
+        df_dt = df.set_index("_race_date_dt")
+        gh_dt = df_dt.groupby("horse_id", sort=False)
+        total = (
+            gh_dt[col]
+            .rolling(window, min_periods=0)
+            .sum()
+            .reset_index(level=0, drop=True)
+        )
+        # rolling は当走を含む → current を引いて「過去のみ」にする
+        excl = (total.values - df[col].fillna(0).values).clip(min=0)
+        return pd.Series(excl, index=df.index)
+
+    front_wins_18m  = _time_rolling_sum_excl_current("_front_placed")
+    closer_wins_18m = _time_rolling_sum_excl_current("_closer_placed")
+    career_18m      = _time_rolling_sum_excl_current("_c4_valid_flag")
+
+    has_front   = front_wins_18m  > 0
+    has_closer  = closer_wins_18m > 0
+    career_ok   = career_18m >= _MIN_CAREER_FOR_VERSATILE
 
     df["versatile_type"] = np.where(
         career_ok,
@@ -160,12 +257,8 @@ def create_layer1_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         np.nan,
     )
 
-    # 自在スコア: 先行勝ち数と差し勝ち数の調和平均的スコア (0〜1)
-    # min(front_wins, closer_wins) / max(front_wins, closer_wins + 1) を近似
-    total_fw = cumfrontwin.clip(lower=0)
-    total_cw = cumcloserwin.clip(lower=0)
-    min_vc = np.minimum(total_fw, total_cw)
-    max_vc = np.maximum(total_fw, total_cw).clip(lower=1)
+    min_vc = np.minimum(front_wins_18m, closer_wins_18m)
+    max_vc = np.maximum(front_wins_18m, closer_wins_18m).clip(lower=1)
     df["versatile_score"] = np.where(
         career_ok,
         (min_vc / max_vc).clip(0.0, 1.0),
@@ -173,60 +266,98 @@ def create_layer1_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ── 隠れた末脚スコア ─────────────────────────────────────────────────────
-    # 「上がりがレース内で4〜5番手でも実質上位」を数値化する。
-    # レース内上がり順位を頭数で正規化（0=最速, 1=最遅）し、
-    # 直近5走の過去走平均をとったものを 1.0 から引いて「速さスコア」に変換。
-    # 値が高い（上がり平均が速い）＝隠れた末脚あり。
-    # go3f_rank_norm: 0=最速クローザー, 1=最遅（pace_simulation と同じ方向感）
     go3f_rank_norm = (df["_go3f_rank"] - 1.0) / denom.clip(lower=1.0)
     df["_go3f_rank_norm"] = go3f_rank_norm
 
-    # 過去5走の上がり順位正規化平均（shift(1) でリーク防止）
+    gh = df.groupby("horse_id", sort=False)
     avg_go3f_norm_5 = gh["_go3f_rank_norm"].transform(
         lambda x: x.shift(1).rolling(5, min_periods=1).mean()
     )
-    # 末脚スコア: 1 - 正規化上がり順位平均 → 0=末脚なし, 1=上がり最速
     df["hidden_late_speed"] = (1.0 - avg_go3f_norm_5).clip(0.0, 1.0)
 
-    # ── 距離変化 ─────────────────────────────────────────────────────────────
+    # ── 距離変化（延長・短縮両方向） ─────────────────────────────────────────
     prev_dist = gh["distance"].transform(lambda x: x.shift(1))
-    df["distance_change"]   = (df["distance"].astype(float) - prev_dist).fillna(0.0)
-    df["distance_extended"] = (df["distance_change"] >= _EXTENSION_MIN_M).astype(float)
+    df["distance_change"]    = (df["distance"].astype(float) - prev_dist).fillna(0.0)
+    df["distance_extended"]  = (df["distance_change"] >=  _DIST_CHANGE_MIN_M).astype(float)
+    df["distance_shortened"] = (df["distance_change"] <= -_DIST_CHANGE_MIN_M).astype(float)
 
     # ── 開幕週フラグ ─────────────────────────────────────────────────────────
     if "kaisai_nichime" in df.columns:
         nichime = pd.to_numeric(df["kaisai_nichime"], errors="coerce")
         df["opening_week_flag"] = (nichime <= _OPENING_NICHIME_MAX).astype(float)
     else:
-        df["opening_week_flag"] = np.nan  # データなし → 後でフォールバック
+        df["opening_week_flag"] = np.nan
+
+    # ── 継続騎乗フラグ（修正2: 騎手が狙い通り乗れるかの近似） ───────────────
+    # 前走と今走で同じ騎手 → 馬の癖を理解している → 狙ったポジションを取りやすい
+    jockey_col = None
+    for candidate in ["jockey_cd", "jockey_id"]:
+        if candidate in df.columns:
+            jockey_col = candidate
+            break
+
+    if jockey_col is not None:
+        prev_jockey = gh[jockey_col].transform(lambda x: x.shift(1))
+        df["jockey_continuity_flag"] = (
+            df[jockey_col].astype(str) == prev_jockey.astype(str)
+        ).astype(float)
+        # 初出走（前走なし）→ 0
+        df.loc[prev_jockey.isna(), "jockey_continuity_flag"] = 0.0
+    else:
+        df["jockey_continuity_flag"] = 0.0
+
+    # ── 騎手 PIT 安全勝利数の計算 ─────────────────────────────────────────────
+    # jockey_career_wins / jockey_yr_wins がカラムに存在する場合はそれを優先。
+    # ない場合は df 内の過去走から集計する（PIT 保証: shift(1)+cumsum）。
+    # この方法は「全期間の馬履歴が df に含まれている」前提で正確な値を返す。
+    pit_career_wins, pit_yr_wins = _compute_jockey_pit_wins(df, jockey_col)
 
     # ── 減量騎手フラグ ────────────────────────────────────────────────────────
-    # jockey_career_wins が利用可能な場合: 100勝未満 → 1.0
-    # 利用不可の場合: kinryo（実斤量 ×10）と basis_weight を比較して推算
-    if "jockey_career_wins" in df.columns:
-        career_wins = pd.to_numeric(df["jockey_career_wins"], errors="coerce")
-        df["weight_reduction_flag"] = (career_wins < _APPRENTICE_WIN_THRESHOLD).astype(float)
-        df.loc[career_wins.isna(), "weight_reduction_flag"] = 0.0  # 不明 → なしと仮定
-    elif "kinryo" in df.columns and "basis_weight" in df.columns:
-        # kinryo は 0.1kg 単位整数 → /10 でkg換算
-        kinryo_kg = pd.to_numeric(df["kinryo"], errors="coerce") / 10.0
-        basis_kg  = pd.to_numeric(df["basis_weight"], errors="coerce")
-        # 実斤量が標準より 1kg 以上軽い → 減量騎手の可能性が高い
-        df["weight_reduction_flag"] = ((basis_kg - kinryo_kg) >= 1.0).astype(float)
-        df.loc[kinryo_kg.isna() | basis_kg.isna(), "weight_reduction_flag"] = 0.0
+    # 優先順位:
+    #   1. kinryo が race_id グループ内平均より _KINRYO_REDUCTION_OFFSET 以上軽い
+    #      → 完全 PIT 安全、ハンデ戦・牝馬限定戦でも誤判定しない
+    #   2. kinryo がない場合は df 内集計の PIT 通算勝利数で代替
+    # 注: jockeys.career_wins は全件0（KS レコード未実装）、
+    #     basis_weight カラムも存在しないため、従来の判定方法は使用不可。
+    if "kinryo" in df.columns:
+        kinryo_raw = pd.to_numeric(df["kinryo"], errors="coerce")
+        # sex_cd があれば同性馬グループ内で比較（より正確）
+        if "sex_cd" in df.columns:
+            grp_avg = df.groupby(["race_id", "sex_cd"])["kinryo"].transform(
+                lambda x: pd.to_numeric(x, errors="coerce").mean()
+            )
+        else:
+            grp_avg = df.groupby("race_id")["kinryo"].transform(
+                lambda x: pd.to_numeric(x, errors="coerce").mean()
+            )
+        reduction = (grp_avg - kinryo_raw) >= _KINRYO_REDUCTION_OFFSET
+        df["weight_reduction_flag"] = reduction.astype(float)
+        df.loc[kinryo_raw.isna(), "weight_reduction_flag"] = 0.0
     else:
-        df["weight_reduction_flag"] = 0.0  # データなし → なしと仮定
+        # kinryo がない場合: df 内集計の PIT 通算勝利数（100勝未満 = 減量近似）
+        # 注: 2022年以降のデータのみのため過剰計上になりやすい
+        df["weight_reduction_flag"] = (pit_career_wins < 100).astype(float)
 
-    # ── 元の行順に復元 ────────────────────────────────────────────────────────
+    # ── リーディング上位騎手フラグ（修正2: 判断力の近似） ────────────────────
+    # 年間50勝以上の騎手はポジション判断が優れているとみなす（簡易近似）
+    if "jockey_yr_wins" in df.columns:
+        yr_wins = pd.to_numeric(df["jockey_yr_wins"], errors="coerce")
+        df["jockey_leading_flag"] = (yr_wins >= _LEADING_YR_WINS_THRESHOLD).astype(float)
+        df.loc[yr_wins.isna(), "jockey_leading_flag"] = 0.0
+    else:
+        # df 内集計の PIT 年間勝利数を使用
+        df["jockey_leading_flag"] = (pit_yr_wins >= _LEADING_YR_WINS_THRESHOLD).astype(float)
+
+    # ── 内部列削除・元の行順に復元 ────────────────────────────────────────────
     internal = [c for c in df.columns if c.startswith("_") and c != _ORD]
     df = df.drop(columns=internal, errors="ignore")
     df = df.sort_values(_ORD).drop(columns=[_ORD]).reset_index(drop=True)
 
     # ── NaN 補完 ─────────────────────────────────────────────────────────────
-    df["versatile_type"]     = df["versatile_type"].fillna(_FILL_VERSATILE)
-    df["versatile_score"]    = df["versatile_score"].fillna(_FILL_VERSATILE)
-    df["hidden_late_speed"]  = df["hidden_late_speed"].fillna(_FILL_HIDDEN_LS)
-    df["opening_week_flag"]  = df["opening_week_flag"].fillna(0.0)   # kaisai_nichime なし → 非開幕週扱い
+    df["versatile_type"]      = df["versatile_type"].fillna(_FILL_VERSATILE)
+    df["versatile_score"]     = df["versatile_score"].fillna(_FILL_VERSATILE)
+    df["hidden_late_speed"]   = df["hidden_late_speed"].fillna(_FILL_HIDDEN_LS)
+    df["opening_week_flag"]   = df["opening_week_flag"].fillna(0.0)
     df["weight_reduction_flag"] = df["weight_reduction_flag"].fillna(0.0)
 
     return df
