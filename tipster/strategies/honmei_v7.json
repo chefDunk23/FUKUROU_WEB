@@ -1,0 +1,144 @@
+{
+  "name": "本命抽出 v7 (馬場別条件対応)",
+  "tipster": "fukurou",
+  "type": "honmei",
+  "version": "7.0",
+  "_comment": "honmei_v6 に馬場別条件 (v2_baba_track_record / v2_sire_baba_fit / v2_heavy_track_stamina) を追加。4-baba 事前計算対応: params.baba は generate_picks_report.py が馬場ごとに上書きして4回評価する。BET-7 (2026-06-27)。",
+  "conditions": [
+    {
+      "id": "v2_past_margin",
+      "enabled": true,
+      "required": true,
+      "_comment": "第1層: 過去3走以内に勝ち馬差≤1秒の好走歴（必須）",
+      "params": {
+        "lookback": 3,
+        "max_sec": 1.0,
+        "bonus_score": 1.0
+      }
+    },
+    {
+      "id": "v2_race_quality",
+      "enabled": true,
+      "required": true,
+      "_comment": "第1層: 前走上位3頭の次走複勝率≥35%（レースレベル必須）",
+      "params": {
+        "top_n": 3,
+        "min_next_horses": 3,
+        "min_place_rate": 0.35,
+        "bonus_score": 1.0
+      }
+    },
+    {
+      "id": "v2_class_change",
+      "enabled": true,
+      "required": false,
+      "_comment": "第1層: クラス変化評価",
+      "params": {
+        "downgrade_bonus": 1.0,
+        "upgrade_as_none": true
+      }
+    },
+    {
+      "id": "v2_jockey_positive",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 騎手評価",
+      "params": {
+        "top_jockey_threshold": 30,
+        "base_score": 0.5,
+        "upgrade_bonus": 1.0
+      }
+    },
+    {
+      "id": "v2_weight_favor",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 斤量",
+      "params": {
+        "decrease_threshold": 0.5,
+        "increase_threshold": 0.5,
+        "decrease_bonus": 0.5,
+        "increase_penalty": -0.5
+      }
+    },
+    {
+      "id": "v2_interval_optimal",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 間隔",
+      "params": {
+        "optimal_min": 15,
+        "optimal_max": 28,
+        "bonus_score": 0.5,
+        "long_rest_min": 60
+      }
+    },
+    {
+      "id": "v2_surface_history",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 馬場（芝/ダート）実績",
+      "params": {
+        "lookback": 5,
+        "min_place_rank": 3,
+        "bonus_score": 0.5
+      }
+    },
+    {
+      "id": "v2_distance_match",
+      "enabled": true,
+      "required": false,
+      "_comment": "第2層: 距離適性",
+      "params": {
+        "band_big": 400,
+        "band_margin": 200,
+        "bonus_score": 0.5,
+        "lookback": 3
+      }
+    },
+    {
+      "id": "v2_baba_track_record",
+      "enabled": true,
+      "required": false,
+      "_comment": "BET-7: 馬場別過去成績（params.baba はスクリプトが馬場ごとに上書き）",
+      "params": {
+        "baba": "良",
+        "min_runs": 3,
+        "pass_rate": 0.30,
+        "fail_rate": 0.15,
+        "bonus_score": 1.0,
+        "penalty_score": -1.0
+      }
+    },
+    {
+      "id": "v2_sire_baba_fit",
+      "enabled": true,
+      "required": false,
+      "_comment": "BET-7: 種牡馬馬場適性（PIT-safe sire_feature_store）",
+      "params": {
+        "baba": "良",
+        "threshold": 0.02,
+        "bonus_score": 0.5
+      }
+    },
+    {
+      "id": "v2_heavy_track_stamina",
+      "enabled": true,
+      "required": false,
+      "_comment": "BET-7: 道悪スタミナ（重/不良のみ有効。良/稍重は None）",
+      "params": {
+        "baba": "良",
+        "min_runs": 3,
+        "pass_rate": 0.30,
+        "fail_rate": 0.15,
+        "bonus_score": 1.0,
+        "penalty_score": -1.5
+      }
+    }
+  ],
+  "ranking": {
+    "primary": "condition_clear_count",
+    "secondary": "ai_score",
+    "max_selections": 3
+  }
+}

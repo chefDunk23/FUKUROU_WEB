@@ -33,6 +33,7 @@ def _build_race_id(row: dict) -> str:
     """レースキー 6 フィールドを連結して 16 文字の race_id を生成する。
     kaisai_year(4) + kaisai_monthday(4) + keibajo_code(2)
     + kaisai_kai(2) + kaisai_nichime(2) + race_num(2) = 16 chars
+    races_v2 等のメインテーブル向け。
     """
     return "".join([
         (row.get("kaisai_year")     or ""),
@@ -40,6 +41,22 @@ def _build_race_id(row: dict) -> str:
         (row.get("keibajo_code")    or "").zfill(2),
         (row.get("kaisai_kai")      or "").zfill(2),
         (row.get("kaisai_nichime")  or "").zfill(2),
+        (row.get("race_num")        or "").zfill(2),
+    ])
+
+
+def build_payout_race_id(row: dict) -> str:
+    """payouts テーブル向け 12 桁 race_id を生成する。
+    PLAN.md §1-1 確定変換式:
+      kaisai_year(4) + kaisai_monthday(4) + keibajo_code(2) + race_num(2) = 12 chars
+    kaisai_kai / kaisai_nichime は含めない（payouts テーブルにこれらの情報がないため）。
+    同日同場で複数の開催回が重複しないというJRA運用規則により、一意に決まる。
+    他モジュールからも参照可能な公開関数（PLAN.md BET-0 出力要件「再利用可能な変換ヘルパー」）。
+    """
+    return "".join([
+        (row.get("kaisai_year")     or ""),
+        (row.get("kaisai_monthday") or ""),
+        (row.get("keibajo_code")    or "").zfill(2),
         (row.get("race_num")        or "").zfill(2),
     ])
 
@@ -72,9 +89,12 @@ class _SinkConf:
     columns: tuple[str, ...]
     pkey: tuple[str, ...]
     preprocessor: Callable[[dict], dict]
+    sql_override: str | None = None
 
     @property
     def upsert_sql(self) -> str:
+        if self.sql_override is not None:
+            return self.sql_override
         return _build_upsert(self.table, self.columns, self.pkey)
 
     def to_tuple(self, row: dict) -> tuple:
@@ -89,6 +109,35 @@ def _with_race_id(row: dict) -> dict:
 
 def _identity(row: dict) -> dict:
     return row
+
+# ── HR 払戻: パーサーの integer bet_type → 既存 DB の text bet_type 名 ─────────
+_HR_BET_NAMES: dict[int, str] = {
+    1: "tansho",
+    2: "fukusho",
+    3: "wakuren",
+    4: "umaren",
+    5: "wide",
+    6: "umatan",
+    7: "sanrenpuku",
+    8: "sanrentan",
+}
+
+
+def _prep_payout(row: dict) -> dict:
+    """HR払戻エントリを既存 payouts テーブルのスキーマに変換する。
+
+    既存スキーマ: race_id(text), bet_type(text), combination(text), payout(int), popularity(int)
+    パーサー出力: bet_type(int), combo_key(text), popularity_rank(int), horse_1/2/3
+
+    payouts.race_id は 12 桁（kaisai_kai/kaisai_nichime を含まない）。
+    PLAN.md §1-1 の変換式に従い build_payout_race_id() を使用する。
+    """
+    result = {**row, "race_id": build_payout_race_id(row)}
+    result["bet_type"] = _HR_BET_NAMES.get(row.get("bet_type"), str(row.get("bet_type")))
+    result["combination"] = row.get("combo_key")
+    result["popularity"] = row.get("popularity_rank")
+    return result
+
 
 def _prep_training(row: dict) -> dict:
     # center_cd: '0'=美浦, '1'=栗東。fields.py の _default_conv が空文字→None にするケースへの安全ネット。
@@ -269,6 +318,25 @@ _HANDLERS: dict[str, _SinkConf] = {
         ),
         pkey=("race_id", "umaban"),
         preprocessor=_with_race_id,
+    ),
+
+    # ── HR 払戻 — parse_hr_payouts() が展開した 1 払戻組合せ = 1 行 ─────────────
+    # 既存 payouts テーブルのスキーマに合わせる:
+    #   race_id(text), bet_type(text), combination(text), payout(int), popularity(int)
+    # _build_upsert の鮮度ガード (data_create_date/data_kubun) は使わず、
+    # 単純な ON CONFLICT DO UPDATE を使う（払戻確定値は変動しない）。
+    "HR_PAYOUT": _SinkConf(
+        table="payouts",
+        columns=("race_id", "bet_type", "combination", "payout", "popularity"),
+        pkey=("race_id", "bet_type", "combination"),
+        preprocessor=_prep_payout,
+        sql_override=(
+            "INSERT INTO payouts (race_id, bet_type, combination, payout, popularity)\n"
+            "VALUES %s\n"
+            "ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key DO UPDATE SET\n"
+            "    payout = EXCLUDED.payout,\n"
+            "    popularity = EXCLUDED.popularity"
+        ),
     ),
 }
 

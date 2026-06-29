@@ -43,14 +43,14 @@ import psycopg2
 import psycopg2.extras
 from shared.config import DB_JVDL
 from jvdl_parser.parser import (
-    parse_record, parse_wh_entries, parse_o1_entries, stats,
+    parse_record, parse_wh_entries, parse_o1_entries, parse_hr_payouts, stats,
 )
 from jvdl_parser.sink import BulkSink, _build_race_id
 from jvdl_parser.processor import _write_dlq
 from jvdl_parser.hook import post_recompute
 
 # WH/O1 に加えて hook を発火させる追加種別
-_HOOK_AFFECTING = frozenset(["WH", "WE", "O1", "RA", "SE", "AV", "JC", "TC", "CC"])
+_HOOK_AFFECTING = frozenset(["WH", "WE", "O1", "RA", "SE", "AV", "JC", "TC", "CC", "HR"])
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +60,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _RAW_DIR = Path(os.getenv("RAW_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data" / "input")))
-_DEFAULT_FILES = ["raw_DIFN.txt", "raw_SLOP.txt", "raw_WOOD.txt"]
+_DEFAULT_FILES = ["raw_DIFN.txt", "raw_SLOP.txt", "raw_WOOD.txt", "raw_RACE.txt"]
 
 
 def _ingest_file(
@@ -103,6 +103,10 @@ def _ingest_file(
                             sink.feed("O1_WIN", entry)
                         for entry in expanded["place"]:
                             sink.feed("O1_PLACE", entry)
+                    elif rtype == "HR":
+                        payouts = parse_hr_payouts(raw, row)
+                        for payout in payouts:
+                            sink.feed("HR_PAYOUT", payout)
                     else:
                         sink.feed(rtype, row)
 

@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import {
   transformRaceData,
-  fetchPublicRaceDetail,
+  fetchRaceDetail,
   type HorseData,
   type RaceDetailData,
   type AiMetric,
@@ -989,7 +989,7 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
     setLoading(true)
     setError(null)
     const id = raceId ?? '202606070511'
-    fetchPublicRaceDetail(id)
+    fetchRaceDetail(id)
       .then(raw => {
         const raceData = transformRaceData(raw)
         setRace(raceData)
@@ -1030,7 +1030,7 @@ export default function RaceDetailView({ raceId, onBack }: { raceId?: string; on
             <button
               onClick={() => {
                 setLoading(true)
-                fetchPublicRaceDetail(raceId ?? '202606070511')
+                fetchRaceDetail(raceId ?? '202606070511')
                   .then(raw => {
                     const d = transformRaceData(raw)
                     setRace(d)

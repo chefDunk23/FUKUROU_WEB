@@ -1,24 +1,25 @@
 import type { MouseEvent } from 'react'
 
 // ── 型 / 定数 ─────────────────────────────────────────────────────────────────
-export type AppRoute = 'home' | 'races' | 'analysis' | 'datalab' | 'myai'
+export type AppRoute = 'home' | 'races' | 'analysis' | 'datalab' | 'myai' | 'lab' | 'week' | 'picks' | 'db-status'
 
 const NAV_ITEMS: { id: AppRoute; label: string; href: string }[] = [
-  { id: 'home',     label: 'ホーム',       href: '/' },
-  { id: 'races',    label: 'レース一覧',   href: '/races' },
-  { id: 'analysis', label: 'データ分析',   href: '/analysis' },
-  { id: 'datalab',  label: 'データラボ',   href: '/datalab' },
-  { id: 'myai',     label: 'MyAI作成',    href: '/myai' },
+  { id: 'home',      label: 'ホーム',           href: '/' },
+  { id: 'week',      label: '今週',             href: '/week' },
+  { id: 'picks',     label: '予想',             href: '/picks' },
+  { id: 'analysis',  label: '血統分析',         href: '/analysis' },
+  { id: 'db-status', label: 'DB管理',           href: '/db-status' },
+  { id: 'lab',       label: '条件ラボ',         href: '/lab' },
+  { id: 'datalab',   label: '週次概況 (準備中)', href: '/datalab' },
 ]
 
 interface GlobalHeaderProps {
   currentRoute: string
   onNavigate: (href: string) => void
-  onDevClick?: () => void
 }
 
 // ── コンポーネント ────────────────────────────────────────────────────────────
-export function GlobalHeader({ currentRoute, onNavigate, onDevClick }: GlobalHeaderProps) {
+export function GlobalHeader({ currentRoute, onNavigate }: GlobalHeaderProps) {
   const go = (e: MouseEvent<HTMLAnchorElement>, href: string) => {
     e.preventDefault()
     onNavigate(href)
@@ -33,7 +34,7 @@ export function GlobalHeader({ currentRoute, onNavigate, onDevClick }: GlobalHea
           className="flex items-center gap-2 flex-shrink-0 select-none">
           <span className="text-xl leading-none">🦉</span>
           <span className="text-[15px] font-bold text-gray-900 tracking-tight">
-            Fukurou <span className="text-emerald-600">AI</span>
+            フクロウ <span className="text-emerald-600">AI</span>
           </span>
         </a>
 
@@ -56,19 +57,6 @@ export function GlobalHeader({ currentRoute, onNavigate, onDevClick }: GlobalHea
             )
           })}
         </nav>
-
-        {/* 右側アクション */}
-        <div className="flex items-center gap-2 ml-auto flex-shrink-0">
-          {onDevClick && (
-            <button onClick={onDevClick}
-              className="px-3 py-1.5 rounded-md text-xs font-medium text-gray-500 border border-gray-200 hover:text-gray-700 hover:bg-gray-50 transition-colors">
-              DEVモード
-            </button>
-          )}
-          <button className="px-4 py-2 rounded-md text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors shadow-sm">
-            ログイン
-          </button>
-        </div>
 
       </div>
     </header>

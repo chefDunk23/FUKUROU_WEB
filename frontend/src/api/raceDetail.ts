@@ -395,6 +395,7 @@ function h(
       prev_race_grade: prev_grade, prev_race_rank: prev_rank,
       prev_race_days_ago: days, chokyo_score: chokyo,
       past_races: [], ten_index, agari_index: null,
+      position_tendency: null, predicted_field_pace: null, pace_harmony: null,
     },
   }
 }
@@ -403,7 +404,7 @@ export const MOCK_RACE_DETAIL: RawRaceDetail = {
   race_id: '202606070511', race_date: '2026-06-07', keibajo_name: '東京',
   race_num: 11, race_name: '第76回 安田記念', distance: 1600,
   track_code: '10', grade_code: 'A', syusso_tosu: 15,
-  weather: '晴', track_condition: '良',
+  weather: '晴', track_condition: '良', class_label: null,
   race_info: {
     pace_prediction: 'fast',
     bias_note: '内枠有利。前日の雨後に内側が回復し良好。直線は内から伸びやすい馬場。',
@@ -447,6 +448,7 @@ export const MOCK_RACE_DETAIL: RawRaceDetail = {
         prev_race_grade: null, prev_race_rank: null,
         prev_race_days_ago: null, chokyo_score: null,
         past_races: [], ten_index: null, agari_index: null,
+        position_tendency: null, predicted_field_pace: null, pace_harmony: null,
       },
     },
   ],
@@ -564,145 +566,6 @@ export async function fetchRaceDetail(raceId: string): Promise<RawRaceDetail> {
       return generateMockRaceDetail(raceId)
     }
     // 本番では再スロー → UI がエラー状態を表示する
-    throw err
-  }
-}
-
-// ── 公開用レース詳細（認証不要エンドポイント） ──────────────────────────────────
-
-interface PublicRawHorse {
-  umaban:       number
-  wakuban:      number | null
-  horse_id:     string
-  horse_name:   string | null
-  jockey_name:  string | null
-  trainer_name: string | null
-  horse_weight: number | null
-  weight_diff:  number | null
-  burden_weight: number
-  tan_odds:     number | null
-  ninki:        number | null
-  ai_score:     number
-  ai_rank:      number
-  extra: {
-    prev_race_grade:      string | null
-    prev_race_rank:       number | null
-    prev_race_days_ago:   number | null
-    chokyo_score:         number | null
-    ten_index:            number | null
-    agari_index:          number | null
-    position_tendency:    number | null
-    predicted_field_pace: number | null
-    pace_harmony:         number | null
-  }
-}
-
-interface PublicRawRaceDetail {
-  race_id:        string
-  race_date:      string
-  keibajo_name:   string
-  race_num:       number
-  race_name:      string
-  distance:       number
-  track_code:     string
-  grade_code:     string | null
-  class_label:    string | null
-  is_special:     boolean
-  syusso_tosu:    number
-  weather:        string
-  track_condition: string
-  race_info: {
-    pace_prediction: string
-    bias_note:       string
-    positioning_map: unknown
-    track_bias:      unknown
-  }
-  horses: PublicRawHorse[]
-}
-
-const _ZERO_SUBMODEL: RawSubmodelScores = {
-  score_ability_v2: 0, score_course_v2: 0, score_team_v2: 0,
-  score_training_v2: 0, score_pace_v2: 0, score_pedigree_v1: 0,
-}
-
-function _normalizePublicToRaw(pub: PublicRawRaceDetail): RawRaceDetail {
-  return {
-    race_id:         pub.race_id,
-    race_date:       pub.race_date,
-    keibajo_name:    pub.keibajo_name,
-    race_num:        pub.race_num,
-    race_name:       pub.race_name,
-    distance:        pub.distance,
-    track_code:      pub.track_code,
-    grade_code:      pub.grade_code,
-    class_label:     pub.class_label,
-    syusso_tosu:     pub.syusso_tosu,
-    weather:         pub.weather,
-    track_condition: pub.track_condition,
-    race_info: {
-      pace_prediction: pub.race_info.pace_prediction as 'slow' | 'medium' | 'fast' | 'unknown',
-      bias_note:       pub.race_info.bias_note,
-      positioning_map: pub.race_info.positioning_map as RawRaceDetail['race_info']['positioning_map'],
-      track_bias:      pub.race_info.track_bias as RawRaceDetail['race_info']['track_bias'],
-    },
-    horses: pub.horses.map(h => ({
-      umaban:         h.umaban,
-      wakuban:        h.wakuban,
-      horse_id:       h.horse_id,
-      horse_name:     h.horse_name,
-      jockey_name:    h.jockey_name,
-      trainer_name:   h.trainer_name,
-      horse_weight:   h.horse_weight,
-      weight_diff:    h.weight_diff,
-      burden_weight:  h.burden_weight,
-      tan_odds:       h.tan_odds,
-      ninki:          h.ninki,
-      ai_score:       h.ai_score,
-      ai_rank:        h.ai_rank,
-      submodel_scores: { ..._ZERO_SUBMODEL },
-      extra: {
-        sire_name:            null,
-        dam_sire_name:        null,
-        prev_race_grade:      h.extra.prev_race_grade,
-        prev_race_rank:       h.extra.prev_race_rank,
-        prev_race_days_ago:   h.extra.prev_race_days_ago,
-        chokyo_score:         h.extra.chokyo_score,
-        past_races:           [],
-        ten_index:            h.extra.ten_index,
-        agari_index:          h.extra.agari_index,
-        position_tendency:    h.extra.position_tendency,
-        predicted_field_pace: h.extra.predicted_field_pace,
-        pace_harmony:         h.extra.pace_harmony,
-      },
-    })),
-  }
-}
-
-/** 公開エンドポイント（APIキー不要）からレース詳細を取得し RawRaceDetail に正規化。
- *  submodel_scores はゼロ埋め、past_races / sire_name は空。
- *  変換後は既存の transformRaceData() をそのまま使用できる。
- */
-export async function fetchPublicRaceDetail(raceId: string): Promise<RawRaceDetail> {
-  const cached = raceDetailCache.get(raceId)
-  if (cached && Date.now() - cached.timestamp < RACE_DETAIL_CACHE_TTL) {
-    return Promise.resolve(cached.data)
-  }
-
-  try {
-    const res = await fetch(`/api/v2/public/races/${encodeURIComponent(raceId)}`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const pub = await res.json() as PublicRawRaceDetail
-    const raw = _normalizePublicToRaw(pub)
-    raceDetailCache.set(raceId, { data: raw, timestamp: Date.now() })
-    return raw
-  } catch (err) {
-    if (import.meta.env.DEV) {
-      console.warn('[fetchPublicRaceDetail] API unavailable, using mock data:', err)
-      if (raceId === MOCK_RACE_DETAIL.race_id || raceId === 'main') {
-        return { ...MOCK_RACE_DETAIL }
-      }
-      return generateMockRaceDetail(raceId)
-    }
     throw err
   }
 }
@@ -836,18 +699,18 @@ export const MOCK_RACE_LEVEL: RawRaceLevelResponse = {
     track_condition_warning: false, sample_count: 12, label: 'A',
   },
   opponents: [
-    { horse_id: 'h001', horse_name: 'アーバンシック',       this_rank:  1, this_margin: 0.0, next_race_id: 'r001', next_race_name: '安田記念',            next_race_date: '2026-06-01', next_grade_code: 'A', next_race_rank:  2, next_head_count: 16 },
-    { horse_id: 'h002', horse_name: 'ジャンタルマンタル',   this_rank:  2, this_margin: 0.1, next_race_id: 'r002', next_race_name: 'マイラーズカップ',      next_race_date: '2026-05-11', next_grade_code: 'B', next_race_rank:  1, next_head_count: 14 },
-    { horse_id: 'h003', horse_name: 'エコロブルーム',       this_rank:  3, this_margin: 0.2, next_race_id: 'r003', next_race_name: '東京優駿',              next_race_date: '2026-05-25', next_grade_code: 'A', next_race_rank:  5, next_head_count: 18 },
-    { horse_id: 'h004', horse_name: 'シュトラウス',         this_rank:  4, this_margin: 0.4, next_race_id: 'r004', next_race_name: '富士ステークス',        next_race_date: '2026-10-19', next_grade_code: 'C', next_race_rank:  3, next_head_count: 16 },
-    { horse_id: 'h005', horse_name: 'ダノンマッキンリー',   this_rank:  5, this_margin: 0.6, next_race_id: 'r005', next_race_name: '安田記念',              next_race_date: '2026-06-01', next_grade_code: 'A', next_race_rank:  8, next_head_count: 16 },
-    { horse_id: 'h006', horse_name: 'コラソンビート',       this_rank:  6, this_margin: 0.8, next_race_id: 'r006', next_race_name: 'ヴィクトリアマイル',    next_race_date: '2026-05-12', next_grade_code: 'A', next_race_rank:  2, next_head_count: 17 },
-    { horse_id: 'h007', horse_name: 'セットアップ',         this_rank:  7, this_margin: 1.0, next_race_id: 'r007', next_race_name: '葵ステークス',          next_race_date: '2026-05-18', next_grade_code: 'C', next_race_rank:  1, next_head_count: 14 },
-    { horse_id: 'h008', horse_name: 'ノーブルロジャー',     this_rank:  8, this_margin: 1.2, next_race_id:  null,  next_race_name: null,                    next_race_date: null,         next_grade_code: null, next_race_rank: null, next_head_count: null },
-    { horse_id: 'h009', horse_name: 'サカジャウィア',       this_rank:  9, this_margin: 1.5, next_race_id: 'r009', next_race_name: '阪急杯',                next_race_date: '2026-03-01', next_grade_code: 'C', next_race_rank:  6, next_head_count: 16 },
-    { horse_id: 'h010', horse_name: 'ウォータービレッジ',   this_rank: 10, this_margin: 1.8, next_race_id:  null,  next_race_name: null,                    next_race_date: null,         next_grade_code: null, next_race_rank: null, next_head_count: null },
-    { horse_id: 'h011', horse_name: 'マスクトディーヴァ',   this_rank: 11, this_margin: 2.0, next_race_id: 'r011', next_race_name: '鳴尾記念',              next_race_date: '2026-05-31', next_grade_code: 'C', next_race_rank:  2, next_head_count: 15 },
-    { horse_id: 'h012', horse_name: 'クリーンエア',         this_rank: 12, this_margin: 2.5, next_race_id: 'r012', next_race_name: '栗東S',                 next_race_date: '2026-05-25', next_grade_code: null, next_race_rank: 4, next_head_count: 10 },
+    { horse_id: 'h001', horse_name: 'アーバンシック',       this_rank:  1, this_margin: 0.0, next_race_id: 'r001', next_race_name: '安田記念',            next_race_date: '2026-06-01', next_grade_code: 'A', next_race_rank:  2, next_head_count: 16, gate_num: 1, agari_3f: 34.5 },
+    { horse_id: 'h002', horse_name: 'ジャンタルマンタル',   this_rank:  2, this_margin: 0.1, next_race_id: 'r002', next_race_name: 'マイラーズカップ',      next_race_date: '2026-05-11', next_grade_code: 'B', next_race_rank:  1, next_head_count: 14, gate_num: 3, agari_3f: 34.7 },
+    { horse_id: 'h003', horse_name: 'エコロブルーム',       this_rank:  3, this_margin: 0.2, next_race_id: 'r003', next_race_name: '東京優駿',              next_race_date: '2026-05-25', next_grade_code: 'A', next_race_rank:  5, next_head_count: 18, gate_num: 5, agari_3f: 34.8 },
+    { horse_id: 'h004', horse_name: 'シュトラウス',         this_rank:  4, this_margin: 0.4, next_race_id: 'r004', next_race_name: '富士ステークス',        next_race_date: '2026-10-19', next_grade_code: 'C', next_race_rank:  3, next_head_count: 16, gate_num: 7, agari_3f: 35.0 },
+    { horse_id: 'h005', horse_name: 'ダノンマッキンリー',   this_rank:  5, this_margin: 0.6, next_race_id: 'r005', next_race_name: '安田記念',              next_race_date: '2026-06-01', next_grade_code: 'A', next_race_rank:  8, next_head_count: 16, gate_num: 9, agari_3f: 35.2 },
+    { horse_id: 'h006', horse_name: 'コラソンビート',       this_rank:  6, this_margin: 0.8, next_race_id: 'r006', next_race_name: 'ヴィクトリアマイル',    next_race_date: '2026-05-12', next_grade_code: 'A', next_race_rank:  2, next_head_count: 17, gate_num: 11, agari_3f: 35.4 },
+    { horse_id: 'h007', horse_name: 'セットアップ',         this_rank:  7, this_margin: 1.0, next_race_id: 'r007', next_race_name: '葵ステークス',          next_race_date: '2026-05-18', next_grade_code: 'C', next_race_rank:  1, next_head_count: 14, gate_num: 13, agari_3f: 35.6 },
+    { horse_id: 'h008', horse_name: 'ノーブルロジャー',     this_rank:  8, this_margin: 1.2, next_race_id:  null,  next_race_name: null,                    next_race_date: null,         next_grade_code: null, next_race_rank: null, next_head_count: null, gate_num: 2, agari_3f: 35.8 },
+    { horse_id: 'h009', horse_name: 'サカジャウィア',       this_rank:  9, this_margin: 1.5, next_race_id: 'r009', next_race_name: '阪急杯',                next_race_date: '2026-03-01', next_grade_code: 'C', next_race_rank:  6, next_head_count: 16, gate_num: 4, agari_3f: 36.0 },
+    { horse_id: 'h010', horse_name: 'ウォータービレッジ',   this_rank: 10, this_margin: 1.8, next_race_id:  null,  next_race_name: null,                    next_race_date: null,         next_grade_code: null, next_race_rank: null, next_head_count: null, gate_num: 6, agari_3f: 36.2 },
+    { horse_id: 'h011', horse_name: 'マスクトディーヴァ',   this_rank: 11, this_margin: 2.0, next_race_id: 'r011', next_race_name: '鳴尾記念',              next_race_date: '2026-05-31', next_grade_code: 'C', next_race_rank:  2, next_head_count: 15, gate_num: 8, agari_3f: 36.5 },
+    { horse_id: 'h012', horse_name: 'クリーンエア',         this_rank: 12, this_margin: 2.5, next_race_id: 'r012', next_race_name: '栗東S',                 next_race_date: '2026-05-25', next_grade_code: null, next_race_rank: 4, next_head_count: 10, gate_num: 10, agari_3f: 37.0 },
   ],
 }
 

@@ -82,7 +82,7 @@ def main() -> None:
 
         if ret == -1:
             # from_time 以降の新規データがない (正常ケース: 差分なし)
-            print(f"[32bit] No new data since {from_time} — writing empty file.", flush=True)
+            print(f"[32bit] No new data since {from_time} -- writing empty file.", flush=True)
             open(output_file, "wb").close()
             return
         if ret < 0:

@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_v2.deps import verify_api_key
-from api_v2.routers import analysis, prediction, public_races, race_level, races
+from api_v2.routers import db_status, lab, prediction, public_races, race_level, races, tipster
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -61,27 +61,21 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="福郎 V2 投資用 API",
-    description="V2 LightGBM スタックアンサンブルによる競馬予測 API",
+    title="フクロウ 予測 API",
+    description="フクロウ競馬予測システム V2 API",
     version="2.0.0",
     docs_url="/docs" if DEV_MODE else None,
     redoc_url="/redoc" if DEV_MODE else None,
     lifespan=_lifespan,
 )
 
-# CORS — Vite dev server（5173〜5180 の任意ポート）および prod から許可
+# CORS — フロントエンド (5173) のみ許可
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:5176",
-        "http://localhost:5177",
-        "http://localhost:5178",
-        "http://localhost:3000",
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -89,7 +83,9 @@ _auth = [Depends(verify_api_key)]
 app.include_router(races.router,         dependencies=_auth)
 app.include_router(race_level.router,    dependencies=_auth)
 app.include_router(prediction.router,    dependencies=_auth)
-app.include_router(analysis.router,      dependencies=_auth)
+app.include_router(tipster.router,       dependencies=_auth)
+app.include_router(db_status.router,     dependencies=_auth)
+app.include_router(lab.router,           dependencies=_auth)
 # 公開エンドポイント: 認証不要（/api/v2/public/*）
 app.include_router(public_races.router)
 # admin 系は api_admin (port 8003) に移設済み — docs/deploy.md 参照

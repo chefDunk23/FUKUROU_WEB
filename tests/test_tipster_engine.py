@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tipster.engine import compute_confidence, evaluate_race, fetch_race_context, load_strategy, select_honmei
+from tipster.engine import compute_confidence, evaluate_race, fetch_race_context, load_strategy, select_aite, select_honmei
 from tipster.models import ConditionResult, HorseEvaluation
 
 _SKIP_REASON = ""
@@ -71,6 +71,44 @@ def _ev(horse_id: str, score: float, clear_count: int = 1, ai_score: float = 0.0
     return HorseEvaluation(horse_id=horse_id, ai_score=ai_score, conditions=conditions)
 
 
+def test_evaluate_race_context_required_condition_returning_none_does_not_eliminate():
+    """BET-6: passed=None（判定不能・保留）を返す条件が required:true でも、馬は失格にならない。
+
+    race_level/time_gap は past_races が無いと passed=None を返す（tipster/conditions.py）。
+    旧実装(`not result.passed`)では None も False 同様に失格判定されてしまうバグがあった
+    （engine.py:499 修正の回帰防止テスト）。
+    """
+    from tipster.engine import evaluate_race_context
+    from tipster.models import ConditionConfig, HorseContext, RaceContext, RankingConfig, Strategy
+
+    horse = HorseContext(
+        horse_id="H1", horse_name="テスト馬", umaban=1, wakuban=1,
+        jockey_id="J1", jockey_name=None, trainer_id=None, trainer_name=None,
+        burden_weight=56.0, horse_weight=460.0, ai_score=0.5, ai_rank=1,
+        chokyo_score=None, position_tendency=None,
+        prev_race_rank=None, prev_race_grade=None, prev_race_days_ago=None,
+        past_races=[],  # race_level/time_gap が passed=None を返す条件
+    )
+    race_ctx = RaceContext(
+        race_id="TESTRACE", race_name="テストレース", race_date="2026-01-01",
+        place_code="05", keibajo_name="東京", distance=2000, surface="芝",
+        class_label=None, grade_code=None, horses=[horse],
+    )
+    strategy = Strategy(
+        name="テスト戦略", tipster="test", type="honmei", version="1.0",
+        conditions=[
+            ConditionConfig(id="race_level", enabled=True, required=True, params={}),
+            ConditionConfig(id="time_gap", enabled=True, required=True, params={}),
+        ],
+        ranking=RankingConfig(),
+    )
+
+    evaluation = evaluate_race_context(race_ctx, strategy)
+    assert evaluation.candidates[0].horse_id == "H1"
+    assert evaluation.candidates[0].eliminated is False
+    assert all(c.passed is None for c in evaluation.candidates[0].conditions)
+
+
 class TestSelectHonmei:
     def test_picks_higher_clear_count_first(self):
         candidates = [_ev("A", score=5.0, clear_count=1), _ev("B", score=1.0, clear_count=2)]
@@ -94,6 +132,16 @@ class TestSelectHonmei:
         candidates = [_ev("A", score=1.0), _ev("B", score=1.0)]
         honmei = select_honmei(candidates, {"A": 5, "B": 2})
         assert honmei.horse_id == "B"
+
+    def test_clear_count_beats_ai_score(self):
+        """clear_count が少ない馬の ai_score が高くても、clear_count 上位が選ばれること。
+        AIスコアはタイブレーカーとしてのみ機能し、条件クリア数に優先しない（G5a-3）。"""
+        candidates = [
+            _ev("A", score=1.0, clear_count=2, ai_score=0.1),  # clear_count 高・ai_score 低
+            _ev("B", score=1.0, clear_count=1, ai_score=0.9),  # clear_count 低・ai_score 高
+        ]
+        honmei = select_honmei(candidates, {"A": 1, "B": 2})
+        assert honmei.horse_id == "A"
 
     def test_empty_candidates_returns_none(self):
         assert select_honmei([], {}) is None
@@ -146,3 +194,49 @@ class TestComputeConfidence:
     def test_very_low_score_is_grade_c(self):
         honmei = _ev("A", score=1.0)
         assert compute_confidence(honmei, eligible_count=1) == "C"
+
+
+class TestSelectAite:
+    """select_aite() のユニットテスト（BET-2）。"""
+
+    def test_returns_all_candidates_when_no_honmei(self):
+        """honmei_horse_id=None のとき全候補を返す。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates)
+        assert [c.horse_id for c in aite] == ["A", "B", "C"]
+
+    def test_excludes_honmei_from_aite(self):
+        """本命馬が相手候補から除外される。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="A")
+        assert [c.horse_id for c in aite] == ["B", "C"]
+
+    def test_max_aite_limits_selection(self):
+        """max_aite による上位N頭カットが機能する。"""
+        candidates = [_ev("A", score=3.0), _ev("B", score=2.0), _ev("C", score=1.0)]
+        aite = select_aite(candidates, max_aite=2)
+        assert len(aite) == 2
+        assert aite[0].horse_id == "A"
+
+    def test_excludes_honmei_then_caps(self):
+        """本命除外 → 上位N頭カットの順序が正しい。"""
+        candidates = [_ev("A", score=4.0), _ev("B", score=3.0), _ev("C", score=2.0), _ev("D", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="A", max_aite=2)
+        assert [c.horse_id for c in aite] == ["B", "C"]
+
+    def test_empty_candidates_returns_empty(self):
+        """候補が空なら空リストを返す。"""
+        assert select_aite([]) == []
+
+    def test_preserves_ranking_order_from_strategy(self):
+        """candidates の既存ランキング順序を維持する（ソート不変）。"""
+        candidates = [_ev("X", score=5.0), _ev("Y", score=3.0), _ev("Z", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="X")
+        assert aite[0].horse_id == "Y"
+        assert aite[1].horse_id == "Z"
+
+    def test_honmei_not_in_candidates_returns_all(self):
+        """本命 horse_id が candidates に存在しない場合、全員を返す（安全な挙動）。"""
+        candidates = [_ev("A", score=2.0), _ev("B", score=1.0)]
+        aite = select_aite(candidates, honmei_horse_id="Z")
+        assert len(aite) == 2

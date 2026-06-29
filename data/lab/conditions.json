@@ -1,0 +1,76 @@
+{
+  "custom_conditions": [
+    {
+      "id": "custom_c3c1865f",
+      "name": "テスト条件：着差0.5秒以内",
+      "description": "着差チェック閾値0.5秒",
+      "base_condition_id": "v2_past_margin",
+      "type": "scoring",
+      "params": {
+        "max_sec": 0.3
+      },
+      "created_at": "2026-06-28T01:30:17.858946+00:00",
+      "updated_at": "2026-06-28T01:30:33.106558+00:00"
+    }
+  ],
+  "condition_sets": [
+    {
+      "id": "set_758d6995",
+      "name": "テストセット",
+      "description": "動作確認用セット",
+      "conditions": [
+        {
+          "condition_id": "v2_past_margin",
+          "mode": "filter",
+          "enabled": true,
+          "params": {}
+        },
+        {
+          "condition_id": "v2_class_change",
+          "mode": "scoring",
+          "enabled": true,
+          "params": {}
+        },
+        {
+          "condition_id": "v2_jockey_positive",
+          "mode": "scoring",
+          "enabled": true,
+          "params": {}
+        }
+      ],
+      "ranking": {
+        "primary": "condition_clear_count",
+        "secondary": "ai_score",
+        "max_selections": 3
+      },
+      "created_at": "2026-06-28T01:30:33.439465+00:00",
+      "updated_at": "2026-06-28T01:30:33.439472+00:00"
+    },
+    {
+      "id": "set_873a832a",
+      "name": "比較用セット",
+      "description": "",
+      "conditions": [
+        {
+          "condition_id": "v2_f3_top",
+          "mode": "scoring",
+          "enabled": true,
+          "params": {}
+        },
+        {
+          "condition_id": "v2_pace_match",
+          "mode": "scoring",
+          "enabled": true,
+          "params": {}
+        }
+      ],
+      "ranking": {
+        "primary": "condition_clear_count",
+        "secondary": "ai_score",
+        "max_selections": 3
+      },
+      "created_at": "2026-06-28T01:30:47.745269+00:00",
+      "updated_at": "2026-06-28T01:30:47.745276+00:00"
+    }
+  ]
+}

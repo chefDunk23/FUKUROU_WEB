@@ -159,15 +159,6 @@ function ErrorMessage({ message, onRetry }: { message: string; onRetry: () => vo
   )
 }
 
-function EmptyMessage({ date }: { date: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-16 gap-3 text-center text-gray-500">
-      <div className="text-4xl">🏇</div>
-      <p className="text-sm">{formatDateLabel(date)} のレースデータがありません</p>
-      <p className="text-xs text-gray-400">開催がない日か、まだデータが取得されていない可能性があります</p>
-    </div>
-  )
-}
 
 // ── クラス凡例 ────────────────────────────────────────────────────────────────
 function ClassLegend() {
@@ -300,7 +291,7 @@ export default function RaceListView() {
       <div className="max-w-screen-xl mx-auto px-6 py-5">
 
         {error && !loading && (
-          <ErrorMessage message={error} onRetry={doLoad} />
+          <ErrorMessage message={error} onRetry={() => doLoad(weekOffset)} />
         )}
 
         {!loading && !error && DAYS.length === 0 && (

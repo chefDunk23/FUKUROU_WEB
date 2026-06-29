@@ -1,0 +1,86 @@
+{
+  "_comment": "Phase 1 新条件群（conditions_v2.py）の的中率探索パターン設定。honmei_v6 / anaba_v5 戦略の各パーツ単体・組み合わせを評価する。既存 hit_rate_patterns_config.json は変更しない。",
+  "patterns": [
+    {
+      "id": "V2_P1_past_margin_only",
+      "label": "v2_past_margin のみ（第1層: 過去3走以内着差1秒以内好走歴）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}}
+      ]
+    },
+    {
+      "id": "V2_P2_race_quality_only",
+      "label": "v2_race_quality のみ（第1層: 前走上位馬次走複勝率35%以上）",
+      "conditions": [
+        {"id": "v2_race_quality", "params": {"top_n": 3, "min_next_horses": 3, "min_place_rate": 0.35}}
+      ]
+    },
+    {
+      "id": "V2_P3_layer1_both",
+      "label": "v2_past_margin + v2_race_quality（第1層2条件AND）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}},
+        {"id": "v2_race_quality", "params": {"top_n": 3, "min_next_horses": 3, "min_place_rate": 0.35}}
+      ]
+    },
+    {
+      "id": "V2_P4_layer1_plus_class",
+      "label": "第1層2条件 + v2_class_change（降級/同クラス限定、昇級除外）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}},
+        {"id": "v2_race_quality", "params": {"top_n": 3, "min_next_horses": 3, "min_place_rate": 0.35}},
+        {"id": "v2_class_change", "params": {"upgrade_as_none": true}}
+      ]
+    },
+    {
+      "id": "V2_P5_honmei_v6_core",
+      "label": "honmei_v6 コア（第1層2条件 + 騎手評価 + 間隔評価 AND）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}},
+        {"id": "v2_race_quality", "params": {"top_n": 3, "min_next_horses": 3, "min_place_rate": 0.35}},
+        {"id": "v2_jockey_positive", "params": {"top_jockey_threshold": 30}},
+        {"id": "v2_interval_optimal", "params": {"optimal_min": 15, "optimal_max": 28}}
+      ]
+    },
+    {
+      "id": "V2_P6_honmei_v6_full",
+      "label": "honmei_v6 全条件（第1層2条件 + 第2層全5条件 AND）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}},
+        {"id": "v2_race_quality", "params": {"top_n": 3, "min_next_horses": 3, "min_place_rate": 0.35}},
+        {"id": "v2_class_change", "params": {"upgrade_as_none": true}},
+        {"id": "v2_jockey_positive", "params": {"top_jockey_threshold": 30}},
+        {"id": "v2_weight_favor", "params": {}},
+        {"id": "v2_interval_optimal", "params": {"optimal_min": 15, "optimal_max": 28}},
+        {"id": "v2_surface_history", "params": {}},
+        {"id": "v2_distance_match", "params": {}}
+      ]
+    },
+    {
+      "id": "V2_P7_anaba_layer2_fit",
+      "label": "穴馬用: 第2層嵌まり度 4条件AND（騎手+斤量+間隔+馬場）",
+      "conditions": [
+        {"id": "v2_jockey_positive", "params": {"top_jockey_threshold": 30}},
+        {"id": "v2_weight_favor", "params": {}},
+        {"id": "v2_interval_optimal", "params": {"optimal_min": 15, "optimal_max": 28}},
+        {"id": "v2_surface_history", "params": {}}
+      ]
+    },
+    {
+      "id": "V2_P8_compare_v1_base",
+      "label": "v1相当ベース対照（race_level + time_gap: 既存P1との比較用）",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}}
+      ]
+    },
+    {
+      "id": "V2_P9_v2_vs_v1_hybrid",
+      "label": "ハイブリッド（v2_past_margin + time_gap: v1着差条件×v2好走歴）",
+      "conditions": [
+        {"id": "v2_past_margin", "params": {"lookback": 3, "max_sec": 1.0}},
+        {"id": "time_gap", "params": {}}
+      ]
+    }
+  ]
+}

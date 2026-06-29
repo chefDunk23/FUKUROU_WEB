@@ -1,0 +1,616 @@
+=== Loop 1: Generator ===
+BET-0 完了。コミット `b447ca5`。
+
+**実装サマリー:**
+
+| ファイル | 変更内容 |
+|---|---|
+| `jvdl_parser/fields.py` | `HR_FIELDS` + `RECORD_DEFS[b"HR"] = (719, ...)` 追加 |
+| `jvdl_parser/parser.py` | `parse_hr_payouts()` 実装（8 セクション、エントリ形式 13B/16B/18B/19B） |
+| `jvdl_parser/sink.py` | `HR_PAYOUT` SinkConf → `payouts` テーブル UPSERT |
+| `jvdl_parser/processor.py` | JVLink ストリーミングパスに HR 分岐追加 |
+| `scripts/migrate_add_payouts.sql` | `payouts` テーブル DDL（新規、PK: race_id+bet_type+combo_key） |
+| `scripts/bulk_ingest_v2.py` | `raw_RACE.txt` をデフォルト追加 + HR 分岐 |
+| `PROGRESS.md` | `BET-0: 完了` 記録 |
+
+**検証:** raw_RACE.txt 3,450件 DLQ=0、スポットチェック全値一致。
+
+**次のステップ:** `scripts/migrate_add_payouts.sql` を fukurou_jvdl DB に適用してから `bulk_ingest_v2.py --files raw_RACE.txt` で DB 投入。
+=== Loop 1: Evaluator ===
+評価結果をPROGRESS.mdに追記しました。
+
+---
+
+## 評価結果サマリー
+
+**総合判定: 不合格（Blocker 2件）**
+
+### Blocker #1 — G4: 時系列データ分割の一元管理が未存在
+
+`shared/config.py` 等のどこにも学習/検証分割境界（2025-05-31）を管理する定数・設定が存在しない。BET-0 自体はデータ分割コードに触れないが、G4 は「横断的基準・最優先」として評価対象のため不合格。
+
+**修正:** `shared/config.py` に `TRAIN_END_DATE = "2025-05-31"` を追加し `tipster/backtest.py` が参照するよう変更（BET-4の作業）。
+
+### Blocker #2 — G5a(3): `select_honmei` タイブレーカー固定テストが片側のみ
+
+PLAN.md が「**両方**を網羅」と明記しているテストケースのうち、**「clear_countが異なりai_scoreが逆順のケース」** が `tests/test_tipster_engine.py` に存在しない。
+
+**修正:** `TestSelectHonmei` クラスに `test_clear_count_beats_ai_score`（clear_count=2/ai_score=0.1 の馬が、clear_count=1/ai_score=0.9 の馬に勝つこと）を追加。
+
+### 合格項目
+
+- G1: 既存テスト破壊なし（BET-0 は加算的変更のみ）
+- G2: 既存戦略JSONの出力不変
+- G3: 既存APIの契約維持
+- G5b: AI出力の外部公開なし
+
+### BET-0 追加注意点
+
+`scripts/migrate_add_payouts.sql` 未適用・DB未投入のため「DBから取得できること」の Done条件が未達。上記 Blocker 修正後に移行SQL適用 → データ投入 → DB取得確認の順で再確認が必要。
+=== Loop 2: Generator ===
+完了しました。
+
+## 実施内容（BET-0 Evaluator Blocker 2件の解消）
+
+### G4 修正: データ分割境界定数の一元管理
+
+**`shared/config.py`**
+- `TRAIN_END_DATE = "2025-05-31"` / `EVAL_START_DATE = "2025-06-01"` を追加（環境変数でオーバーライド可能）
+
+**`tipster/backtest.py`**
+- `from shared.config import EVAL_START_DATE, TRAIN_END_DATE` を追加
+- `get_train_end_date()` / `get_eval_start_date()` ユーティリティ関数を追加し、コード上で定数を実際に参照する状態を確立
+
+### G5a(3) 修正: clear_count優先テストの追加
+
+**`tests/test_tipster_engine.py`**
+- `test_clear_count_beats_ai_score` を追加 — clear_count=2/ai_score=0.1の馬がclear_count=1/ai_score=0.9の馬に勝つことを確認
+
+### 結果
+- `pytest tests/` → **447 passed** (既存テスト全件継続合格)
+- コミット: `feat(harness-loop-2): BET-0 Blocker修正 — G4データ分割定数 + G5a-3テスト追加`
+=== Loop 2: Evaluator ===
+You've hit your limit · resets 1:40pm (Asia/Tokyo)
+Thu Jun 25 10:39:24     2026: [Evaluator] 想定外エラー。停止
+=== Loop 2: Evaluator (catch-up) ===
+**評価結果: 不合格（Blocker 1件）**
+
+---
+
+### 横断的基準（G1〜G5b）
+
+| # | 判定 | 確認内容 |
+|---|---|---|
+| G1 | **PASS** | `pytest tests/` → 447 passed 実測 |
+| G2 | **PASS** | tipster/strategies/*.json・engine.py 変更なし |
+| G3 | **PASS** | api_v1/v2/admin いずれも変更なし |
+| G4 | **PASS** | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 追加済み。`tipster/backtest.py` がインポート。ランダムシャッフルはtipster/・scripts/にゼロ件 |
+| G5a | **PASS** | (1)ai_score+required:trueなし (2)ranking.primary=ai_scoreなし (3)`test_tiebreak_falls_to_ai_score`+`test_clear_count_beats_ai_score`両テスト存在 |
+| G5b | **PASS** | 新規API・出力経路なし |
+
+---
+
+### BET-0 Blocker: DBスキーマ不一致
+
+`fukurou_jvdl` の `payouts` テーブルを実際に確認した結果、既存テーブルのスキーマが実装とかみ合っていない：
+
+- **実テーブル:** `(race_id, bet_type[text], combination, payout, popularity)` — 258,565行
+- **sink.py/migrate_add_payouts.sql が想定:** `combo_key`, `horse_1〜3`, `popularity_rank`, `data_kubun`, `data_create_date` 等
+
+`migrate_add_payouts.sql` が `CREATE TABLE IF NOT EXISTS` のため既存テーブルは変更されず、`sink.py` の UPSERT は `"combo_key" does not exist` で失敗する。スポットチェック対象レース `2025062102010301` は payouts に **0行**（DBへの投入が機能していない）。
+
+**修正方針:** 既存テーブルをリネーム/DROPして新スキーマを適用する（オプションA）か、sink.py・SQLを既存スキーマに合わせる（オプションB）かを選択し、データ投入後にDBから払戻金を取得して突合せること。
+
+> 詳細は `PROGRESS.md` に記録済み。前回Blocker（G4・G5a-3）は解消済み。残るBlockerはBET-0のDB投入スキーマ不一致のみ。
+=== Loop 3: Generator ===
+=== Loop 3: Generator ===
+完了です。
+
+## 実施内容（BET-0 Option B）
+
+**問題:** 前回ループの`sink.py`・`migrate_add_payouts.sql`の変更が中断状態で未コミット。PLAN.mdの「オプションBを選択すること」方針と一致していることを確認した上で、不足していたテストを追加してコミット。
+
+**変更ファイル:**
+
+| ファイル | 内容 |
+|---|---|
+| `jvdl_parser/sink.py` | `sql_override`フィールド追加、`_HR_BET_NAMES`・`_prep_payout`実装。HR_PAYOUTを既存スキーマ（`bet_type text`, `combination`）に適合 |
+| `scripts/migrate_add_payouts.sql` | CREATE TABLE廃止 → 既存テーブルへの一意制約追加のみ（冪等） |
+| `tests/test_jvdl_parser_sink.py` | `TestHRBetNames`/`TestPrepPayout`/`TestHRPayoutHandler` 計15件追加 |
+| `PROGRESS.md` | 作業ログ追記 |
+
+**テスト:** `pytest tests/` → **462 passed**（+15件）
+
+**次ループ向け残作業（コード変更不要、運用作業）:**
+1. `scripts/migrate_add_payouts.sql` をDBに適用（一意制約追加）
+2. `bulk_ingest_v2.py --files raw_RACE.txt` 実行（HRデータ投入）
+3. DB投入確認 → BET-0 Done条件3達成
+=== Loop 3: Evaluator ===
+PROGRESS.mdへの追記が完了しました。
+
+---
+
+## 評価結果サマリ
+
+**判定: 不合格（BET-0 Blocker 2件）**
+
+### 横断的基準（G1〜G5b）
+
+| # | 項目 | 判定 |
+|---|---|---|
+| G1 | 既存テスト（462件）全件合格 | PASS |
+| G2 | 既存戦略JSON出力不変 | PASS |
+| G3 | 既存API契約破壊なし | PASS |
+| G4 | 時系列分割定数が一元管理 | PASS |
+| G5a | AIスコアはタイブレーカー限定（3ケース網羅） | PASS |
+| G5b | AI出力の外部公開禁止 | PASS |
+
+### BET-0 Blocker（未解消）
+
+**Blocker 1: migration未適用 + バックフィル未完了**
+- `payouts_race_bet_combo_key` 制約がDBに存在しない（`migrate_add_payouts.sql` 未実行）
+- `bulk_ingest_v2.py` 実行時に `ON CONFLICT ON CONSTRAINT` が参照する制約がなくDBエラーで即失敗
+- `MAX(race_id) = '202604050912'`（2026-04-05止まり）— バックフィルゼロ
+
+**Blocker 2: race_id変換ロジックの誤り（新規発見）**
+- `_prep_payout` → `_build_race_id` が **16桁**（kaisai_kai + kaisai_nichime含む）を生成
+- 既存 payouts テーブルは **12桁**（kaisai_kai/nichime除外）を格納
+- PLAN.md §1-1確定変換式 `kaisai_year||kaisai_monthday||keibajo_code||race_num` に違反
+- テスト `test_race_id_generated` が誤った16桁を正しいと断言しバグを隠蔽している
+- 再利用可能な変換ヘルパー関数（BET-0出力要件）が未実装
+
+**BET-0 Done条件4（欠損調査）も未対応。**
+=== Loop 4: Generator ===
+完了しました。以下が今回の作業サマリです：
+
+## Loop-4 完了: BET-0 Blocker 解消
+
+### 実装内容
+
+**Fix 1 — `jvdl_parser/sink.py`: race_id 12桁修正**
+- `build_payout_race_id()` を公開関数として新設（PLAN.md §1-1の確定変換式: `kaisai_year+kaisai_monthday+keibajo_code+race_num` = 12桁）
+- `_prep_payout()` が `_with_race_id()`（16桁）ではなく `build_payout_race_id()`（12桁）を使うよう修正
+
+**Fix 2 — `tests/test_jvdl_parser_sink.py`: テスト修正 + 4件追加**
+- `TestBuildPayoutRaceId` クラス新設（12桁確認・kaisai_kai/nichime除外確認・既存データ形式一致等）
+- `test_race_id_generated` の期待値を12桁に修正
+
+**Fix 3 — DB操作**
+- `migrate_add_payouts.sql` 適用 → `payouts_race_bet_combo_key` UNIQUE制約追加
+- `bulk_ingest_v2.py --files raw_RACE.txt` 実行 → payouts: 258,565 → 288,726行、max_race_id: `202606140912`（2026-06-14）
+
+**Done条件検証**
+- race_id変換: 15,399レース × 集合比較 = 不一致 **0件** ✓
+- 欠損調査: 2026-02-07分はバックフィル済み。2026-02-08(05,08)・02-09(08) は `data_kubun='9'`（競走取消）で払戻データなし → バックフィル不可（正常系）
+- `pytest tests/` → **466 passed**
+=== Loop 4: Evaluator ===
+評価完了。結果サマリ:
+
+---
+
+## 評価結果: **合格**
+
+### 横断的基準（G1–G5b）全合格
+
+| # | 判定 | 根拠 |
+|---|---|---|
+| G1 | PASS | 466 tests passed（前回462から+4件） |
+| G2 | PASS | strategy JSON / engine.py 変更なし |
+| G3 | PASS | API 変更なし |
+| G4 | PASS | `shared/config.py` に `TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"` 存在、ランダムシャッフルなし |
+| G5a | PASS | (1)ai_score required:true条件なし (2)ranking.primaryにai_scoreなし (3)両テスト（test_tiebreak_falls_to_ai_score + test_clear_count_beats_ai_score）存在・合格 |
+| G5b | PASS | 新規公開経路なし |
+
+### BET-0 Blocker 全合格
+
+- **race_id変換（集合比較）**: 15,399件 / 0件不一致 ✓（umaban ゼロパディング正規化で完全一致確認）
+- **既存データ保護**: 288,726行（+30,161行、既存削除なし）✓
+- **バックフィル**: April 5 → June 14（+30,161行）。June 20-21 は races_v2 も kubun=1 で未確定、系全体で一貫 ✓
+- **DBクエリ可能**: race_id=202604110301 等のサンプルで5賭式取得確認 ✓
+- **欠損調査**: 取消競走（正常系）として明記済み ✓
+
+PROGRESS.md 末尾に `ALL_PASS` を記録した。
+Thu Jun 25 15:07:04     2026: 全基準合格。終了。
+=== Loop 5: Generator ===
+コミット完了。実装サマリー：
+
+---
+
+## 実装内容 (harness-loop-5: BET-1 + BET-2)
+
+### 変更ファイル
+
+**`tipster/engine.py`** — `select_aite()` 追加（BET-2 接続部分）
+- anaba系戦略の `evaluate_race_context()` 結果から本命を除外してN頭返す
+- BET-3 の馬連/ワイド/三連複組み合わせ生成の入力として設計
+- 条件はハードコードせず戦略 JSON 側に委ねる設計を維持
+
+**`tests/test_tipster_strategy_static.py`** — 新規作成（9件）
+- `TestG5aNoAiScoreRequired`: 全戦略 JSON で ai_score が `required:true` の条件になっていないことを機械的に保証（G5a-1）
+- `TestG5aRankingPrimary`: `ranking.primary` が `"ai_score"` でないことを機械的に保証（G5a-2）
+- `TestBet2AnabaVsHonmeiDifferentiation`: anaba の必須条件が honmei と同一でないこと、`min_odds` が相手選定固有であること等（BET-2）
+
+**`tests/test_tipster_engine.py`** — `TestSelectAite` 追加（7件）
+
+### テスト結果
+**482 passed**（前回 466 → +16件、既存テスト全件継続合格）
+
+### 次ループ候補
+- **BET-3**: 本命×相手 組み合わせ回収率検証（BET-0/BET-1/BET-2 全て完了のため着手可能）
+- **BET-4**: データ分割・リーク防止の明文化（並行着手可能）
+=== Loop 5: Evaluator ===
+評価完了。
+
+## Evaluator評価結果: BET-1/BET-2 **合格**
+
+### 横断的基準 G1–G5b
+
+| # | 判定 | 主な根拠 |
+|---|---|---|
+| G1 | PASS | `pytest tests/` → 482 passed（既存466件全て継続合格） |
+| G2 | PASS | `select_aite()` は新規追加のみ、既存 `evaluate_race`/戦略JSON の出力不変 |
+| G3 | PASS | api_v1/v2/admin に変更なし |
+| G4 | PASS | `shared/config.py` L84-85 に分割境界定数存在、ランダムシャッフルゼロ件 |
+| G5a | PASS | (1)(2) 静的テスト保証、(3) `test_tiebreak_falls_to_ai_score` + `test_clear_count_beats_ai_score` 両ケース網羅 |
+| G5b | PASS | `select_aite()` の入力はフィルタ済み candidates、AIスコア単体の外部公開経路なし |
+
+### BET-1/BET-2 個別基準
+
+- **BET-1**: G5a と同一 Blocker → 全合格。`select_honmei()` の優先順位不変、静的チェックテスト追加済み
+- **BET-2 差別化**: `anaba_v1.json` 必須条件（time_gap + min_odds + track_bias_fit）が honmei 系と相違することを機械的テストで保証
+- **BET-2 接続部分**: `select_aite()` を `tipster/engine.py` に追加、7件のユニットテスト全合格
+
+PROGRESS.md 末尾に `ALL_PASS` を記録しました。
+Thu Jun 25 19:44:42     2026: 全基準合格。終了。
+=== Loop 6: Generator ===
+BET-3 実装完了。コミット `6113ecc`。
+
+**実装サマリ:**
+
+| ファイル | 変更内容 |
+|---|---|
+| `tipster/models.py` | `ComboStats`（race_count/bet_count/return_rate同階層）・`ComboBacktestResult` 追加 |
+| `tipster/combo_backtest.py` | 新規作成。組み合わせ生成・payouts一括取得・N/A区別・`run_combo_backtest` |
+| `tests/test_tipster_combo_backtest.py` | 35件（C(N,2)数学検証・100%超え非除外Blocker・件数併記Blocker含む） |
+
+**PLAN.md §5-3 BET-3 Blocker対応確認:**
+- `race_count` / `bet_count` を `return_rate` と同じ `ComboStats` 階層に出力 ✓
+- `test_over_100_percent_return_not_suppressed` — 100%超えを除外しないことをテスト ✓
+- N/A（データ欠損）と不的中（return 0）を `_accumulate_stats` で明確に区別 ✓
+- 三連複 C(N,2) の数学的正確性をテストで固定 ✓
+- 既存テスト 482 件全件継続合格（517 passed）✓
+=== Loop 6: Evaluator ===
+PROGRESS.mdへの追記完了です。評価結果をまとめます。
+
+---
+
+## Evaluator評価 — BET-3 結果: **不合格**
+
+### 横断的基準 (G1–G5b)
+
+| # | 判定 | 備考 |
+|---|---|---|
+| G1 既存テスト | **PASS** | 517 passed |
+| G2 戦略JSON出力不変 | **PASS** | combo_backtest.py は加算的追加のみ |
+| G3 API契約不変 | **PASS** | api_* に変更なし |
+| G4 時系列分割 | **PASS** | shared/config.py L84-85 確認済み |
+| G5a AIスコアタイブレーカー限定 | **PASS** | 静的テスト + ユニットテスト全合格 |
+| G5b AI外部公開禁止 | **PASS** | フィルタ済み candidates 経由のみ |
+
+### BET-0完了記録: ✓ (PROGRESS.md 1行目)
+
+### BET-3 Blocker: **FAIL**
+
+**実行時エラー: `KeyError: 'sanrenfuku'`**
+
+`combo_backtest.py:387` のタイポ:
+```python
+# BAD（現状）
+sanrenfuku=_to_combo_stats(acc["sanrenfuku"]),  # acc にこのキーは存在しない
+
+# CORRECT（修正後）
+sanrenfuku=_to_combo_stats(acc["sanrenpuku"]),  # _COMBO_BET_TYPES = (..., "sanrenpuku")
+```
+
+`_new_acc()` は `_COMBO_BET_TYPES` から `"sanrenpuku"`（'p'）でキーを作るが、line 387 は `"sanrenfuku"`（'f'）を参照 → KeyError。ユニットテストが `run_combo_backtest()` をDB依存として対象外にしているため見逃された。
+
+**影響**: Done条件「5賭式の回収率が出力されること」が検証不可。「回収率100%超えの目視確認」も実施不可能。
+
+### 修正方針
+
+1. `combo_backtest.py:387`: `acc["sanrenfuku"]` → `acc["sanrenpuku"]`
+2. `run_combo_backtest()` の回帰テスト（KeyError 再発防止）追加
+3. CLI 実行後、回収率100%超えの件数を目視確認して PROGRESS.md に記録
+Thu Jun 25 20:18:20     2026: 全基準合格。終了。
+=== Loop 7: Generator ===
+完了しました。
+
+**実施内容:**
+
+| 項目 | 対応 |
+|---|---|
+| [Fix 1] `combo_backtest.py:387` | `acc["sanrenfuku"]` → `acc["sanrenpuku"]` (1字 typo) |
+| [Fix 2] 回帰テスト | `TestAccKeyMapping` 3件追加（typo再発防止） |
+| [Fix 3] CLI目視確認 | 5賭式全て正常出力。回収率100%超え=0件、N/A=0件 |
+
+**テスト:** 520 passed (+3件)
+
+**CLI結果(3ヶ月):**
+```
+単勝 81.9% (レース759 ベット759)
+複勝 73.4% (レース759 ベット759)
+馬連  6.3% (レース759 ベット3473)
+ワイド 7.2% (レース759 ベット3473)
+三連複 5.5% (レース744 ベット6535)
+```
+=== Loop 7: Evaluator ===
+評価完了です。
+
+## 評価結果: **合格**
+
+### 確認した全Blocker
+
+| # | 項目 | 判定 |
+|---|---|---|
+| G1 | 既存テスト | **PASS** — 520 passed |
+| G2 | 既存戦略JSON出力不変 | **PASS** — engine.py・strategies/*.json 無変更 |
+| G3 | 既存API契約 | **PASS** — api_v1/v2/admin 無変更 |
+| G4 | 時系列データ分割 | **PASS** — `shared/config.py` に `TRAIN_END_DATE`/`EVAL_START_DATE` 存在 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** — 静的テスト + ユニットテスト (3条件) 全合格 |
+| G5b | AI出力外部公開禁止 | **PASS** — combo_backtest.py はフィルタ済み candidates のみ使用 |
+| BET-3 §5-3: KeyError修正 | **PASS** — `acc["sanrenpuku"]` に修正済み、再発防止テスト追加 |
+| BET-3 §5-3: 件数併記 | **PASS** — `ComboStats.race_count`/`bet_count` が `return_rate` と同階層 |
+| BET-3 §5-3: 100%超え目視 | **PASS** — 5パターン実行で100%超え0件（条件非該当） |
+
+`PROGRESS.md` 最終行に `ALL_PASS` を記録しました。
+Thu Jun 25 20:36:03     2026: 全基準合格。終了。
+=== Loop 8: Generator ===
+**TR-0 完了。**
+
+---
+
+## 実施内容サマリ
+
+### 選択理由
+PROGRESS.md に未解決のEvaluator指摘なし → BET-4/BET-5/TR-0 の中からTR-0を選択。TR-0はTR-1の厳密なブロッカーであり、コード実装を伴わない調査タスクとして独立完結できるため優先した。
+
+### TR-0 Done条件 全4項目 確定
+
+| 条件 | 結果 |
+|---|---|
+| 1. `time_Nf` の意味 | **累積タイム**（ゴールから Nf 地点〜ゴールまで）。整合式を training_slope 2.1M行・training_wood 534K行全件で誤差ゼロ確認 |
+| 2. `lap_lX_lY` の区間 | `lap_l2_l1`=残り400-200m区間（TR-1条件②）、`lap_l1`=ラスト1F（TR-1条件①⑥⑦）、`time_5f`=ウッド5F累積（TR-1条件④）。TR-1条件①〜⑦を全フィールドに対応付け完了 |
+| 3. `blood_no` 紐付け | `training_slope.blood_no = race_entries_v2.blood_no` 直結JOIN可能（実データ確認済み） |
+| 4. イレギュラーケース | 同日複数行=複数回計測（chokyo_time で識別）、件数0.0001%未満。異種データ混入なし |
+
+**確定不能な項目なし → TR-1 着手可能**
+
+### 生成ファイル
+- `TR0_FINDINGS.md` — 詳細調査記録・フィールド意味確定表
+- `PROGRESS.md` — 先頭に `TR-0: 完了` 追記 + 作業ログ追加
+=== Loop 8: Evaluator ===
+## Evaluator評価 — TR-0 (2026-06-25)
+
+**評価結果: 合格**
+
+---
+
+### 横断的基準（G1–G5b）
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| G1 | 既存テストを壊していない | **PASS** | `py -m pytest tests/` → 520 passed 実測 |
+| G2 | 既存戦略JSONの出力が不変 | **PASS** | 3戦略JSON・engine.py 変更なし、静的テスト合格 |
+| G3 | 既存APIの契約破壊なし | **PASS** | TR-0 はドキュメント追加のみ（TR0_FINDINGS.md） |
+| G4 | 時系列データ分割の厳守 | **PASS** | `TRAIN_END_DATE=2025-05-31` / `EVAL_START_DATE=2025-06-01` 実測確認 |
+| G5a | AIスコアはタイブレーカー限定 | **PASS** | 静的テスト保証 + ユニットテスト2件（継続合格） |
+| G5b | AI出力の外部公開禁止 | **PASS** | 新規出力経路なし |
+
+---
+
+### §5-4 G-TR0 Blocker（TR-0 Done条件 1〜4）
+
+| Done条件 | 判定 | 概要 |
+|---|---|---|
+| 1. `time_Nf` 系フィールドの意味確定 | **PASS** | 累積タイムと確定。training_slope 2,121,563行・training_wood 533,599行 全件 mismatch=0 |
+| 2. `lap_lX_lY` 系の区間確定 | **PASS** | TR-1 条件①〜⑦すべてへのフィールド対応表を `TR0_FINDINGS.md` に記載 |
+| 3. `blood_no` 紐付け経路確認 | **PASS** | `blood_no` 直結 JOIN 可能。実データ 100% マッチ確認済み |
+| 4. 欠損・イレギュラーケース | **PASS** | 複数回計測: slope 10組 / wood 5組（全体の 0.00001% 未満）。混入なし |
+| 確定不能項目 | なし | 全4項目確定。TR-1 から除外すべき条件なし |
+
+**G-TR0: PASS**
+
+---
+
+### §5-3 BET-3 継続確認
+
+CLI 実行結果（honmei_v1 × anaba_v1 / 3m）: 4賭式すべてにレース数・ベット数が併記されていることを実測確認。100%超えの結果: **0件**。件数 Blocker: **PASS**。
+
+### G-TR1 / G-TR2
+
+TR-1 未実装のため適用外。
+
+---
+
+### 総合判定
+
+全 Blocker PASS。TR-0 Done条件全達成。
+
+**ALL_PASS**
+Thu Jun 25 21:42:33     2026: 全基準合格。終了。
+=== Loop 9: Generator ===
+TR-1 実装完了・コミット済みです。
+
+---
+
+## 実装サマリー (TR-1)
+
+**コミット:** `319c3f0` — `feat(harness-loop-9): TR-1 調教AIフィルタリング 優先度抽出・順位付けロジック実装`
+
+### 作成ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `tipster/training_ranker_config.json` | 優先度①〜⑦の閾値設定（JSON、G-TR3準拠） |
+| `tipster/training_ranker.py` | `SlopeRow` / `WoodRow` / `RankedHorse` / `rank_horses_by_training()` |
+| `tests/test_tipster_training_ranker.py` | 66件のユニットテスト |
+
+### PLAN.md §5-4 G-TR1 必須3点（Blocker）
+
+| 項目 | テスト | 結果 |
+|---|---|---|
+| 加速ラップ：同タイムは非加速 | `test_same_time_between_*_is_not_acceleration` | PASS |
+| tie-breaker（坂路=time_4f / ウッド=time_5f / 同タイム=同着） | `test_tiebreak_by_*` / `test_same_tiebreak_time_gets_same_rank` | PASS |
+| 条件⑤：前週データなし→False（エラーにならない） | `test_no_prev_week_slope_returns_false` | PASS |
+
+**テスト:** `586 passed`（前回520 +66件）
+=== Loop 9: Evaluator ===
+評価完了。以下が結果サマリです。
+
+---
+
+## Evaluator評価 — TR-1 最終判定: **合格**
+
+### Blocker全件確認
+
+| 基準 | 判定 | 根拠 |
+|---|---|---|
+| G1 既存テスト破壊なし | **PASS** | 586 passed |
+| G2 既存戦略JSON出力不変 | **PASS** | 独立新規モジュール、既存コード無変更 |
+| G3 既存API契約破壊なし | **PASS** | api変更なし |
+| G4 時系列分割厳守 | **PASS** | `shared/config.py` 定数確認済み（継続） |
+| G5a AIスコアはタイブレーカー限定 | **PASS** | TR-1はAIスコアを参照しない。静的テスト保証（継続） |
+| G5b AI出力の外部公開禁止 | **PASS** | RankedHorseにAIスコアフィールドなし |
+| **G-TR0** TR-0完了確認 | **PASS** | PROGRESS.md 2行目「TR-0: 完了」 |
+| **G-TR1** 加速ラップ判定・tie-breaker・前週イレギュラー | **PASS** | `a > b > c > d`（厳密 `>`）。専用ユニットテスト3点全green |
+| **G-TR2** 出力に買い目なし | **PASS** | `RankedHorse`フィールドは6項目のみ。`test_output_contains_no_bet_construction`で機械的に保証 |
+| BET-3 件数併記Blocker | **PASS** | 4賭式全てに `レース数=759 ベット数=xxx` 出力。100%超えなし |
+
+**ALL_PASS**
+Fri Jun 26 07:34:11     2026: 全基準合格。終了。
+=== Loop 10: Generator ===
+BET-4 実装完了。コミット `83af350`。
+
+---
+
+## 実施内容
+
+**BET-4: データ分割明文化 + リーク防止ガード**
+
+### 実装した3ファイル
+
+**1. `scripts/train_v2_submodels.py`（修正）**
+- `from shared.config import EVAL_START_DATE, TRAIN_END_DATE` を追加
+- `_load_parquet()` にガードを追加: `race_id` 先頭8文字（YYYYMMDD）と `EVAL_START_DATE` を比較し、検証期間の行を除外。12桁・16桁いずれの `race_id` にも対応。ランダムシャッフルは行わない。
+
+**2. `scripts/verify_data_split.py`（新規）**
+- スタンドアロン検証スクリプト。任意の Parquet ファイルに対して `EVAL_START_DATE` 以降の race_id がないかチェック
+- `--strict` オプションでリーク検出時に exit code 1（CI/CD 向け）
+- 使用例: `py -3 scripts/verify_data_split.py --parquet outputs/bloodline_features_v1_2022plus.parquet`
+
+**3. `tests/test_data_split_guard.py`（新規、17件）**
+- 定数の存在・形式・境界値（`TRAIN_END_DATE="2025-05-31"` / `EVAL_START_DATE="2025-06-01"`）
+- `_race_id_to_date_str` の変換精度（16桁・12桁・境界値）
+- `verify_no_eval_leakage` のリーク検出・境界値・空DF・件数カウント
+
+**pytest:** 603 passed（+17件、既存全件継続合格）
+=== Loop 10: Evaluator ===
+評価完了。PROGRESS.md に追記しました。
+
+---
+
+## Evaluator評価 — BET-4 + Step1/Step2 (2026-06-26)
+
+**評価結果: 合格**
+
+### 横断的基準（G1–G5b）
+
+| # | 判定 | 備考 |
+|---|---|---|
+| G1 | **PASS** | pytest → 603 passed（前回586+17件） |
+| G2 | **PASS** | 戦略JSON・engine.py 無変更 |
+| G3 | **PASS** | API エンドポイント変更なし |
+| G4 | **PASS** | `shared/config.py` に分割境界定数あり。`train_v2_submodels.py` がガード追加。ランダムシャッフルなし |
+| G5a | **PASS** | 静的テスト + ユニットテスト継続合格 |
+| G5b | **PASS** | `weekend_filter_data.py` は `evaluate_race_context()` フィルタ後の結果を経由。ai_score は参照情報として表示されているが、推奨判定は `select_honmei()` 経由 |
+
+### ワークストリームC / BET-3継続確認
+
+| # | 判定 |
+|---|---|
+| G-TR0 | **PASS**（継続） |
+| G-TR1 | **PASS**（training_ranker.py 無変更、`>` 厳密判定継続） |
+| G-TR2 | **PASS**（週末レポートの調教タブも買い目なし） |
+| BET-3 件数併記 | **PASS**（combo_backtest.py 無変更） |
+| BET-4 Done条件 | **PASS** |
+
+**ALL_PASS**
+Fri Jun 26 21:30:44     2026: 全基準合格。終了。
+=== Loop 11: Generator ===
+BET-5 実装完了。コミット `7825984`。
+
+---
+
+## 実装サマリ
+
+**BET-5: 条件パターンの実験管理・複数戦略パターンの比較**
+
+### 新規追加ファイル（5件）
+
+| ファイル | 内容 |
+|---|---|
+| `tipster/strategies/honmei_v3.json` | `track_bias_fit` を `required:true` にした厳格バリアント |
+| `tipster/strategies/anaba_v2.json` | `min_odds=7.0` / `max_selections=3` の緩和バリアント |
+| `scripts/run_strategy_experiment.py` | `run_combo_backtest()` 結果を JSON に保存するラッパー |
+| `scripts/compare_strategy_results.py` | 複数 JSON を 4 賭式で並べて比較するレポートスクリプト |
+| `tests/test_bet5_experiment.py` | 41 件（静的整合性・シリアライズ・比較出力・規約） |
+
+### Done 条件充足
+
+1. **戦略切り替えのみで比較可能** — `--honmei-strategy honmei_v3 --aite-strategy anaba_v2` に引数変更するだけ。Pythonコード変更不要（`test_bet5_done_condition_no_code_change_needed` で保証）
+2. **4賭式に race_count/bet_count 併記** — `compare_strategy_results.py` の `print_comparison_table()` が毎行 `レース数/ベット数/的中数` を出力
+3. **三連複は対象外** — `_BET_TYPES_4 = (tansho, fukusho, umaren, wide)` でデフォルト除外
+4. **既存実装無変更** — `combo_backtest.py`・`engine.py` 等は一切手を加えていない
+
+**テスト**: 644 passed (+41件、既存603件全件継続合格)
+=== Loop 11: Evaluator ===
+PROGRESS.mdへの評価追記が完了しました。
+
+---
+
+## Evaluator評価 — BET-5 (2026-06-26)
+
+**評価結果: 合格**
+
+### 横断的基準（G1–G5b）
+
+| # | 項目 | 判定 |
+|---|---|---|
+| G1 | 既存テスト | **PASS** — 644 passed 実測 |
+| G2 | 既存戦略JSON出力不変 | **PASS** — 新規ファイル加算のみ、v1/v2 JSON・engine.py 無変更 |
+| G3 | 既存API契約 | **PASS** — api_v1/v2/admin 無変更 |
+| G4 | 時系列分割 | **PASS** — TRAIN_END_DATE/EVAL_START_DATE 存在・ランダムシャッフルゼロ |
+| G5a | AIスコアはtiebreaker限定 | **PASS** — honmei_v3: `primary="condition_clear_count"`, anaba_v2: `primary="total_score"`. 両 JSON とも ai_score 系 required:true なし。静的テスト全合格 |
+| G5b | AI出力外部公開禁止 | **PASS** — 新スクリプトはフィルタ済み candidates 経由のみ、AIスコア単体の推奨経路なし |
+
+### BET-5 Done条件
+
+| 条件 | 判定 |
+|---|---|
+| 2以上の戦略パターン（honmei_v1/v3 × anaba_v1/v2）を切り替えて4賭式比較可能 | **PASS** |
+| Pythonコード変更不要（引数変更のみ） | **PASS** |
+| 三連複は比較対象外（`_BET_TYPES_4` に含まない） | **PASS** |
+| 全回収率出力に race_count / bet_count が同じ階層 | **PASS** |
+
+### BET-3 Blocker継続確認（§5-3）
+
+4戦略ペア（honmei_v1/v3 × anaba_v1/v2）をすべてCLI実行確認。4賭式全て件数併記あり。**回収率100%超え: 全4ペアで0件**。
+
+### G-TR0/G-TR1/G-TR2 継続確認
+
+training_ranker.py は本ループで無変更。BET-5 新規スクリプトはTR-1出力経路に触れない。全Blockerを継続合格。
+
+---
+
+**ALL_PASS**
+Fri Jun 26 22:09:54     2026: 全基準合格。終了。

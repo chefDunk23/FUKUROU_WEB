@@ -151,44 +151,10 @@ def _to_public_response(full: object) -> PublicRaceDetailResponse:
     )
 
 
-@router.get("/races/{race_id}", response_model=PublicRaceDetailResponse)
-def get_public_race_detail(race_id: str) -> PublicRaceDetailResponse:
-    """
-    公開用レース詳細。認証不要・フィールド絞り込み済み。
+# GET /api/v2/public/races/{race_id} は廃止済み（2026-06-27 Phase B）
+# 将来必要になったら新規作成すること。Pydanticモデルはテスト資産として維持。
 
-    除外フィールド: past_races, opponents_next_races, submodel_scores, sire_name
-    キャッシュ: 既存の race_detail_cache を流用（管理者エンドポイントと共用）
-    """
-    # 遅延インポートで循環依存を回避
-    from api_v2.routers.races import (  # noqa: PLC0415
-        _compute_detail,
-        _get_cached_detail,
-        _save_detail_cache,
-    )
-
-    model_ver = get_model_version()
-
-    cached = _get_cached_detail(race_id, model_ver)
-    if cached is not None:
-        return _to_public_response(cached)
-
-    try:
-        response = _compute_detail(race_id)
-    except FileNotFoundError as e:
-        logger.error("[PublicRaceDetail] AIモデルファイル未検出: %s", e)
-        raise HTTPException(status_code=503, detail="AIモデルが未ロードです")
-    except Exception as e:
-        logger.exception("[PublicRaceDetail] 計算エラー: %s", e)
-        raise HTTPException(status_code=500, detail="予測処理でエラーが発生しました")
-
-    if response is None:
-        raise HTTPException(status_code=404, detail=f"レースが見つかりません: {race_id}")
-
-    _save_detail_cache(response, model_ver)
-    return _to_public_response(response)
-
-
-# ── タスク3: 血統コーナー ─────────────────────────────────────────────────────
+# ── 血統コーナー ─────────────────────────────────────────────────────────────
 
 class BloodlineInsight(BaseModel):
     sire_name:       str

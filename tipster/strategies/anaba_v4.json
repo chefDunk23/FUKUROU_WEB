@@ -1,0 +1,77 @@
+{
+  "name": "穴馬抽出 v4 (オッズ閾値厳格化)",
+  "tipster": "fukurou",
+  "type": "anaba",
+  "version": "4.0",
+  "_comment": "BET-5 追加探索バリアント。v1 の min_odds=10.0 → 15.0 に厳格化し、大穴のみに相手候補を絞り込む。v3(5.0)の対極の比較ポイント。",
+  "conditions": [
+    {
+      "id": "race_level",
+      "enabled": true,
+      "required": false,
+      "params": {
+        "min_next_race_horses": 2,
+        "thresholds": {
+          "G1":      {"place_rate": 0.15, "winner_max_rank": 7},
+          "G2":      {"place_rate": 0.18, "winner_max_rank": 5},
+          "G3":      {"place_rate": 0.22, "winner_max_rank": 5},
+          "default": {"place_rate": 0.20, "winner_max_rank": 3}
+        }
+      }
+    },
+    {
+      "id": "time_gap",
+      "enabled": true,
+      "required": true,
+      "params": {
+        "sprint_max_sec": 1.5,
+        "sprint_fallback_sec": 2.0,
+        "mile_max_sec": 2.0,
+        "mile_fallback_sec": 2.5,
+        "sprint_threshold_m": 1400
+      }
+    },
+    {
+      "id": "min_odds",
+      "enabled": true,
+      "required": true,
+      "_comment": "v1=10.0 から 15.0 に厳格化。大穴のみ相手候補に含める。",
+      "params": {
+        "min_tan_odds": 15.0
+      }
+    },
+    {
+      "id": "track_bias_fit",
+      "enabled": true,
+      "required": true,
+      "params": {
+        "exclude_on_mismatch": true
+      }
+    },
+    {
+      "id": "weight_change",
+      "enabled": true,
+      "required": false,
+      "params": {
+        "increase_penalty": -2,
+        "decrease_bonus": 2,
+        "apprentice_bonus_disabled": false
+      }
+    },
+    {
+      "id": "jockey_change",
+      "enabled": true,
+      "required": false,
+      "params": {
+        "top_jockey_threshold": 20,
+        "stable_affinity_min_rides": 5,
+        "stable_affinity_min_winrate": 0.10
+      }
+    }
+  ],
+  "ranking": {
+    "primary": "total_score",
+    "secondary": "ai_score",
+    "max_selections": 5
+  }
+}

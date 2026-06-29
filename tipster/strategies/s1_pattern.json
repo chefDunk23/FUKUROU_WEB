@@ -1,0 +1,58 @@
+{
+  "name": "S-1パターン（ダート中距離|坂あり）",
+  "tipster": "fukurou",
+  "type": "segment",
+  "version": "1.0",
+  "_comment": "Phase 2 S-1パターン: 5条件ALL-True必須。candidates[*] で clear_count==5 のみ有効とし、最人気（tan_odds最小）を選択する。複勝率65.0% / 123R（2025-06-01〜2026-06-27）。",
+  "conditions": [
+    {
+      "id": "v2_past_margin",
+      "enabled": true,
+      "required": false,
+      "_comment": "前走着差≤1.0秒（Phase 2: prev1_margin<=1.0、lookback=1）",
+      "params": {
+        "lookback": 1,
+        "max_sec": 1.0,
+        "bonus_score": 1.0
+      }
+    },
+    {
+      "id": "v2_class_change",
+      "enabled": true,
+      "required": false,
+      "_comment": "クラス維持/降級（Phase 2: class_level<=prev1_class、昇級はNoneとなりclear_count不加算）",
+      "params": {
+        "downgrade_bonus": 1.0,
+        "upgrade_as_none": true
+      }
+    },
+    {
+      "id": "v2_f3_top",
+      "enabled": true,
+      "required": false,
+      "_comment": "前走上がり上位33%（Phase 2: prev1_f3pct<=0.33）",
+      "params": {
+        "top_pct": 0.33
+      }
+    },
+    {
+      "id": "v2_hill_fit",
+      "enabled": true,
+      "required": false,
+      "_comment": "坂あり競馬場での好走歴（Phase 2: 過去3走以内に坂あり会場で3着以内）",
+      "params": {}
+    },
+    {
+      "id": "v2_sire_venue",
+      "enabled": true,
+      "required": false,
+      "_comment": "種牡馬の今回会場top3率 > 全体top3率（Phase 2: count>=10）",
+      "params": {}
+    }
+  ],
+  "ranking": {
+    "primary": "condition_clear_count",
+    "secondary": "ai_score",
+    "max_selections": 20
+  }
+}

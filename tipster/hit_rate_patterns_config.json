@@ -1,0 +1,79 @@
+{
+  "_comment": "的中率ベースの条件パターン探索用設定（回収率ではなく複勝的中率を軸にする新規分析軸）。training_ranker_config.json同様、コード変更なしでパターンを追加・編集できる。オッズの値そのものを条件に使うID(min_odds)はここでは使用しない方針。conditions列のidはtipster/conditions.py・tipster/conditions_tr1.pyのCONDITION_REGISTRYに登録済みのものをそのまま使う（パラメータ省略時は各条件関数のデフォルト値が使われる）。",
+  "patterns": [
+    {
+      "id": "P1_base2",
+      "label": "race_level + time_gap（honmei_v1の必須2条件のみ）",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}}
+      ]
+    },
+    {
+      "id": "P2_base3_with_bias",
+      "label": "P1 + track_bias_fit",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}},
+        {"id": "track_bias_fit", "params": {}}
+      ]
+    },
+    {
+      "id": "P3_base4_with_weight",
+      "label": "P2 + weight_change",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}},
+        {"id": "track_bias_fit", "params": {}},
+        {"id": "weight_change", "params": {}}
+      ]
+    },
+    {
+      "id": "P4_all5_honmei_base",
+      "label": "本命5条件オール一致（race_level+time_gap+track_bias_fit+weight_change+jockey_change）",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}},
+        {"id": "track_bias_fit", "params": {}},
+        {"id": "weight_change", "params": {}},
+        {"id": "jockey_change", "params": {}}
+      ]
+    },
+    {
+      "id": "P5_all6_with_tr1",
+      "label": "P4 + training_rank_top(TR-1上位3位以内) オール一致（最も厳格、1日0〜1件想定）",
+      "conditions": [
+        {"id": "race_level", "params": {}},
+        {"id": "time_gap", "params": {}},
+        {"id": "track_bias_fit", "params": {}},
+        {"id": "weight_change", "params": {}},
+        {"id": "jockey_change", "params": {}},
+        {"id": "training_rank_top", "params": {"top_n": 3}}
+      ]
+    },
+    {
+      "id": "P6_bias_and_tr1",
+      "label": "track_bias_fit + training_rank_top のみ（脚質適合×調教上位）",
+      "conditions": [
+        {"id": "track_bias_fit", "params": {}},
+        {"id": "training_rank_top", "params": {"top_n": 3}}
+      ]
+    },
+    {
+      "id": "P7_form_only",
+      "label": "weight_change + jockey_change + training_rank_top（レースレベル/着差を使わない近走の状態のみ）",
+      "conditions": [
+        {"id": "weight_change", "params": {}},
+        {"id": "jockey_change", "params": {}},
+        {"id": "training_rank_top", "params": {"top_n": 3}}
+      ]
+    },
+    {
+      "id": "P8_tr1_only",
+      "label": "training_rank_top のみ（TR-1単独、上位3位以内）",
+      "conditions": [
+        {"id": "training_rank_top", "params": {"top_n": 3}}
+      ]
+    }
+  ]
+}
