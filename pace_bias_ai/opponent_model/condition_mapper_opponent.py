@@ -1,7 +1,8 @@
 """
-前走メンバーレベルモデル用の日本語説明文生成。
+前走メンバーレベルモデル用の日本語説明文生成（v2対応）。
 
 v1 の condition_mapper.py とは独立して管理する。
+v2 の変更: 前々走ベース特徴量・competitiveness_score・grade_rank に対応。
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def _class_ja(rank: float) -> str:
 
 
 class OpponentConditionMapper:
-    """前走メンバーレベルモデルの特徴量から日本語説明を生成。"""
+    """前走メンバーレベルモデル v2 の特徴量から日本語説明を生成。"""
 
     def explain(
         self,
@@ -77,27 +78,62 @@ class OpponentConditionMapper:
         if np.isnan(val):
             return f'{col}: データなし'
 
-        # ── opponent_next系 ────────────────────────────────────────────────
-        if col == 'opponent_next_top3_rate':
-            lvl = '高い' if sv > 0 else '低い'
+        # ── 前々走ベースのレースレベル ────────────────────────────────────
+        if col == 'prev2_opp_top3_rate':
+            lvl = '高い' if sv < 0 else '低い'
+            return f'前々走相手の次走3着以内率={val:.0%}（レベル{lvl}）'
+
+        if col == 'prev2_opp_top3_count':
+            return f'前々走相手の次走3着以内頭数={int(val)}頭'
+
+        if col == 'prev2_opp_count':
+            return f'前々走の対戦相手の次走情報数={int(val)}頭分'
+
+        if col == 'prev2_top3_next_avg':
+            good = sv < 0
+            lvl  = '強い（次走でも好走）' if good else '弱い'
+            return f'前々走1〜3着馬の次走平均着順={val:.1f}（前々走メンバー{lvl}）'
+
+        if col == 'prev2_top3_next_rate':
+            lvl = '強い（次走でも好走）' if sv > 0 else '弱い'
+            return f'前々走1〜3着馬の次走3着以内率={val:.0%}（前々走メンバー{lvl}）'
+
+        # ── 前走ベースのレースレベル ─────────────────────────────────────
+        if col == 'prev1_opp_top3_rate':
+            lvl = '高い' if sv < 0 else '低い'
             return f'前走相手の次走3着以内率={val:.0%}（レベル{lvl}）'
 
-        if col == 'opponent_next_win_rate':
-            lvl = '高い' if sv > 0 else '低い'
-            return f'前走相手の次走勝率={val:.0%}（レベル{lvl}）'
+        if col == 'prev1_opp_top3_count':
+            return f'前走相手の次走3着以内頭数={int(val)}頭'
 
-        if col == 'opponent_next_avg_rank':
-            good = sv < 0  # 低い着順が良い相手 → 高評価
-            lvl  = '強い' if good else '弱い'
-            return f'前走相手の次走平均着順={val:.1f}（相手{lvl}）'
-
-        if col == 'opponent_count':
+        if col == 'prev1_opp_count':
             return f'前走の対戦相手の次走情報数={int(val)}頭分'
 
-        # ── クラス ────────────────────────────────────────────────────────
-        if col == 'prev_class_rank':
+        # ── レースレベル × 着差（複合指標） ─────────────────────────────
+        if col == 'competitiveness_score':
+            if val > 0.3:
+                return f'通用度スコア={val:.2f}（強いメンバーで接戦→今走でも通用）'
+            elif val > 0.1:
+                return f'通用度スコア={val:.2f}（普通）'
+            else:
+                return f'通用度スコア={val:.2f}（弱いメンバーか大差負け→今走は割引）'
+
+        # ── クラス・グレード ─────────────────────────────────────────────
+        if col == 'prev_grade_rank':
             cj = _class_ja(val)
             return f'前走クラス={cj}'
+
+        if col == 'prev2_grade_rank':
+            cj = _class_ja(val)
+            return f'前々走クラス={cj}'
+
+        if col == 'grade_change':
+            if val < 0:
+                return f'クラスアップ（{abs(int(round(val)))}ランク上昇）'
+            elif val > 0:
+                return f'クラスダウン（{int(round(val))}ランク降格）'
+            else:
+                return '同クラス出走'
 
         if col == 'cur_class_rank':
             cj = _class_ja(val)
@@ -180,7 +216,6 @@ class OpponentConditionMapper:
         if col == 'horse_age':
             return f'馬齢{int(val)}歳'
 
-        # ── 距離カテゴリ・馬場コード ─────────────────────────────────────
         if col == 'dist_cat':
             label = {0: '短距離(〜1400m)', 1: 'マイル(〜1800m)',
                      2: '中距離(〜2200m)', 3: '長距離(2200m超)'}
