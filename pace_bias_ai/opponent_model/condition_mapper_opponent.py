@@ -156,6 +156,50 @@ class OpponentConditionMapper:
         if col == 'grade_drop':
             return '前走G1/G2帰り→今走格下' if val > 0.5 else None
 
+        # ── v3追加: クラス変動対策 ───────────────────────────────────────
+        if col == 'won_between':
+            if val > 0.5:
+                return '前走1着（前々走から今走の間に勝利して昇級）'
+            else:
+                return '前走は未勝利（前々走から今走の間に未勝利）'
+
+        if col == 'prev2_to_now_class_change':
+            v = int(round(val))
+            if v > 0:
+                return f'前々走から{v}ランク昇級した今走'
+            elif v < 0:
+                return f'前々走から{abs(v)}ランク格下げの今走'
+            else:
+                return '前々走と同クラスの今走'
+
+        if col == 'prev2_days_ago':
+            d = int(round(val))
+            if d > 180:
+                return f'前々走から{d}日経過（半年以上前で参考度低）'
+            elif d > 90:
+                return f'前々走から{d}日経過（3〜6ヶ月前）'
+            else:
+                return f'前々走から{d}日経過（直近）'
+
+        if col == 'prev_was_step':
+            if val > 0.5:
+                return '前走は叩き台（前々走の方が着順が良く、前走で状態を整えた可能性）'
+            else:
+                return '前走が好走（叩き台でなく本番で結果を出した）'
+
+        if col == 'prev2_dist_diff':
+            m = int(round(val))
+            if m < 100:
+                return f'前々走と今走の距離差小（{m}m）— 条件が近い'
+            else:
+                return f'前々走と今走の距離差大（{m}m）— 条件が異なる'
+
+        if col == 'prev2_surface_same':
+            return '前々走と今走は同じ馬場' if val > 0.5 else '前々走と今走は馬場が異なる（芝↔ダート等）'
+
+        if col == 'prev2_venue_same':
+            return '前々走と今走は同じ競馬場' if val > 0.5 else '前々走と今走は異なる競馬場'
+
         # ── 前走の負け方 ──────────────────────────────────────────────────
         if col == 'prev_margin':
             if val <= 0.1:
