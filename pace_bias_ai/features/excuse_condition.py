@@ -24,7 +24,6 @@ DISTANCE_EXCUSE_MIN = 400  # 距離差の閾値（m）
 LEADING_CORNER4_MAX = 5    # 先行判定の4角通過順閾値
 
 G1G2_GRADES = frozenset(['A', 'B'])
-G1G2G3_GRADES = frozenset(['A', 'B', 'C'])
 
 
 def build_excuse_flags(
@@ -51,6 +50,12 @@ def build_excuse_flags(
             excuse_pace      : 先行大敗度外視 (0/1 int)
             excuse_any       : いずれかに該当 (0/1 int)
     """
+    required_cols = [prev_chakujun_col, prev_grade_col, prev_dist_col,
+                     prev_corner4_col, cur_grade_col, cur_dist_col]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"build_excuse_flags: 必須列が存在しません: {missing}")
+
     prev_chaku = pd.to_numeric(df[prev_chakujun_col], errors='coerce')
     prev_big_loss = (prev_chaku >= POOR_FINISH_THRESHOLD) & prev_chaku.notna()
 
@@ -102,6 +107,9 @@ def fetch_prev_race_info(
             blood_no, race_id, kakutei_chakujun, corner_4, distance, grade_code,
             prev_race_id, prev_kakutei_chakujun, prev_corner_4, prev_distance, prev_grade_code
     """
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size は正の整数である必要があります: {chunk_size}")
+
     import sqlalchemy
 
     rows: list[dict] = []
