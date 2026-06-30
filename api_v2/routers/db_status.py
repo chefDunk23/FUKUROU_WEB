@@ -16,7 +16,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from shared.config import DB_JVDL, DB_V2
@@ -237,9 +237,58 @@ class SyncRequest(BaseModel):
     job_type: str
 
 
+def _run_job_inline(job_id: int, job_type: str) -> None:
+    """ジョブをインプロセスで実行する（BackgroundTasks から呼ばれる）。"""
+    from shared.worker.job_runner import _HANDLERS, JobContext
+
+    conn = _jvdl_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET status='running', started_at=now(), progress=0 WHERE id=%s",
+                (job_id,),
+            )
+        conn.commit()
+
+        handler = _HANDLERS.get(job_type)
+        if handler is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET status='failed', finished_at=now(), log_tail=%s WHERE id=%s",
+                    (f"未知の job_type: {job_type!r}", job_id),
+                )
+            conn.commit()
+            return
+
+        ctx = JobContext(job_id=job_id, _conn=conn)
+        try:
+            handler({}, ctx)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET status='done', progress=100, finished_at=now() WHERE id=%s",
+                    (job_id,),
+                )
+            conn.commit()
+            logger.info("db-sync インライン完了: id=%d type=%s", job_id, job_type)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            ctx._log_buf.append(tb[-1000:])
+            tail = "\n".join(ctx._log_buf)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE jobs SET status='failed', finished_at=now(), log_tail=%s WHERE id=%s",
+                    (tail, job_id),
+                )
+            conn.commit()
+            logger.exception("db-sync インライン失敗: id=%d type=%s", job_id, job_type)
+    finally:
+        conn.close()
+
+
 @router.post("/db-sync", status_code=201)
-def post_db_sync(req: SyncRequest):
-    """ジョブを JVDL jobs テーブルに投入する。ワーカーが非同期で実行する。"""
+def post_db_sync(req: SyncRequest, background_tasks: BackgroundTasks):
+    """ジョブを投入し、インプロセスのバックグラウンドタスクとして直接実行する。"""
     if req.job_type not in _ALLOWED_JOB_TYPES:
         raise HTTPException(400, f"不正な job_type: {req.job_type!r}")
 
@@ -257,6 +306,7 @@ def post_db_sync(req: SyncRequest):
         raise HTTPException(503, f"ジョブ投入失敗: {e}")
 
     logger.info("db-sync ジョブ投入: id=%d type=%s", row["id"], row["job_type"])
+    background_tasks.add_task(_run_job_inline, row["id"], row["job_type"])
     return {
         "job_id":    row["id"],
         "job_type":  row["job_type"],
