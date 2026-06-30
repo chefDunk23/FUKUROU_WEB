@@ -39,10 +39,11 @@ EAST_VENUES = frozenset(['01', '02', '03', '04', '05', '06'])
 WEST_VENUES  = frozenset(['07', '08', '09', '10'])
 
 # ローテーション判定
-GENUINE_MIN_DAYS = 15   # 中2週以上
-GENUINE_MAX_DAYS = 28   # 中4週以下
-STEP_REST_DAYS   = 90   # 90日以上休養 = 叩き台疑惑
-BIG_DROP_RANKS   = 3    # 3ランク以上格下げ = 叩き台疑惑
+GENUINE_MIN_DAYS    = 15  # 中2週以上
+GENUINE_MAX_DAYS    = 28  # 中4週以下
+GENUINE_PREV_MAX_RANK = 5  # 前走5着以内（掲示板）が必須
+STEP_REST_DAYS      = 90  # 90日以上休養 = 叩き台疑惑
+BIG_DROP_RANKS      = 3   # 3ランク以上格下げ = 叩き台疑惑
 
 # クラス序列（grade_code準拠）
 _GRADE_RANK = {'A': 1, 'B': 2, 'C': 3, 'L': 4, 'D': 5}
@@ -99,7 +100,8 @@ def build_rotation_flags(
         for i in range(0, len(blood_nos), 2000):
             chunk = blood_nos[i:i + 2000]
             res = conn.execute(sqlalchemy.text("""
-                SELECT e.blood_no, e.race_id, r.keibajo_code, r.grade_code
+                SELECT e.blood_no, e.race_id, e.kakutei_chakujun,
+                       r.keibajo_code, r.grade_code
                 FROM race_entries_v2 e
                 JOIN races_v2 r ON e.race_id = r.race_id
                 WHERE e.blood_no = ANY(:bns)
@@ -131,9 +133,18 @@ def build_rotation_flags(
         prev_grade_rank = _grade_rank(row.get('prev_grade_code'))
         class_drop = prev_grade_rank - cur_grade_rank  # 正=格下げ（rank大→小）
 
+        # 前走着順（past の最後のレース）
+        prev_chaku = np.nan
+        if not past.empty:
+            prev_chaku = pd.to_numeric(
+                past.iloc[-1].get('kakutei_chakujun', np.nan), errors='coerce'
+            )
+
+        # 本気ローテ: 中2〜4週 + 格下げ小幅 + 前走掲示板（5着以内）
         is_genuine = int(
             (GENUINE_MIN_DAYS <= interval <= GENUINE_MAX_DAYS) and
-            (abs(class_drop) <= 1)
+            (abs(class_drop) <= 1) and
+            (pd.notna(prev_chaku) and prev_chaku <= GENUINE_PREV_MAX_RANK)
         )
         is_step = int(
             (interval >= STEP_REST_DAYS) or
