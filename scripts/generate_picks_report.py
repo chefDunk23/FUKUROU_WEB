@@ -1831,11 +1831,106 @@ def build_picks_json() -> tuple[list[dict], dict, str]:
 
 # ─── エントリーポイント ────────────────────────────────────────────────────────
 
+def _render_ai_section(ai_picks_path: Path) -> str:
+    """ai_picks.json が存在する場合に AI推奨セクションの HTML を生成する。"""
+    if not ai_picks_path.exists():
+        return ""
+    try:
+        import json as _json
+        ai_data = _json.loads(ai_picks_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    races = ai_data.get("race_data", [])
+    if not races:
+        return ""
+
+    _KEIBAJO_MAP = {
+        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟",
+        "05": "東京", "06": "中山", "07": "中京", "08": "京都",
+        "09": "阪神", "10": "小倉",
+    }
+    _LABEL_COLOR = {
+        "一押し": "#dc2626", "二押し": "#ea580c", "三押し": "#ca8a04",
+        "注意": "#6b7280", "穴注意": "#7c3aed",
+    }
+
+    def _esc(s: str) -> str:
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    parts = [
+        '<div id="ai-picks-section" style="max-width:800px;margin:32px auto 0;padding:0 16px">',
+        '<h2 style="font-size:18px;font-weight:700;color:#1e3a5f;margin-bottom:12px">',
+        '🤖 AI推奨 (v1×opponent_v3 α=0.5)</h2>',
+        f'<p style="font-size:11px;color:#9ca3af;margin-bottom:16px">生成: {_esc(ai_data.get("generated_at", ""))}</p>',
+    ]
+
+    for race in races:
+        venue = _KEIBAJO_MAP.get(str(race.get("keibajo_code", "")).zfill(2), race.get("keibajo_code", ""))
+        parts.append(
+            f'<div style="background:#fff;border:1px solid #e2e8f0;border-left:4px solid #2563eb;'
+            f'border-radius:8px;margin-bottom:16px;overflow:hidden">'
+        )
+        parts.append(
+            f'<div style="background:#2563eb;color:#fff;padding:10px 16px;display:flex;'
+            f'align-items:center;gap:12px;font-size:13px">'
+            f'<strong>{_esc(venue)} {race.get("race_num")}R</strong>'
+            f'<span style="opacity:.8;flex:1">{_esc(race.get("race_name",""))}</span>'
+            f'<span style="opacity:.7">{_esc(race.get("surface",""))} {race.get("distance","")}m</span>'
+            f'</div>'
+        )
+        picks = race.get("picks", [])
+        for pick in picks:
+            label = pick.get("label", "")
+            color = _LABEL_COLOR.get(label, "#6b7280")
+            flags = pick.get("flags", {})
+            flag_items = []
+            if flags.get("is_genuine") == 1:
+                flag_items.append('<span style="background:#d1fae5;color:#065f46;padding:1px 5px;border-radius:3px;font-size:10px">本気ローテ</span>')
+            if flags.get("is_step") == 1:
+                flag_items.append('<span style="background:#ffedd5;color:#9a3412;padding:1px 5px;border-radius:3px;font-size:10px">叩き台</span>')
+            if flags.get("won_and_classup") == 1:
+                flag_items.append('<span style="background:#ffedd5;color:#9a3412;padding:1px 5px;border-radius:3px;font-size:10px">昇級戦</span>')
+            flags_html = " ".join(flag_items)
+            ens_pct = round(float(pick.get("ai_ensemble", 0)) * 100, 1)
+            parts.append(
+                f'<div style="padding:10px 16px;border-bottom:1px solid #f3f4f6;display:flex;align-items:flex-start;gap:12px">'
+                f'<span style="width:24px;height:24px;border-radius:50%;background:#e5e7eb;color:#374151;'
+                f'font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">'
+                f'{pick.get("umaban","")}</span>'
+                f'<div style="flex:1">'
+                f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                f'<strong style="font-size:13px">{_esc(pick.get("horse_name",""))}</strong>'
+                f'<span style="background:{color};color:#fff;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:700">{_esc(label)}</span>'
+                f'{flags_html}'
+                f'</div>'
+                f'<div style="font-size:11px;color:#6b7280;margin-top:2px">'
+                f'AI <strong style="color:#2563eb">{ens_pct}</strong> '
+                f'/ v1 {float(pick.get("ai_v1_score",0)):.3f} '
+                f'/ opp {float(pick.get("ai_opp_score",0)):.3f}'
+                f'</div>'
+                f'</div>'
+                f'</div>'
+            )
+        if not picks:
+            parts.append('<div style="padding:10px 16px;font-size:12px;color:#9ca3af">推奨馬なし</div>')
+        parts.append('</div>')  # race div
+
+    parts.append('</div>')  # ai-picks-section
+    return "\n".join(parts)
+
+
 def main() -> None:
     sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng = _run_picks_core()
     stats = {**tier_counts, "total": ok}
     race_data_json = json.dumps(race_data_list, ensure_ascii=False, cls=_DecimalEncoder)
     html_content = _render_html(sections, race_data_json, generated_at, stats)
+
+    # AI推奨セクションを </body> 直前に挿入
+    ai_picks_path = _OUTPUT_PATH.parent / "ai_picks.json"
+    ai_section = _render_ai_section(ai_picks_path)
+    if ai_section:
+        html_content = html_content.replace("</body>", ai_section + "\n</body>", 1)
 
     picks_json_path = _OUTPUT_PATH.parent / "picks_this_week.json"
     picks_json_path.write_text(

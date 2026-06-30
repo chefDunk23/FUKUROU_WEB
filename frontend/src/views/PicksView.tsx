@@ -9,6 +9,48 @@ import { apiFetch } from '../api/client'
 
 // ── 型定義 ────────────────────────────────────────────────────────────────────
 
+// AI推奨用型
+interface AIFlag {
+  rotation_type?: number | null
+  is_genuine?: number | null
+  is_step?: number | null
+  transport_flag?: number | null
+  class_vs_best?: number | null
+  won_and_classup?: number | null
+}
+
+interface AIPick {
+  horse_id:     string
+  horse_name:   string
+  umaban:       number
+  ai_v1_score:  number
+  ai_opp_score: number
+  ai_ensemble:  number
+  rank:         number
+  label:        string
+  flags:        AIFlag
+  explanation:  string
+}
+
+interface AIRace {
+  race_id:      string
+  race_name:    string
+  race_date:    string
+  keibajo_code: string
+  race_num:     number
+  distance:     number
+  surface:      string
+  grade_code:   string
+  field_size:   number
+  picks:        AIPick[]
+}
+
+interface AIPicksData {
+  generated_at: string | null
+  target_dates: string[]
+  race_data:    AIRace[]
+}
+
 interface Condition {
   id:     string
   label:  string
@@ -70,6 +112,20 @@ interface PicksData {
 }
 
 // ── 定数 ──────────────────────────────────────────────────────────────────────
+
+const KEIBAJO_MAP: Record<string, string> = {
+  '01': '札幌', '02': '函館', '03': '福島', '04': '新潟',
+  '05': '東京', '06': '中山', '07': '中京', '08': '京都',
+  '09': '阪神', '10': '小倉',
+}
+
+const AI_LABEL_STYLE: Record<string, string> = {
+  '一押し': 'bg-red-600',
+  '二押し': 'bg-orange-500',
+  '三押し': 'bg-yellow-500',
+  '注意':   'bg-gray-500',
+  '穴注意': 'bg-purple-600',
+}
 
 const BABA_TABS = ['良', '稍重', '重', '不良'] as const
 type Baba = typeof BABA_TABS[number]
@@ -266,15 +322,108 @@ function RaceCard({
   )
 }
 
+// ── AI推奨コンポーネント ─────────────────────────────────────────────────────
+
+function AIFlagChips({ flags }: { flags: AIFlag }) {
+  const items: { label: string; positive: boolean }[] = []
+  if (flags.is_genuine === 1) items.push({ label: '本気ローテ', positive: true })
+  if (flags.is_step === 1) items.push({ label: '叩き台疑惑', positive: false })
+  if (flags.won_and_classup === 1) items.push({ label: '昇級戦', positive: false })
+  if (flags.transport_flag === 1) items.push({ label: '輸送', positive: false })
+  if (!items.length) return null
+  return (
+    <div className="flex flex-wrap gap-1 mt-1">
+      {items.map((it, i) => (
+        <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+          it.positive ? 'bg-emerald-100 text-emerald-800' : 'bg-orange-100 text-orange-700'
+        }`}>
+          {it.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function AIPickRow({ pick }: { pick: AIPick }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="px-4 py-3 border-b border-gray-100 last:border-0">
+      <div className="flex items-start gap-3">
+        <span className="w-6 h-6 flex-shrink-0 rounded-full bg-gray-200 text-gray-700 text-xs font-bold flex items-center justify-center">
+          {pick.umaban}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-sm text-gray-900">{pick.horse_name}</span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold text-white ${AI_LABEL_STYLE[pick.label] ?? 'bg-gray-500'}`}>
+              {pick.label}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-500">
+            <span>AI <strong className="text-blue-700">{(pick.ai_ensemble * 100).toFixed(1)}</strong></span>
+            <span>v1 {pick.ai_v1_score.toFixed(3)}</span>
+            <span>opp {pick.ai_opp_score.toFixed(3)}</span>
+          </div>
+          <AIFlagChips flags={pick.flags} />
+          {pick.explanation && (
+            <button
+              onClick={() => setExpanded(v => !v)}
+              className="mt-1 text-[10px] text-blue-500 hover:text-blue-700"
+            >
+              {expanded ? '▲ 閉じる' : '▼ 推奨理由'}
+            </button>
+          )}
+          {expanded && (
+            <pre className="mt-2 text-[10px] text-gray-600 whitespace-pre-wrap bg-gray-50 rounded p-2 border border-gray-100">
+              {pick.explanation}
+            </pre>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AIRaceCard({ race }: { race: AIRace }) {
+  const venue = KEIBAJO_MAP[race.keibajo_code.padStart(2, '0')] ?? race.keibajo_code
+  return (
+    <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-4 border-l-4 border-blue-600">
+      <div className="px-4 py-3 flex items-center gap-3 bg-blue-700 text-white">
+        <span className="text-sm font-bold">{venue} {race.race_num}R</span>
+        <span className="text-xs opacity-75 flex-1 truncate">{race.race_name}</span>
+        <span className="text-xs opacity-75">{race.surface} {race.distance}m</span>
+        {race.grade_code && (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/20">
+            {race.grade_code}
+          </span>
+        )}
+      </div>
+      <div>
+        {race.picks.map(p => <AIPickRow key={p.horse_id} pick={p} />)}
+        {race.picks.length === 0 && (
+          <p className="px-4 py-3 text-sm text-gray-400">推奨馬なし</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── メインビュー ──────────────────────────────────────────────────────────────
 
+type MainTab = 'conditions' | 'ai'
+
 export default function PicksView() {
-  const [data,       setData]       = useState<PicksData | null>(null)
-  const [error,      setError]      = useState<string | null>(null)
-  const [loading,    setLoading]    = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
-  const [baba,       setBaba]       = useState<Baba>('良')
-  const [showAll,    setShowAll]    = useState(false)
+  const [data,          setData]          = useState<PicksData | null>(null)
+  const [aiData,        setAIData]        = useState<AIPicksData | null>(null)
+  const [error,         setError]         = useState<string | null>(null)
+  const [aiError,       setAIError]       = useState<string | null>(null)
+  const [loading,       setLoading]       = useState(true)
+  const [aiLoading,     setAILoading]     = useState(true)
+  const [refreshing,    setRefreshing]    = useState(false)
+  const [aiRefreshing,  setAIRefreshing]  = useState(false)
+  const [baba,          setBaba]          = useState<Baba>('良')
+  const [showAll,       setShowAll]       = useState(false)
+  const [activeTab,     setActiveTab]     = useState<MainTab>('conditions')
 
   const loadData = () => {
     setLoading(true)
@@ -290,6 +439,19 @@ export default function PicksView() {
       .finally(() => setLoading(false))
   }
 
+  const loadAIData = () => {
+    setAILoading(true)
+    setAIError(null)
+    apiFetch('/api/v2/tipster/ai-picks')
+      .then(r => {
+        if (!r.ok) throw new Error(`サーバーエラー: ${r.status}`)
+        return r.json()
+      })
+      .then((d: AIPicksData) => setAIData(d))
+      .catch((e: unknown) => setAIError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setAILoading(false))
+  }
+
   const handleRefresh = () => {
     setRefreshing(true)
     setError(null)
@@ -303,9 +465,22 @@ export default function PicksView() {
       .finally(() => setRefreshing(false))
   }
 
-  useEffect(() => { loadData() }, [])
+  const handleAIRefresh = () => {
+    setAIRefreshing(true)
+    setAIError(null)
+    apiFetch('/api/v2/tipster/ai-refresh', { method: 'POST' })
+      .then(r => {
+        if (!r.ok) return r.json().then(j => Promise.reject(j.detail ?? `エラー: ${r.status}`))
+        return r.json()
+      })
+      .then(() => loadAIData())
+      .catch((e: unknown) => setAIError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setAIRefreshing(false))
+  }
 
-  if (loading) {
+  useEffect(() => { loadData(); loadAIData() }, [])
+
+  if (loading && activeTab === 'conditions') {
     return (
       <div className="max-w-3xl mx-auto px-4 py-12 text-center text-gray-500">
         予想データ読み込み中...
@@ -314,7 +489,7 @@ export default function PicksView() {
   }
 
   // エラーかつデータなし → エラー画面（最新化ボタン付き）
-  if (error && !data) {
+  if (error && !data && activeTab === 'conditions') {
     return (
       <div className="max-w-3xl mx-auto px-4 py-12 text-center space-y-4">
         <p className="text-red-600 text-sm">{error}</p>
@@ -329,102 +504,186 @@ export default function PicksView() {
     )
   }
 
-  if (!data) return null
-
-  const sorted = [...data.race_data].sort(
-    (a, b) => (TIER_ORDER[a.tier] ?? 9) - (TIER_ORDER[b.tier] ?? 9) || a.date.localeCompare(b.date) || a.race_num - b.race_num
-  )
+  const sorted = data
+    ? [...data.race_data].sort(
+        (a, b) => (TIER_ORDER[a.tier] ?? 9) - (TIER_ORDER[b.tier] ?? 9) || a.date.localeCompare(b.date) || a.race_num - b.race_num
+      )
+    : []
   const grouped = groupByDate(sorted)
+
+  const aiRaces = aiData?.race_data ?? []
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6">
 
-      {/* ヘッダー情報 */}
+      {/* ヘッダー情報 + タブ */}
       <div className="mb-4 flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900">週末予想レポート</h1>
-          <p className="text-xs text-gray-400 mt-0.5">生成: {data.generated_at}</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {activeTab === 'conditions'
+              ? `生成: ${data?.generated_at ?? '—'}`
+              : `AI生成: ${aiData?.generated_at ?? '未生成'}`}
+          </p>
         </div>
+        {activeTab === 'conditions' ? (
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+            title="generate_picks_report.py を実行して予想を再生成します（数分かかります）"
+          >
+            <span className={refreshing ? 'animate-spin' : ''}>↻</span>
+            {refreshing ? '再生成中...' : '最新化'}
+          </button>
+        ) : (
+          <button
+            onClick={handleAIRefresh}
+            disabled={aiRefreshing}
+            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            title="generate_ai_picks.py を実行してAI推奨を再生成します（数分かかります）"
+          >
+            <span className={aiRefreshing ? 'animate-spin' : ''}>↻</span>
+            {aiRefreshing ? '生成中...' : '最新化(AI)'}
+          </button>
+        )}
+      </div>
+
+      {/* メインタブ */}
+      <div className="flex rounded-lg border border-gray-200 overflow-hidden mb-5">
         <button
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-          title="generate_picks_report.py を実行して予想を再生成します（数分かかります）"
+          onClick={() => setActiveTab('conditions')}
+          className={`flex-1 px-4 py-2 text-xs font-medium transition-colors ${
+            activeTab === 'conditions'
+              ? 'bg-emerald-600 text-white'
+              : 'bg-white text-gray-600 hover:bg-gray-50'
+          }`}
         >
-          <span className={refreshing ? 'animate-spin' : ''}>↻</span>
-          {refreshing ? '再生成中...' : '最新化'}
+          条件ベース推奨
+        </button>
+        <button
+          onClick={() => setActiveTab('ai')}
+          className={`flex-1 px-4 py-2 text-xs font-medium transition-colors ${
+            activeTab === 'ai'
+              ? 'bg-blue-600 text-white'
+              : 'bg-white text-gray-600 hover:bg-gray-50'
+          }`}
+        >
+          AI推奨 (v1×opp)
         </button>
       </div>
 
-      {/* エラーバナー（データ表示中のエラー） */}
-      {error && (
+      {/* エラーバナー */}
+      {activeTab === 'conditions' && error && (
         <div className="mb-4 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
           {error}
         </div>
       )}
-
-      {/* サマリーバッジ */}
-      <div className="flex flex-wrap gap-2 mb-5">
-        {[
-          { key: 'S',     label: '一押し',  cls: 'bg-red-100 text-red-800' },
-          { key: 'B',     label: '二押し',  cls: 'bg-orange-100 text-orange-800' },
-          { key: 'anaba', label: '穴推奨',  cls: 'bg-purple-100 text-purple-800' },
-          { key: 'other', label: '三押し暫定', cls: 'bg-gray-100 text-gray-700' },
-        ].map(({ key, label, cls }) => (
-          <span key={key} className={`px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>
-            {label} {data.stats[key] ?? 0}R
-          </span>
-        ))}
-        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
-          合計 {data.stats.total ?? 0}R
-        </span>
-      </div>
-
-      {/* コントロールバー */}
-      <div className="flex items-center gap-3 mb-5 flex-wrap">
-        {/* 馬場タブ */}
-        <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-          {BABA_TABS.map(b => (
-            <button
-              key={b}
-              onClick={() => setBaba(b)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                baba === b
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-white text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              {b}
-            </button>
-          ))}
+      {activeTab === 'ai' && aiError && (
+        <div className="mb-4 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+          {aiError}
         </div>
+      )}
 
-        {/* 表示切替 */}
-        <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={showAll}
-            onChange={e => setShowAll(e.target.checked)}
-            className="rounded"
-          />
-          除外馬も表示
-        </label>
-      </div>
+      {/* 条件ベース推奨タブ */}
+      {activeTab === 'conditions' && data && (
+        <>
+          {/* サマリーバッジ */}
+          <div className="flex flex-wrap gap-2 mb-5">
+            {[
+              { key: 'S',     label: '一押し',  cls: 'bg-red-100 text-red-800' },
+              { key: 'B',     label: '二押し',  cls: 'bg-orange-100 text-orange-800' },
+              { key: 'anaba', label: '穴推奨',  cls: 'bg-purple-100 text-purple-800' },
+              { key: 'other', label: '三押し暫定', cls: 'bg-gray-100 text-gray-700' },
+            ].map(({ key, label, cls }) => (
+              <span key={key} className={`px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>
+                {label} {data.stats[key] ?? 0}R
+              </span>
+            ))}
+            <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+              合計 {data.stats.total ?? 0}R
+            </span>
+          </div>
 
-      {/* レースカード一覧（日付グループ） */}
-      {grouped.map(([dateKey, races]) => (
-        <section key={dateKey} className="mb-6">
-          <h2 className="text-sm font-bold text-gray-500 mb-3 pb-1 border-b border-gray-200">
-            {formatDate(dateKey)}
-          </h2>
-          {races.map(race => (
-            <RaceCard key={race.race_id} race={race} showAll={showAll} baba={baba} />
+          {/* コントロールバー */}
+          <div className="flex items-center gap-3 mb-5 flex-wrap">
+            <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+              {BABA_TABS.map(b => (
+                <button
+                  key={b}
+                  onClick={() => setBaba(b)}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                    baba === b
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {b}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showAll}
+                onChange={e => setShowAll(e.target.checked)}
+                className="rounded"
+              />
+              除外馬も表示
+            </label>
+          </div>
+
+          {/* レースカード一覧 */}
+          {grouped.map(([dateKey, races]) => (
+            <section key={dateKey} className="mb-6">
+              <h2 className="text-sm font-bold text-gray-500 mb-3 pb-1 border-b border-gray-200">
+                {formatDate(dateKey)}
+              </h2>
+              {races.map(race => (
+                <RaceCard key={race.race_id} race={race} showAll={showAll} baba={baba} />
+              ))}
+            </section>
           ))}
-        </section>
-      ))}
+          {grouped.length === 0 && (
+            <p className="text-center text-gray-400 text-sm py-12">表示対象のレースがありません。</p>
+          )}
+        </>
+      )}
 
-      {grouped.length === 0 && (
-        <p className="text-center text-gray-400 text-sm py-12">表示対象のレースがありません。</p>
+      {/* AI推奨タブ */}
+      {activeTab === 'ai' && (
+        <>
+          {aiLoading && (
+            <p className="text-center text-gray-400 text-sm py-8">AI推奨データ読み込み中...</p>
+          )}
+          {!aiLoading && (!aiData || aiRaces.length === 0) && (
+            <div className="text-center py-12 space-y-3">
+              <p className="text-gray-400 text-sm">AI推奨データが未生成です。</p>
+              <button
+                onClick={handleAIRefresh}
+                disabled={aiRefreshing}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {aiRefreshing ? '生成中（数分かかります）...' : 'AI推奨を生成する'}
+              </button>
+            </div>
+          )}
+          {!aiLoading && aiRaces.length > 0 && (
+            <>
+              <div className="mb-4 flex items-center gap-2 flex-wrap">
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">
+                  対象レース {aiRaces.length}R
+                </span>
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+                  v1×opponent_v3 α=0.5
+                </span>
+              </div>
+              {aiRaces.map(race => (
+                <AIRaceCard key={race.race_id} race={race} />
+              ))}
+            </>
+          )}
+        </>
       )}
     </div>
   )

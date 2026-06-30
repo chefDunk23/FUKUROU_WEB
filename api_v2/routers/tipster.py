@@ -501,3 +501,62 @@ def post_refresh_picks():
             pass
 
     return {"status": "ok", "generated_at": None, "stats": {}, "race_count": 0}
+
+
+# ── AI推奨 (v1 × opponent_v3 アンサンブル) ────────────────────────────────────
+
+_AI_PICKS_CACHE = _ROOT / "data" / "output" / "tipster" / "ai_picks.json"
+_AI_PICKS_SCRIPT = _ROOT / "scripts" / "generate_ai_picks.py"
+
+
+@router.get("/ai-picks")
+def get_ai_picks():
+    """ai_picks.json を返す。ファイルが存在しない場合は空レスポンス。"""
+    if not _AI_PICKS_CACHE.exists():
+        return {"generated_at": None, "race_data": [], "target_dates": []}
+    try:
+        return json.loads(_AI_PICKS_CACHE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error("ai_picks.json 読み込みエラー: %s", e)
+        raise HTTPException(500, f"AI推奨データの読み込みに失敗しました: {e}")
+
+
+@router.post("/ai-refresh")
+def post_ai_refresh():
+    """ai_picks.json を再生成する（generate_ai_picks.py を実行）。"""
+    if not _AI_PICKS_SCRIPT.exists():
+        raise HTTPException(500, f"AI推奨生成スクリプトが見つかりません: {_AI_PICKS_SCRIPT}")
+
+    logger.info("AI picks refresh 開始: %s", _AI_PICKS_SCRIPT)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_AI_PICKS_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "AI推奨再生成がタイムアウトしました（10分超過）")
+    except Exception as e:
+        raise HTTPException(500, f"スクリプト実行失敗: {e}")
+
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "")[-800:]
+        logger.error("AI picks refresh 失敗:\n%s", tail)
+        raise HTTPException(500, f"AI推奨再生成エラー: {tail}")
+
+    logger.info("AI picks refresh 完了")
+
+    if _AI_PICKS_CACHE.exists():
+        try:
+            cached = json.loads(_AI_PICKS_CACHE.read_text(encoding="utf-8"))
+            return {
+                "status": "ok",
+                "generated_at": cached.get("generated_at"),
+                "race_count": len(cached.get("race_data", [])),
+            }
+        except Exception:
+            pass
+
+    return {"status": "ok", "generated_at": None, "race_count": 0}
