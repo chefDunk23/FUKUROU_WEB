@@ -114,6 +114,52 @@ def _this_weekend() -> tuple[date, date]:
     return sat, sat + timedelta(days=1)
 
 
+def _resolve_target_dates(target_dates: list[date]) -> list[date]:
+    """
+    指定された日付でレースが存在しない場合、直近の開催日にフォールバックする。
+    v2 DB に対象日のレースがなければ最新 2 開催日を使用する。
+    """
+    with _v2_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM races WHERE race_date = ANY(%s)",
+                ([d for d in target_dates],),
+            )
+            count = int(cur.fetchone()[0])
+
+    if count > 0:
+        log.info("対象日にレースあり: %s", [str(d) for d in target_dates])
+        return target_dates
+
+    log.warning(
+        "対象日 %s にレースなし → 直近の開催日にフォールバック",
+        [str(d) for d in target_dates],
+    )
+    with _v2_conn() as conn:
+        with conn.cursor() as cur:
+            # 今週末以前の直近 2 開催日
+            cutoff = max(target_dates)
+            cur.execute(
+                """
+                SELECT DISTINCT race_date
+                FROM races
+                WHERE race_date <= %s
+                ORDER BY race_date DESC
+                LIMIT 2
+                """,
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        log.error("フォールバック先の開催日も見つかりません")
+        return target_dates
+
+    fallback = sorted([r[0] for r in rows])
+    log.info("フォールバック先: %s", [str(d) for d in fallback])
+    return fallback
+
+
 def _get_upcoming_races(days: list[date]) -> list[dict]:
     """指定日のレース一覧を v2 DB から取得する。"""
     races: list[dict] = []
@@ -156,7 +202,7 @@ def _get_race_entries(race_id: str) -> list[dict]:
                        e.basis_weight, e.jockey_cd, e.age AS horse_age,
                        e.horse_weight, e.trainer_cd, h.sire_id
                 FROM race_entries e
-                LEFT JOIN horses h ON h.id = e.horse_id
+                LEFT JOIN horses h ON h.horse_id = e.horse_id
                 WHERE e.race_id = %s
                 ORDER BY e.umaban
             """, (race_id,))
@@ -279,6 +325,8 @@ def _compute_v1_features(
 
     # 結合: 履歴行 + 予測行
     combined = pd.concat([hist_df, df_pred], ignore_index=True)
+    # race_date が datetime.date / Timestamp 混在で sort できないため統一する
+    combined["race_date"] = pd.to_datetime(combined["race_date"])
     combined = combined.sort_values(["horse_id", "race_id", "umaban"]).reset_index(drop=True)
 
     # LAYER1 + LAYER2 を実行
@@ -343,10 +391,17 @@ def _augment_entries_for_opponent(
 ) -> pd.DataFrame:
     """
     upcoming race の行を df_entries に追加する。
-    shift(1) が正しく prev1/prev2 を参照するために必要。
+    既に df_entries にある (blood_no, race_id) はスキップ（フォールバック時の重複防止）。
     """
+    existing_pairs = set(zip(
+        df_entries["blood_no"].astype(str),
+        df_entries["race_id"].astype(str),
+    ))
     aug_rows = []
     for _, row in df_target.iterrows():
+        key = (str(row["horse_id"]), str(row["race_id"]))
+        if key in existing_pairs:
+            continue
         aug_rows.append({
             "blood_no":           str(row["horse_id"]),
             "race_id":            str(row["race_id"]),
@@ -357,6 +412,8 @@ def _augment_entries_for_opponent(
             "horse_weight":       None,
             "umaban":             None,
         })
+    if not aug_rows:
+        return df_entries
     df_aug = pd.DataFrame(aug_rows)
     return pd.concat([df_entries, df_aug], ignore_index=True)
 
@@ -365,15 +422,20 @@ def _augment_races_for_opponent(
     df_races: pd.DataFrame,
     race_meta: dict,
 ) -> pd.DataFrame:
-    """upcoming race のメタデータを df_races に追加する。"""
+    """
+    upcoming race のメタデータを df_races に追加する。
+    既に df_races にある race_id はスキップ（フォールバック時の重複防止）。
+    """
+    if str(race_meta["race_id"]) in df_races["race_id"].astype(str).values:
+        return df_races
     from pace_bias_ai.opponent_model.features import _vec_class_rank
     new_row = pd.DataFrame([{
-        "race_id":           race_meta["race_id"],
-        "grade_code":        race_meta["grade_code"],
+        "race_id":            race_meta["race_id"],
+        "grade_code":         race_meta["grade_code"],
         "jyoken_cd_youngest": race_meta["joken_cd_youngest"],
-        "distance":          race_meta["distance"],
-        "track_code":        race_meta["track_code"],
-        "keibajo_code":      race_meta["keibajo_code"],
+        "distance":           race_meta["distance"],
+        "track_code":         race_meta["track_code"],
+        "keibajo_code":       race_meta["keibajo_code"],
     }])
     new_row["class_rank"] = _vec_class_rank(
         new_row["grade_code"].fillna(""),
@@ -390,7 +452,10 @@ def _predict_opponent(
 ) -> pd.Series:
     """opponent_v3 モデルで予測して Series を返す。"""
     df_feat = build_opponent_features(df_target, df_entries, df_races)
-    X = df_feat.reindex(columns=OPP_FEATURE_COLS).fillna(df_feat.median(numeric_only=True))
+    X = df_feat.reindex(columns=OPP_FEATURE_COLS)
+    # object 型カラムを数値に強制変換してから NaN 補完する
+    X = X.apply(pd.to_numeric, errors="coerce")
+    X = X.fillna(X.median())
     scores = model.predict(X)
     return pd.Series(scores, index=df_target.index)
 
@@ -533,6 +598,9 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
         sat, sun = _this_weekend()
         target_dates = [sat, sun]
 
+    # DBにデータがなければ直近の開催日にフォールバック
+    target_dates = _resolve_target_dates(target_dates)
+
     log.info("AI推奨生成開始: %s", [str(d) for d in target_dates])
 
     # モデルロード
@@ -652,9 +720,12 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
             "picks":         picks,
         })
 
+    sat, sun = _this_weekend()
+    is_fallback = target_dates != [sat, sun] and target_dates != [sat] and target_dates != [sun]
     result = {
         "generated_at": pd.Timestamp.now().isoformat(),
         "target_dates": [str(d) for d in target_dates],
+        "is_fallback": is_fallback,
         "race_data": race_results,
     }
     _OUTPUT.parent.mkdir(parents=True, exist_ok=True)

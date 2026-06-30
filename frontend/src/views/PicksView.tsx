@@ -47,6 +47,7 @@ interface AIRace {
 interface AIPicksData {
   generated_at: string | null
   target_dates: string[]
+  is_fallback:  boolean
   race_data:    AIRace[]
 }
 
@@ -677,7 +678,9 @@ export default function PicksView() {
           {aiLoading && (
             <p className="text-center text-gray-400 text-sm py-8">AI推奨データ読み込み中...</p>
           )}
-          {!aiLoading && (!aiData || aiRaces.length === 0) && (
+
+          {/* 未生成 (generated_at === null) */}
+          {!aiLoading && (!aiData || aiData.generated_at === null) && (
             <div className="text-center py-12 space-y-3">
               <p className="text-gray-400 text-sm">AI推奨データが未生成です。</p>
               <button
@@ -689,6 +692,23 @@ export default function PicksView() {
               </button>
             </div>
           )}
+
+          {/* 生成済みだがレースなし */}
+          {!aiLoading && aiData && aiData.generated_at !== null && aiRaces.length === 0 && (
+            <div className="text-center py-12 space-y-3">
+              <p className="text-gray-400 text-sm">対象日のレースデータがDBに登録されていません。</p>
+              <p className="text-gray-300 text-xs">対象日: {aiData.target_dates.join(', ') || '—'}</p>
+              <button
+                onClick={handleAIRefresh}
+                disabled={aiRefreshing}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              >
+                {aiRefreshing ? '再生成中...' : '再試行'}
+              </button>
+            </div>
+          )}
+
+          {/* 生成済みでレースあり */}
           {!aiLoading && aiRaces.length > 0 && (
             <>
               <div className="mb-4 flex items-center gap-2 flex-wrap">
@@ -698,6 +718,11 @@ export default function PicksView() {
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
                   v1×opponent_v3 α=0.5
                 </span>
+                {aiData?.is_fallback && (
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">
+                    ※直近開催日 ({aiData.target_dates.join(', ')})
+                  </span>
+                )}
               </div>
               {aiRaces.map(race => (
                 <AIRaceCard key={race.race_id} race={race} />
