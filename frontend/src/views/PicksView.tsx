@@ -137,12 +137,32 @@ const CONF_STYLE: Record<string, string> = {
   C: 'text-gray-300',
 }
 
-// AI推奨: ランク別スタイル（1位=金, 2位=銀, 3位=銅, それ以降=グレー）
-function aiRankStyle(rank: number): { ring: string; badge: string; badgeText: string } {
-  if (rank === 1) return { ring: 'bg-yellow-50 border-l-2 border-yellow-400', badge: 'bg-yellow-500 text-white', badgeText: '1位' }
-  if (rank === 2) return { ring: 'bg-slate-50 border-l-2 border-slate-400',   badge: 'bg-slate-400 text-white',   badgeText: '2位' }
-  if (rank === 3) return { ring: 'bg-orange-50 border-l-2 border-orange-300', badge: 'bg-orange-400 text-white', badgeText: '3位' }
-  return { ring: '', badge: 'bg-gray-200 text-gray-600', badgeText: `${rank}位` }
+// ── 統合推奨ランク ─────────────────────────────────────────────────────────────
+
+type UnifiedRank = '一押し' | '二押し' | '三押し' | '見送り' | null
+
+function computeUnifiedRank(rank: number, conf: 'A' | 'B' | 'C'): UnifiedRank {
+  if (rank === 1 && conf === 'A') return '一押し'
+  if ((rank === 1 && conf === 'B') || (rank === 2 && conf === 'A')) return '二押し'
+  if (rank <= 5 && conf === 'C') return '見送り'
+  if (rank >= 2 && rank <= 5) return '三押し'
+  return null
+}
+
+const UNIFIED_RANK_CONFIG: Record<string, { row: string; badge: string; label: string }> = {
+  '一押し': { row: 'bg-yellow-50 border-l-2 border-yellow-400', badge: 'bg-amber-500 text-white',    label: '一押し' },
+  '二押し': { row: 'bg-slate-50 border-l-2 border-slate-400',   badge: 'bg-slate-400 text-white',    label: '二押し' },
+  '三押し': { row: 'bg-yellow-50/30 border-l-2 border-yellow-100', badge: 'bg-yellow-100 text-yellow-800', label: '三押し' },
+  '見送り': { row: 'border-l border-gray-200',                   badge: 'bg-gray-100 text-gray-400', label: '注意' },
+}
+
+function getRaceTopRecommend(picks: AIPick[]): { pick: AIPick; unified: UnifiedRank } | null {
+  const priority: UnifiedRank[] = ['一押し', '二押し', '三押し']
+  for (const target of priority) {
+    const found = picks.find(p => computeUnifiedRank(p.rank, p.confidence_label) === target)
+    if (found) return { pick: found, unified: target }
+  }
+  return null
 }
 
 // 偏差値 → バー幅（偏差値30〜70 を 0〜100% にマッピング）
@@ -376,12 +396,13 @@ function AIFlagChips({ flags }: { flags: AIFlag }) {
 
 function AIPickRow({ pick }: { pick: AIPick }) {
   const [expanded, setExpanded] = useState(false)
-  const { ring, badge, badgeText } = aiRankStyle(pick.rank)
-  const barWidth  = deviationToBarPct(pick.ai_deviation)
-  const devCls    = deviationTextClass(pick.ai_deviation)
+  const unified  = computeUnifiedRank(pick.rank, pick.confidence_label)
+  const cfg      = unified ? UNIFIED_RANK_CONFIG[unified] : null
+  const barWidth = deviationToBarPct(pick.ai_deviation)
+  const devCls   = deviationTextClass(pick.ai_deviation)
 
   return (
-    <div className={`px-4 py-3 border-b border-gray-100 last:border-0 ${ring}`}>
+    <div className={`px-4 py-3 border-b border-gray-100 last:border-0 ${cfg?.row ?? ''}`}>
       <div className="flex items-start gap-3">
         {/* 馬番 */}
         <span className="w-6 h-6 flex-shrink-0 rounded-full bg-gray-200 text-gray-700 text-xs font-bold flex items-center justify-center">
@@ -389,10 +410,15 @@ function AIPickRow({ pick }: { pick: AIPick }) {
         </span>
 
         <div className="flex-1 min-w-0">
-          {/* 馬名 + ランクバッジ + 自信度 */}
+          {/* 推奨ランク + 順位 + 馬名 + 自信度 */}
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${badge}`}>
-              {badgeText}
+            {cfg && (
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${cfg.badge}`}>
+                {cfg.label}
+              </span>
+            )}
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500">
+              {pick.rank}位
             </span>
             <span className="font-semibold text-sm text-gray-900">{pick.horse_name}</span>
             <span
@@ -414,9 +440,9 @@ function AIPickRow({ pick }: { pick: AIPick }) {
             <span className="text-[9px] text-gray-300">偏差値</span>
           </div>
 
-          {/* 詳細スコア */}
+          {/* 詳細スコア（正規化済み 0-1） */}
           <div className="flex items-center gap-3 mt-0.5 text-[10px] text-gray-400">
-            <span>生スコア {pick.ai_raw.toFixed(3)}</span>
+            <span>blend {pick.ai_raw.toFixed(3)}</span>
             <span>v1 {pick.ai_v1_score.toFixed(3)}</span>
             <span>opp {pick.ai_opp_score.toFixed(3)}</span>
           </div>
@@ -443,10 +469,9 @@ function AIPickRow({ pick }: { pick: AIPick }) {
 }
 
 function AIRaceCard({ race }: { race: AIRace }) {
-  const venue     = KEIBAJO_MAP[race.keibajo_code.padStart(2, '0')] ?? race.keibajo_code
+  const venue      = KEIBAJO_MAP[race.keibajo_code.padStart(2, '0')] ?? race.keibajo_code
   const gradeLabel = race.grade_code ? (GRADE_LABEL[race.grade_code] ?? race.grade_code) : null
-  const confStars  = CONF_STARS[race.top_confidence ?? 'C']
-  const confCls    = CONF_STYLE[race.top_confidence ?? 'C']
+  const topRec     = getRaceTopRecommend(race.picks)
 
   return (
     <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-4 border-l-4 border-blue-600">
@@ -455,14 +480,16 @@ function AIRaceCard({ race }: { race: AIRace }) {
         <span className="text-xs opacity-75 flex-1 truncate min-w-0">{race.race_name}</span>
         <span className="text-xs opacity-75 whitespace-nowrap">{race.surface} {race.distance}m</span>
         <span className="text-xs opacity-60">{race.picks.length}頭</span>
-        {/* 自信度（top pick の自信度）*/}
-        <span
-          className={`text-xs px-1.5 py-0.5 rounded bg-white/20 ${confCls}`}
-          title={`1位馬の自信度: ${race.top_confidence}`}
-        >
-          {confStars}
-        </span>
-        {/* グレードラベル（E→OP特別 等） */}
+        {/* 一押し馬名（あれば表示、なければ「自信あり推奨なし」） */}
+        {topRec ? (
+          <span className="text-xs px-1.5 py-0.5 rounded bg-white/20 font-medium whitespace-nowrap">
+            {topRec.unified}：{topRec.pick.horse_name}（{CONF_STARS[topRec.pick.confidence_label]}）
+          </span>
+        ) : (
+          <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-white/50 whitespace-nowrap">
+            自信あり推奨なし
+          </span>
+        )}
         {gradeLabel && (
           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/20">
             {gradeLabel}
@@ -583,6 +610,18 @@ export default function PicksView() {
   const grouped = groupByDate(sorted)
 
   const aiRaces = aiData?.race_data ?? []
+
+  // 統合推奨ランク集計（レース単位: 各レースの最上位ランクを1件カウント）
+  const unifiedCounts: Record<string, number> = { '一押し': 0, '二押し': 0, '三押し': 0, '見送り': 0 }
+  for (const race of aiRaces) {
+    for (const pick of race.picks) {
+      const u = computeUnifiedRank(pick.rank, pick.confidence_label)
+      if (u && u in unifiedCounts) {
+        unifiedCounts[u]++
+        break
+      }
+    }
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6">
@@ -760,12 +799,20 @@ export default function PicksView() {
           {/* 生成済みでレースあり */}
           {!aiLoading && aiRaces.length > 0 && (
             <>
-              <div className="mb-4 flex items-center gap-2 flex-wrap">
+              {/* 統合推奨ランク集計バッジ */}
+              <div className="flex flex-wrap gap-2 mb-4">
+                {([
+                  ['一押し', 'bg-amber-100 text-amber-800'],
+                  ['二押し', 'bg-slate-100 text-slate-700'],
+                  ['三押し', 'bg-yellow-100 text-yellow-800'],
+                  ['見送り', 'bg-gray-100 text-gray-500'],
+                ] as const).map(([label, cls]) => (
+                  <span key={label} className={`px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>
+                    {label} {unifiedCounts[label]}R
+                  </span>
+                ))}
                 <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">
-                  対象レース {aiRaces.length}R
-                </span>
-                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
-                  v1×opponent_v3 α=0.5
+                  全 {aiRaces.length}R
                 </span>
                 {aiData?.is_fallback && (
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">

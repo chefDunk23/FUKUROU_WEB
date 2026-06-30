@@ -462,15 +462,30 @@ def _predict_opponent(
 
 # ── アンサンブル ──────────────────────────────────────────────────────────────
 
-def _blend_raw(
+def _minmax_within_race(scores: pd.Series) -> pd.Series:
+    """レース内 min-max 正規化（0-1）。全馬同スコアの場合は 0.5 を返す。"""
+    lo, hi = scores.min(), scores.max()
+    if hi > lo:
+        return (scores - lo) / (hi - lo)
+    return pd.Series(0.5, index=scores.index)
+
+
+def _blend_normalized(
     v1_scores: pd.Series,
     opp_scores: pd.Series,
     alpha: float = _ALPHA,
-) -> pd.Series:
-    """α×v1 + (1-α)×opp の生ブレンドスコアを返す（正規化なし）。"""
-    v1 = v1_scores.fillna(v1_scores.median())
-    op = opp_scores.fillna(opp_scores.median())
-    return alpha * v1 + (1 - alpha) * op
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    検証と同じアンサンブル: per-race min-max 正規化 → α×v1_norm + (1-α)×opp_norm。
+
+    Returns: (v1_norm, opp_norm, blend)  ← すべて 0-1 範囲
+    """
+    v1_filled  = v1_scores.fillna(v1_scores.median())
+    opp_filled = opp_scores.fillna(opp_scores.median())
+    v1_norm    = _minmax_within_race(v1_filled)
+    opp_norm   = _minmax_within_race(opp_filled)
+    blend      = alpha * v1_norm + (1 - alpha) * opp_norm
+    return v1_norm, opp_norm, blend
 
 
 def _to_deviation(raw: pd.Series) -> pd.Series:
@@ -535,8 +550,10 @@ def _compute_confidence(
 # ── 全馬スコアリング ──────────────────────────────────────────────────────────
 
 def _score_all_horses(
-    raw_blend: pd.Series,
+    norm_blend: pd.Series,
     deviation: pd.Series,
+    v1_norm: pd.Series,
+    opp_norm: pd.Series,
     flags_df: pd.DataFrame,
     entries: list[dict],
     v1_df: pd.DataFrame,
@@ -549,10 +566,10 @@ def _score_all_horses(
 
     for rank, idx in enumerate(sorted_idx):
         entry = next((e for e in entries if e["horse_id"] == v1_df.loc[idx, "horse_id"]), {})
-        horse_id  = str(v1_df.loc[idx, "horse_id"])
-        umaban    = int(v1_df.loc[idx, "umaban"])
-        dev_score = float(deviation.loc[idx])
-        raw_score = float(raw_blend.loc[idx])
+        horse_id    = str(v1_df.loc[idx, "horse_id"])
+        umaban      = int(v1_df.loc[idx, "umaban"])
+        dev_score   = float(deviation.loc[idx])
+        raw_score   = float(norm_blend.loc[idx])
 
         flags  = flags_df.loc[idx].to_dict() if idx in flags_df.index else {}
         v1_row = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
@@ -581,8 +598,8 @@ def _score_all_horses(
             "horse_id":         horse_id,
             "horse_name":       entry.get("horse_name", ""),
             "umaban":           umaban,
-            "ai_v1_score":      float(v1_df.loc[idx, "_v1_score"] if "_v1_score" in v1_df.columns else 0),
-            "ai_opp_score":     float(opp_df.loc[idx, "_opp_score"] if "_opp_score" in opp_df.columns else 0),
+            "ai_v1_score":      round(float(v1_norm.loc[idx]), 4),
+            "ai_opp_score":     round(float(opp_norm.loc[idx]), 4),
             "ai_raw":           round(raw_score, 4),
             "ai_deviation":     round(dev_score, 1),
             "rank":             rank + 1,
@@ -732,12 +749,12 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
         opp_feat_df = build_opponent_features(df_target_opp, df_ent_aug, df_races_aug)
         opp_feat_df["_opp_score"] = opp_scores_raw.values
 
-        # ── アンサンブル ────────────────────────────────────────────────────
+        # ── アンサンブル（検証と同じ: per-race min-max → ブレンド） ────────
         # v1_scores_raw と opp_scores_raw はインデックスが別々なのでリセット
-        v1_s     = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
-        opp_s    = pd.Series(opp_scores_raw.values, index=range(len(entries)))
-        raw_blend = _blend_raw(v1_s, opp_s)
-        deviation = _to_deviation(raw_blend)
+        v1_s   = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
+        opp_s  = pd.Series(opp_scores_raw.values, index=range(len(entries)))
+        v1_norm, opp_norm, norm_blend = _blend_normalized(v1_s, opp_s)
+        deviation = _to_deviation(norm_blend)
 
         # ── ローテーションフラグ ────────────────────────────────────────────
         df_rot_target = v1_df[["horse_id", "race_id", "race_date", "keibajo_code",
@@ -767,7 +784,8 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
         # ── 全馬スコアリング ────────────────────────────────────────────────
         opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
         picks = _score_all_horses(
-            raw_blend, deviation, flags_df.reset_index(drop=True),
+            norm_blend, deviation, v1_norm, opp_norm,
+            flags_df.reset_index(drop=True),
             entries, v1_df, opp_feat_reindexed, race_meta,
         )
 
