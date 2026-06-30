@@ -53,10 +53,9 @@ LAYER2_FEATURE_COLS: list[str] = [
     "venue_changed",            # 前走と今走で競馬場が異なる (0/1/NaN)
     "surface_changed",          # 芝⇔ダート変更 (0/1/NaN)
     "weight_change",            # 前走との斤量変化量（0.1kg単位）
-    # 市場情報
-    "popularity_norm",          # 人気を (人気-1)/(頭数-1) で正規化 (0=1番人気)
-    "odds_log",                 # log1p(単勝オッズ)
     # 条件変数（LightGBMのカテゴリ変数として使用）
+    # 注: odds_log/popularity_norm は計算されるが市場情報依存を避けるため除外
+    #     → PACE_BIAS_FINAL_QUALITY_CHECK.md の55特徴量構成と一致させる
     "dist_cat",                 # 距離帯: 0=sprint, 1=mile, 2=middle, 3=long
     "surface_code",             # 走路: 0=芝, 1=ダート, 2=障害
     "field_size_norm",          # 出走頭数の正規化 (8頭=0, 18頭=1)
