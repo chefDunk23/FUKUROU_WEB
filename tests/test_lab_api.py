@@ -324,7 +324,7 @@ def test_builtin_conditions_catalog():
 
 
 def test_get_strategies_returns_all(client):
-    """GET /strategies は5戦略すべてを返す。"""
+    """GET /strategies は4戦略すべてを返す。"""
     res = client.get("/api/v2/lab/strategies")
     assert res.status_code == 200
     body = res.json()
@@ -335,8 +335,7 @@ def test_get_strategies_returns_all(client):
     assert "honmei_v7" in ids
     assert "anaba_v5" in ids
     assert "training_tr1" in ids
-    assert "anaba_ai_v1" in ids
-    assert len(strategies) == 5
+    assert len(strategies) == 4
 
 
 def test_get_strategies_s1_has_verified_stats(client):
@@ -370,16 +369,6 @@ def test_get_strategies_training_has_priorities(client):
     priorities = [p["priority"] for p in tr["training_priorities"]]
     assert priorities == sorted(priorities)
 
-
-def test_get_strategies_ai_has_submodels(client):
-    """anaba_ai_v1 には5サブモデルが含まれる。"""
-    res = client.get("/api/v2/lab/strategies")
-    strats = {s["id"]: s for s in res.json()["strategies"]}
-    ai = strats["anaba_ai_v1"]
-    assert "ai_submodels" in ai
-    assert len(ai["ai_submodels"]) == 5
-    total_contribution = sum(m["contribution"] for m in ai["ai_submodels"])
-    assert abs(total_contribution - 1.0) < 0.01
 
 
 def test_copy_strategy_to_experiment(client, tmp_path, monkeypatch):

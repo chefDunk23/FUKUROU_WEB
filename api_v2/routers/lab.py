@@ -414,13 +414,6 @@ _VERIFIED_STATS: dict[str, dict[str, Any]] = {
         "segment": "全会場（坂路/ウッドタイム判定）",
         "source": "training_ranker_config.json",
     },
-    "anaba_ai_v1": {
-        "c_period_roi_all": 0.686,
-        "c_period_roi_78": 0.869,
-        "c_period_place_all": 0.365,
-        "c_period": "2024-07以降",
-        "source": "ANABA_AI_RESULTS.md",
-    },
 }
 
 _STRATEGY_META: list[dict[str, Any]] = [
@@ -428,15 +421,6 @@ _STRATEGY_META: list[dict[str, Any]] = [
     {"id": "honmei_v7",     "file": "honmei_v7.json",   "display_type": "honmei",   "label": "本命条件 v7"},
     {"id": "anaba_v5",      "file": "anaba_v5.json",    "display_type": "anaba",    "label": "穴馬条件 v5"},
     {"id": "training_tr1",  "file": None,                "display_type": "training", "label": "TR-1 調教フィルタ"},
-    {"id": "anaba_ai_v1",   "file": None,                "display_type": "ai",       "label": "穴馬AI v1"},
-]
-
-_AI_SUBMODELS = [
-    {"name": "speed_v1",    "contribution": 0.291},
-    {"name": "aptitude_v1", "contribution": 0.219},
-    {"name": "breed_v1",    "contribution": 0.211},
-    {"name": "human_v1",    "contribution": 0.140},
-    {"name": "form_v1",     "contribution": 0.138},
 ]
 
 
@@ -484,11 +468,6 @@ def get_strategies() -> dict:
             entry["name"] = "TR-1 調教フィルタ"
             entry["version"] = "1.0"
             entry["training_priorities"] = _load_training_priorities()
-
-        if meta["id"] == "anaba_ai_v1":
-            entry["name"] = "穴馬AI v1"
-            entry["version"] = "1.0"
-            entry["ai_submodels"] = _AI_SUBMODELS
 
         strategies.append(entry)
 
