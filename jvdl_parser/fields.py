@@ -112,7 +112,9 @@ RA_FIELDS: list[F] = [
     F("race_name_short_10",  573,  20),
     F("race_name_short_6",   593,  12),
     F("grade_code",          615,   1, _code),
+    F("kyoso_kigo_cd",       616,   3, _code),   # 競走記号コード（牡牝限定等）
     F("kyoso_shubetsu",      617,   2, _code),
+    F("kyoso_joken_cd",      619,   4, _code),   # 競走出走条件コード（クラス候補）
     F("jyoken_cd_2",         623,   3, _code),   # 2歳条件
     F("jyoken_cd_3",         626,   3, _code),   # 3歳条件
     F("jyoken_cd_4",         629,   3, _code),   # 4歳条件

@@ -158,7 +158,7 @@ _HANDLERS: dict[str, _SinkConf] = {
             "race_id", "kaisai_year", "kaisai_monthday", "keibajo_code",
             "kaisai_kai", "kaisai_nichime", "race_num",
             "race_name_hondai", "race_name_short_10", "race_name_short_6",
-            "grade_code", "kyoso_shubetsu",
+            "grade_code", "kyoso_kigo_cd", "kyoso_shubetsu", "kyoso_joken_cd",
             "jyoken_cd_2", "jyoken_cd_3", "jyoken_cd_4", "jyoken_cd_5", "jyoken_cd_youngest",
             "distance", "track_code", "hassou_time",
             "toroku_tosu", "shusso_tosu",

@@ -49,6 +49,10 @@ BIG_DROP_RANKS      = 3   # 3ランク以上格下げ = 叩き台疑惑
 _GRADE_RANK = {'A': 1, 'B': 2, 'C': 3, 'L': 4, 'D': 5}
 _DEFAULT_GRADE_RANK = 6  # 条件戦（None/E等）
 
+# kyoso_joken_cd 末尾2桁 → 条件戦クラスランク（小=上位）
+# 33=1勝クラス, 34=2勝クラス, 44=3勝クラス（条件戦grade_code=NULLのみ）, 31=OP
+_JOKEN_SUFFIX_RANK = {'31': 5, '44': 6, '34': 7, '33': 8}
+
 ROTATION_COLS = [
     'rotation_type',
     'is_genuine',
@@ -63,6 +67,21 @@ def _grade_rank(code) -> int:
     if not code:
         return _DEFAULT_GRADE_RANK
     return _GRADE_RANK.get(str(code).upper(), _DEFAULT_GRADE_RANK)
+
+
+def _full_class_rank(grade_code, kyoso_joken_cd=None) -> int:
+    """grade_code + kyoso_joken_cd の末尾2桁を使ったクラスランク。
+    小さいほど上位: G1=1 ... 3勝=6, 2勝=7, 1勝=8, 未勝利/不明=9
+    """
+    g = str(grade_code).upper() if grade_code else ''
+    if g in _GRADE_RANK:
+        return _GRADE_RANK[g]
+    if kyoso_joken_cd:
+        suffix = str(kyoso_joken_cd)[-2:]
+        rank = _JOKEN_SUFFIX_RANK.get(suffix)
+        if rank is not None:
+            return rank
+    return 9  # 未勝利 or 不明
 
 
 def _venue_side(keibajo_code: str) -> str:
@@ -95,14 +114,14 @@ def build_rotation_flags(
     blood_nos = df_target[horse_id_col].astype(str).unique().tolist()
     log.info("rotation_flag: %d頭の過去走をロード中...", len(blood_nos))
 
-    # 過去走の競馬場・クラスを取得
+    # 過去走の競馬場・クラスを取得（kyoso_joken_cd を含む）
     rows = []
     with engine.connect() as conn:
         for i in range(0, len(blood_nos), 2000):
             chunk = blood_nos[i:i + 2000]
             res = conn.execute(sqlalchemy.text("""
                 SELECT e.blood_no, e.race_id, e.kakutei_chakujun,
-                       r.keibajo_code, r.grade_code
+                       r.keibajo_code, r.grade_code, r.kyoso_joken_cd
                 FROM race_entries_v2 e
                 JOIN races_v2 r ON e.race_id = r.race_id
                 WHERE e.blood_no = ANY(:bns)
@@ -115,6 +134,22 @@ def build_rotation_flags(
     if not hist.empty:
         hist['blood_no'] = hist['blood_no'].astype(str)
         hist['grade_rank'] = hist['grade_code'].apply(_grade_rank)
+        hist['full_class_rank'] = hist.apply(
+            lambda r: _full_class_rank(r['grade_code'], r.get('kyoso_joken_cd')), axis=1
+        )
+
+    # 今走の kyoso_joken_cd を一括取得
+    race_ids = df_target['race_id'].astype(str).unique().tolist()
+    cur_joken_map: dict[str, str | None] = {}
+    with engine.connect() as conn:
+        for i in range(0, len(race_ids), 2000):
+            chunk = race_ids[i:i + 2000]
+            res = conn.execute(sqlalchemy.text("""
+                SELECT race_id, kyoso_joken_cd FROM races_v2
+                WHERE race_id = ANY(:rids)
+            """), {"rids": chunk}).fetchall()
+            for r in res:
+                cur_joken_map[r.race_id] = r.kyoso_joken_cd
 
     results = []
     for _, row in df_target.iterrows():
@@ -188,11 +223,20 @@ def build_rotation_flags(
             class_vs_best = np.nan
 
         # ─── won_and_classup ──────────────────────────────────────────────
-        # 前走1着 + 今走が昇級（class_drop > 0 = 今走が格上）
+        # 前走1着 + 今走が昇級（grade_code + kyoso_joken_cd 両方を使ったフルランク比較）
+        cur_joken = cur_joken_map.get(cur_race_id)
+        cur_full_rank  = _full_class_rank(
+            row.get('cur_grade_code') or row.get('grade_code'), cur_joken
+        )
+        if not past.empty and 'full_class_rank' in past.columns:
+            prev_full_rank = past.iloc[-1]['full_class_rank']
+        else:
+            prev_full_rank = _full_class_rank(row.get('prev_grade_code'))
+        class_drop_full = prev_full_rank - cur_full_rank  # 正=昇級（前走ランク大→今走ランク小）
         won_and_classup = int(
             pd.notna(prev_chaku) and
             prev_chaku == 1 and
-            class_drop > 0  # 前走より今走の格ランクが高い（数字小=格高）
+            class_drop_full > 0
         )
 
         results.append({
