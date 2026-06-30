@@ -2,6 +2,9 @@
 
 individual SHAP 値と特徴量値を受け取り、
 「なぜこの馬が来そうか」を日本語のストーリーとして返す。
+
+v1（展開×バイアスAI）+ opponent_v3 の両側面と条件フラグを統合して
+人間が読める説明文を生成する。
 """
 from __future__ import annotations
 
@@ -54,6 +57,95 @@ class HorseExplanation:
             lines.append(f"  {i}. {sign} {e.description}")
         if self.summary:
             lines.append(f"\n  ▶ {self.summary}")
+        return "\n".join(lines)
+
+    def to_full_report(
+        self,
+        horse_name: str = "",
+        opp_row: "pd.Series | None" = None,
+        flags: "dict | None" = None,
+        ninki: int | None = None,
+    ) -> str:
+        """
+        v1 + opponent + 条件フラグを統合した完全な推奨理由レポートを生成する。
+
+        Args:
+            horse_name: 馬名
+            opp_row: opponent_v3 の特徴量 Series（competitiveness_score 等）
+            flags: 条件フラグ dict（is_genuine, is_step, long_rest 等）
+            ninki: 人気（tansho_ninki）
+        """
+        import pandas as pd
+        lines = []
+        name_txt = f"「{horse_name}」" if horse_name else f"馬番{self.umaban}番"
+        lines.append(f"◆ {name_txt}（馬番{self.umaban}番）を推奨します。")
+        if ninki:
+            lines.append(f"   人気: {ninki}番人気 / アンサンブルスコア: {self.ai_score:.3f}")
+        lines.append("")
+
+        # ── v1側の根拠 ──────────────────────────────────────────────────────
+        lines.append("[展開×バイアスAI（v1）]")
+        v1_items = [e for e in self.top_explanations if e.positive][:3]
+        v1_neg   = [e for e in self.top_explanations if not e.positive][:1]
+        for e in v1_items:
+            lines.append(f"  ▲ {e.description}")
+        for e in v1_neg:
+            lines.append(f"  ▽ {e.description}")
+        lines.append("")
+
+        # ── opponent側の根拠 ─────────────────────────────────────────────────
+        lines.append("[対戦相手レベル（opponent_v3）]")
+        if opp_row is not None:
+            _s = lambda k, default="—": (
+                f"{opp_row[k]:.2f}" if k in opp_row.index and pd.notna(opp_row[k]) else default
+            )
+            cs = opp_row.get('competitiveness_score', float('nan'))
+            p2_rate = opp_row.get('prev2_opp_top3_rate', float('nan'))
+            class_up = opp_row.get('class_up', 0)
+            class_down = opp_row.get('class_down', 0)
+
+            if pd.notna(cs):
+                cs_txt = "高い（前々走の相手が強い）" if cs > 0.5 else "標準"
+                lines.append(f"  競争力スコア   : {cs:.2f}（{cs_txt}）")
+            if pd.notna(p2_rate):
+                p2_txt = "多い（レベル高い）" if p2_rate > 0.4 else "平均的"
+                lines.append(f"  前々走相手強度 : 次走3着以内率 {p2_rate:.1%}（{p2_txt}）")
+            class_txt = "昇級戦（格上に注意）" if class_up else ("格下げ（叩き直し）" if class_down else "同格で出走")
+            lines.append(f"  クラス変動     : {class_txt}")
+        else:
+            lines.append("  opponent情報なし")
+        lines.append("")
+
+        # ── 条件フラグ ──────────────────────────────────────────────────────
+        lines.append("[条件フラグ]")
+        if flags:
+            pos_list, neg_list = [], []
+            flag_labels = {
+                'prev2_good':    ('✅ 2走前3着以内',           True),
+                'is_genuine':    ('✅ 本気ローテ（中2〜4週）',  True),
+                'is_step':       ('⚠ 叩き台疑惑',              False),
+                'long_rest':     ('⚠ 90日以上休養明け',        False),
+                'transport_flag':('⚠ 輸送（東⇔西）',          False),
+                'won_and_classup':('⚠ 前走1着→昇級（相手強化）', False),
+                'aged_horse':    ('⚠ 7歳以上',                False),
+                'excuse_grade':  ('ℹ G1/G2帰り大敗（度外視候補）', True),
+                'excuse_pace':   ('ℹ 先行大敗×前々走好走（度外視候補）', True),
+            }
+            for fkey, (flabel, is_pos) in flag_labels.items():
+                v = flags.get(fkey, float('nan'))
+                if pd.isna(v) or v != 1: continue
+                (pos_list if is_pos else neg_list).append(flabel)
+            for item in pos_list:
+                lines.append(f"  {item}")
+            for item in neg_list:
+                lines.append(f"  {item}")
+            if not pos_list and not neg_list:
+                lines.append("  特になし（ニュートラル）")
+        else:
+            lines.append("  フラグ情報なし")
+
+        lines.append("")
+        lines.append(f"▶ {self.summary}")
         return "\n".join(lines)
 
 

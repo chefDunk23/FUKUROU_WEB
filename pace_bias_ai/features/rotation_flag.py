@@ -55,6 +55,7 @@ ROTATION_COLS = [
     'is_step',
     'transport_flag',
     'class_vs_best',
+    'won_and_classup',
 ]
 
 
@@ -186,12 +187,21 @@ def build_rotation_flags(
         else:
             class_vs_best = np.nan
 
+        # ─── won_and_classup ──────────────────────────────────────────────
+        # 前走1着 + 今走が昇級（class_drop > 0 = 今走が格上）
+        won_and_classup = int(
+            pd.notna(prev_chaku) and
+            prev_chaku == 1 and
+            class_drop > 0  # 前走より今走の格ランクが高い（数字小=格高）
+        )
+
         results.append({
             'rotation_type': rotation_type,
             'is_genuine': is_genuine,
             'is_step': is_step,
             'transport_flag': transport_flag,
             'class_vs_best': class_vs_best,
+            'won_and_classup': won_and_classup,
         })
 
     return pd.DataFrame(results, index=df_target.index)
