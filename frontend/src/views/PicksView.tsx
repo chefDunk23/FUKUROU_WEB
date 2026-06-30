@@ -20,28 +20,32 @@ interface AIFlag {
 }
 
 interface AIPick {
-  horse_id:     string
-  horse_name:   string
-  umaban:       number
-  ai_v1_score:  number
-  ai_opp_score: number
-  ai_ensemble:  number
-  rank:         number
-  flags:        AIFlag
-  explanation:  string
+  horse_id:         string
+  horse_name:       string
+  umaban:           number
+  ai_v1_score:      number
+  ai_opp_score:     number
+  ai_raw:           number
+  ai_deviation:     number
+  rank:             number
+  confidence_score: number
+  confidence_label: 'A' | 'B' | 'C'
+  flags:            AIFlag
+  explanation:      string
 }
 
 interface AIRace {
-  race_id:      string
-  race_name:    string
-  race_date:    string
-  keibajo_code: string
-  race_num:     number
-  distance:     number
-  surface:      string
-  grade_code:   string
-  field_size:   number
-  picks:        AIPick[]
+  race_id:        string
+  race_name:      string
+  race_date:      string
+  keibajo_code:   string
+  race_num:       number
+  distance:       number
+  surface:        string
+  grade_code:     string | null
+  field_size:     number
+  top_confidence: 'A' | 'B' | 'C'
+  picks:          AIPick[]
 }
 
 interface AIPicksData {
@@ -119,12 +123,38 @@ const KEIBAJO_MAP: Record<string, string> = {
   '09': '阪神', '10': '小倉',
 }
 
+// grade_code → 表示ラベル（JRA JVDL コード準拠）
+const GRADE_LABEL: Record<string, string> = {
+  'A': 'GI', 'B': 'GII', 'C': 'GIII', 'D': '重賞', 'L': 'L',
+  'E': 'OP特別', 'F': 'OP', 'G': 'J-GI', 'H': '国際',
+}
+
+// 自信度ラベル → 星表示
+const CONF_STARS: Record<string, string> = { A: '★★★', B: '★★', C: '★' }
+const CONF_STYLE: Record<string, string> = {
+  A: 'text-yellow-600 font-bold',
+  B: 'text-gray-500 font-medium',
+  C: 'text-gray-300',
+}
+
 // AI推奨: ランク別スタイル（1位=金, 2位=銀, 3位=銅, それ以降=グレー）
 function aiRankStyle(rank: number): { ring: string; badge: string; badgeText: string } {
-  if (rank === 1) return { ring: 'bg-yellow-50 border-l-2 border-yellow-400', badge: 'bg-yellow-400 text-white', badgeText: '1位' }
-  if (rank === 2) return { ring: 'bg-gray-50 border-l-2 border-gray-400',   badge: 'bg-gray-400 text-white',   badgeText: '2位' }
+  if (rank === 1) return { ring: 'bg-yellow-50 border-l-2 border-yellow-400', badge: 'bg-yellow-500 text-white', badgeText: '1位' }
+  if (rank === 2) return { ring: 'bg-slate-50 border-l-2 border-slate-400',   badge: 'bg-slate-400 text-white',   badgeText: '2位' }
   if (rank === 3) return { ring: 'bg-orange-50 border-l-2 border-orange-300', badge: 'bg-orange-400 text-white', badgeText: '3位' }
   return { ring: '', badge: 'bg-gray-200 text-gray-600', badgeText: `${rank}位` }
+}
+
+// 偏差値 → バー幅（偏差値30〜70 を 0〜100% にマッピング）
+function deviationToBarPct(dev: number): string {
+  return `${Math.min(100, Math.max(0, ((dev - 30) / 40) * 100)).toFixed(0)}%`
+}
+
+// 偏差値の強調クラス（60以上=青太字, 55以上=青, それ以下=グレー）
+function deviationTextClass(dev: number): string {
+  if (dev >= 60) return 'text-blue-700 font-bold'
+  if (dev >= 55) return 'text-blue-600'
+  return 'text-gray-500'
 }
 
 const BABA_TABS = ['良', '稍重', '重', '不良'] as const
@@ -347,9 +377,8 @@ function AIFlagChips({ flags }: { flags: AIFlag }) {
 function AIPickRow({ pick }: { pick: AIPick }) {
   const [expanded, setExpanded] = useState(false)
   const { ring, badge, badgeText } = aiRankStyle(pick.rank)
-  const pct = (pick.ai_ensemble * 100).toFixed(1)
-  // スコアバーの幅: ensemble は 0〜1
-  const barWidth = `${Math.round(pick.ai_ensemble * 100)}%`
+  const barWidth  = deviationToBarPct(pick.ai_deviation)
+  const devCls    = deviationTextClass(pick.ai_deviation)
 
   return (
     <div className={`px-4 py-3 border-b border-gray-100 last:border-0 ${ring}`}>
@@ -360,26 +389,34 @@ function AIPickRow({ pick }: { pick: AIPick }) {
         </span>
 
         <div className="flex-1 min-w-0">
+          {/* 馬名 + ランクバッジ + 自信度 */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${badge}`}>
               {badgeText}
             </span>
             <span className="font-semibold text-sm text-gray-900">{pick.horse_name}</span>
+            <span
+              className={`text-[11px] ${CONF_STYLE[pick.confidence_label]}`}
+              title={`自信度${pick.confidence_label}（スコア: ${pick.confidence_score}）`}
+            >
+              {CONF_STARS[pick.confidence_label]}
+            </span>
           </div>
 
-          {/* スコアバー */}
+          {/* 偏差値バー */}
           <div className="mt-1.5 flex items-center gap-2">
             <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full bg-blue-500"
-                style={{ width: barWidth }}
-              />
+              <div className="h-full rounded-full bg-blue-500" style={{ width: barWidth }} />
             </div>
-            <span className="text-[11px] font-bold text-blue-700 w-8 text-right">{pct}</span>
+            <span className={`text-[11px] w-10 text-right tabular-nums ${devCls}`}>
+              {pick.ai_deviation.toFixed(1)}
+            </span>
+            <span className="text-[9px] text-gray-300">偏差値</span>
           </div>
 
           {/* 詳細スコア */}
           <div className="flex items-center gap-3 mt-0.5 text-[10px] text-gray-400">
+            <span>生スコア {pick.ai_raw.toFixed(3)}</span>
             <span>v1 {pick.ai_v1_score.toFixed(3)}</span>
             <span>opp {pick.ai_opp_score.toFixed(3)}</span>
           </div>
@@ -406,17 +443,29 @@ function AIPickRow({ pick }: { pick: AIPick }) {
 }
 
 function AIRaceCard({ race }: { race: AIRace }) {
-  const venue = KEIBAJO_MAP[race.keibajo_code.padStart(2, '0')] ?? race.keibajo_code
+  const venue     = KEIBAJO_MAP[race.keibajo_code.padStart(2, '0')] ?? race.keibajo_code
+  const gradeLabel = race.grade_code ? (GRADE_LABEL[race.grade_code] ?? race.grade_code) : null
+  const confStars  = CONF_STARS[race.top_confidence ?? 'C']
+  const confCls    = CONF_STYLE[race.top_confidence ?? 'C']
+
   return (
     <div className="bg-white rounded-xl shadow-sm overflow-hidden mb-4 border-l-4 border-blue-600">
-      <div className="px-4 py-3 flex items-center gap-3 bg-blue-700 text-white">
+      <div className="px-4 py-3 flex items-center gap-2 bg-blue-700 text-white flex-wrap">
         <span className="text-sm font-bold">{venue} {race.race_num}R</span>
-        <span className="text-xs opacity-75 flex-1 truncate">{race.race_name}</span>
-        <span className="text-xs opacity-75">{race.surface} {race.distance}m</span>
+        <span className="text-xs opacity-75 flex-1 truncate min-w-0">{race.race_name}</span>
+        <span className="text-xs opacity-75 whitespace-nowrap">{race.surface} {race.distance}m</span>
         <span className="text-xs opacity-60">{race.picks.length}頭</span>
-        {race.grade_code && (
+        {/* 自信度（top pick の自信度）*/}
+        <span
+          className={`text-xs px-1.5 py-0.5 rounded bg-white/20 ${confCls}`}
+          title={`1位馬の自信度: ${race.top_confidence}`}
+        >
+          {confStars}
+        </span>
+        {/* グレードラベル（E→OP特別 等） */}
+        {gradeLabel && (
           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/20">
-            {race.grade_code}
+            {gradeLabel}
           </span>
         )}
       </div>

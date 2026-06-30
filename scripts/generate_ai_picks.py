@@ -462,52 +462,112 @@ def _predict_opponent(
 
 # ── アンサンブル ──────────────────────────────────────────────────────────────
 
-def _ensemble_and_normalize(
+def _blend_raw(
     v1_scores: pd.Series,
     opp_scores: pd.Series,
     alpha: float = _ALPHA,
 ) -> pd.Series:
-    """α×v1 + (1-α)×opp をレース内 min-max 正規化して返す。"""
+    """α×v1 + (1-α)×opp の生ブレンドスコアを返す（正規化なし）。"""
     v1 = v1_scores.fillna(v1_scores.median())
     op = opp_scores.fillna(opp_scores.median())
-    raw = alpha * v1 + (1 - alpha) * op
-
-    mn, mx = raw.min(), raw.max()
-    if mx > mn:
-        return (raw - mn) / (mx - mn)
-    return pd.Series(0.5, index=raw.index)
+    return alpha * v1 + (1 - alpha) * op
 
 
-# ── ランク・ラベル付与 ────────────────────────────────────────────────────────
+def _to_deviation(raw: pd.Series) -> pd.Series:
+    """レース内偏差値（平均50、標準偏差10）を計算する。"""
+    mu = raw.mean()
+    sigma = raw.std(ddof=0)
+    if sigma > 0:
+        return ((raw - mu) / sigma * 10 + 50).round(1)
+    return pd.Series(50.0, index=raw.index)
+
+
+# ── 自信度計算 ────────────────────────────────────────────────────────────────
+
+def _compute_confidence(
+    flags: dict,
+    race_meta: dict,
+    v1_row: pd.Series,
+) -> tuple[int, str]:
+    """
+    自信度スコアを計算する。
+
+    加点条件:
+      +1 得意セグメント（中距離1600m超 or 長距離 or 東京/函館）
+      +1 本気ローテ（is_genuine == 1）
+      +1 近走好成績（avg_rank_3 ≤ 3.5 を "2走前3着以内" の近似として使用）
+      +1 ネガ条件ゼロ（is_step / won_and_classup / transport_flag 全て非該当）
+
+    減点条件:
+      -1 ネガ条件ごと（is_step / won_and_classup / transport_flag）
+
+    ラベル: A(3以上) / B(1〜2) / C(0以下)
+    """
+    score = 0
+
+    # 得意セグメント判定（レース条件ベース）
+    dist  = int(race_meta.get("distance", 0))
+    venue = str(race_meta.get("keibajo_code", ""))
+    if dist > 1600 or venue in ("05", "02"):
+        score += 1
+
+    # 本気ローテ
+    if flags.get("is_genuine") == 1:
+        score += 1
+
+    # 近走好成績（avg_rank_3 ≤ 3.5 を2走前3着以内の近似として使用）
+    avg_r = v1_row.get("avg_rank_3", np.nan)
+    if not pd.isna(avg_r) and float(avg_r) <= 3.5:
+        score += 1
+
+    # ネガ条件
+    neg_flags = ("is_step", "won_and_classup", "transport_flag")
+    neg_hits = sum(1 for f in neg_flags if flags.get(f) == 1)
+    if neg_hits == 0:
+        score += 1
+    else:
+        score -= neg_hits
+
+    label = "A" if score >= 3 else "B" if score >= 1 else "C"
+    return score, label
+
+
+# ── 全馬スコアリング ──────────────────────────────────────────────────────────
 
 def _score_all_horses(
-    ensemble: pd.Series,
+    raw_blend: pd.Series,
+    deviation: pd.Series,
     flags_df: pd.DataFrame,
     entries: list[dict],
     v1_df: pd.DataFrame,
     opp_df: pd.DataFrame,
+    race_meta: dict,
 ) -> list[dict]:
-    """全馬をアンサンブルスコア順に並べて返す（上位制限なし）。"""
-    sorted_idx = ensemble.sort_values(ascending=False).index
+    """全馬を偏差値降順に並べて返す（上位制限なし）。"""
+    sorted_idx = deviation.sort_values(ascending=False).index
     picks = []
 
     for rank, idx in enumerate(sorted_idx):
         entry = next((e for e in entries if e["horse_id"] == v1_df.loc[idx, "horse_id"]), {})
-        horse_id = str(v1_df.loc[idx, "horse_id"])
-        umaban   = int(v1_df.loc[idx, "umaban"])
-        score    = float(ensemble.loc[idx])
+        horse_id  = str(v1_df.loc[idx, "horse_id"])
+        umaban    = int(v1_df.loc[idx, "umaban"])
+        dev_score = float(deviation.loc[idx])
+        raw_score = float(raw_blend.loc[idx])
 
-        flags = flags_df.loc[idx].to_dict() if idx in flags_df.index else {}
+        flags  = flags_df.loc[idx].to_dict() if idx in flags_df.index else {}
+        v1_row = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
+
+        # 自信度
+        conf_score, conf_label = _compute_confidence(flags, race_meta, v1_row)
 
         # 説明生成（上位3頭のみ）
         explanation_text = ""
         if rank < 3:
-            v1_row  = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
             opp_row = opp_df.loc[idx] if idx in opp_df.index else None
             expl = HorseExplanation(
                 race_id=str(v1_row.get("race_id", "")),
                 umaban=umaban,
-                ai_score=score,
+                ai_score=dev_score,
                 top_explanations=_make_feature_explanations(v1_row),
                 summary=_make_summary(v1_row, flags),
             )
@@ -518,15 +578,18 @@ def _score_all_horses(
             )
 
         picks.append({
-            "horse_id":     horse_id,
-            "horse_name":   entry.get("horse_name", ""),
-            "umaban":       umaban,
-            "ai_v1_score":  float(v1_df.loc[idx, "_v1_score"] if "_v1_score" in v1_df.columns else 0),
-            "ai_opp_score": float(opp_df.loc[idx, "_opp_score"] if "_opp_score" in opp_df.columns else 0),
-            "ai_ensemble":  round(score, 4),
-            "rank":         rank + 1,
-            "flags":        {k: (None if pd.isna(v) else v) for k, v in flags.items()},
-            "explanation":  explanation_text,
+            "horse_id":         horse_id,
+            "horse_name":       entry.get("horse_name", ""),
+            "umaban":           umaban,
+            "ai_v1_score":      float(v1_df.loc[idx, "_v1_score"] if "_v1_score" in v1_df.columns else 0),
+            "ai_opp_score":     float(opp_df.loc[idx, "_opp_score"] if "_opp_score" in opp_df.columns else 0),
+            "ai_raw":           round(raw_score, 4),
+            "ai_deviation":     round(dev_score, 1),
+            "rank":             rank + 1,
+            "confidence_score": conf_score,
+            "confidence_label": conf_label,
+            "flags":            {k: (None if pd.isna(v) else v) for k, v in flags.items()},
+            "explanation":      explanation_text,
         })
 
     return picks
@@ -671,9 +734,10 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
 
         # ── アンサンブル ────────────────────────────────────────────────────
         # v1_scores_raw と opp_scores_raw はインデックスが別々なのでリセット
-        v1_s  = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
-        opp_s = pd.Series(opp_scores_raw.values, index=range(len(entries)))
-        ensemble = _ensemble_and_normalize(v1_s, opp_s)
+        v1_s     = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
+        opp_s    = pd.Series(opp_scores_raw.values, index=range(len(entries)))
+        raw_blend = _blend_raw(v1_s, opp_s)
+        deviation = _to_deviation(raw_blend)
 
         # ── ローテーションフラグ ────────────────────────────────────────────
         df_rot_target = v1_df[["horse_id", "race_id", "race_date", "keibajo_code",
@@ -703,21 +767,25 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
         # ── 全馬スコアリング ────────────────────────────────────────────────
         opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
         picks = _score_all_horses(
-            ensemble, flags_df.reset_index(drop=True),
-            entries, v1_df, opp_feat_reindexed,
+            raw_blend, deviation, flags_df.reset_index(drop=True),
+            entries, v1_df, opp_feat_reindexed, race_meta,
         )
 
+        # レース内 top pick の自信度をレース単位に持つ
+        top_confidence = picks[0]["confidence_label"] if picks else "C"
+
         race_results.append({
-            "race_id":       race_id,
-            "race_name":     race_meta["race_name"],
-            "race_date":     race_meta["race_date"],
-            "keibajo_code":  race_meta["keibajo_code"],
-            "race_num":      race_meta["race_num"],
-            "distance":      race_meta["distance"],
-            "surface":       "芝" if str(race_meta["track_code"]).startswith("1") else "ダート",
-            "grade_code":    race_meta["grade_code"],
-            "field_size":    len(entries),
-            "picks":         picks,
+            "race_id":        race_id,
+            "race_name":      race_meta["race_name"],
+            "race_date":      race_meta["race_date"],
+            "keibajo_code":   race_meta["keibajo_code"],
+            "race_num":       race_meta["race_num"],
+            "distance":       race_meta["distance"],
+            "surface":        "芝" if str(race_meta["track_code"]).startswith("1") else "ダート",
+            "grade_code":     race_meta["grade_code"],
+            "field_size":     len(entries),
+            "top_confidence": top_confidence,
+            "picks":          picks,
         })
 
     sat, sun = _this_weekend()
