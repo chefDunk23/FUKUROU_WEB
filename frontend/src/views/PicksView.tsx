@@ -27,7 +27,6 @@ interface AIPick {
   ai_opp_score: number
   ai_ensemble:  number
   rank:         number
-  label:        string
   flags:        AIFlag
   explanation:  string
 }
@@ -119,12 +118,12 @@ const KEIBAJO_MAP: Record<string, string> = {
   '09': '阪神', '10': '小倉',
 }
 
-const AI_LABEL_STYLE: Record<string, string> = {
-  '一押し': 'bg-red-600',
-  '二押し': 'bg-orange-500',
-  '三押し': 'bg-yellow-500',
-  '注意':   'bg-gray-500',
-  '穴注意': 'bg-purple-600',
+// AI推奨: ランク別スタイル（1位=金, 2位=銀, 3位=銅, それ以降=グレー）
+function aiRankStyle(rank: number): { ring: string; badge: string; badgeText: string } {
+  if (rank === 1) return { ring: 'bg-yellow-50 border-l-2 border-yellow-400', badge: 'bg-yellow-400 text-white', badgeText: '1位' }
+  if (rank === 2) return { ring: 'bg-gray-50 border-l-2 border-gray-400',   badge: 'bg-gray-400 text-white',   badgeText: '2位' }
+  if (rank === 3) return { ring: 'bg-orange-50 border-l-2 border-orange-300', badge: 'bg-orange-400 text-white', badgeText: '3位' }
+  return { ring: '', badge: 'bg-gray-200 text-gray-600', badgeText: `${rank}位` }
 }
 
 const BABA_TABS = ['良', '稍重', '重', '不良'] as const
@@ -346,31 +345,52 @@ function AIFlagChips({ flags }: { flags: AIFlag }) {
 
 function AIPickRow({ pick }: { pick: AIPick }) {
   const [expanded, setExpanded] = useState(false)
+  const { ring, badge, badgeText } = aiRankStyle(pick.rank)
+  const pct = (pick.ai_ensemble * 100).toFixed(1)
+  // スコアバーの幅: ensemble は 0〜1
+  const barWidth = `${Math.round(pick.ai_ensemble * 100)}%`
+
   return (
-    <div className="px-4 py-3 border-b border-gray-100 last:border-0">
+    <div className={`px-4 py-3 border-b border-gray-100 last:border-0 ${ring}`}>
       <div className="flex items-start gap-3">
+        {/* 馬番 */}
         <span className="w-6 h-6 flex-shrink-0 rounded-full bg-gray-200 text-gray-700 text-xs font-bold flex items-center justify-center">
           {pick.umaban}
         </span>
+
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-semibold text-sm text-gray-900">{pick.horse_name}</span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold text-white ${AI_LABEL_STYLE[pick.label] ?? 'bg-gray-500'}`}>
-              {pick.label}
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${badge}`}>
+              {badgeText}
             </span>
+            <span className="font-semibold text-sm text-gray-900">{pick.horse_name}</span>
           </div>
-          <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-500">
-            <span>AI <strong className="text-blue-700">{(pick.ai_ensemble * 100).toFixed(1)}</strong></span>
+
+          {/* スコアバー */}
+          <div className="mt-1.5 flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full bg-blue-500"
+                style={{ width: barWidth }}
+              />
+            </div>
+            <span className="text-[11px] font-bold text-blue-700 w-8 text-right">{pct}</span>
+          </div>
+
+          {/* 詳細スコア */}
+          <div className="flex items-center gap-3 mt-0.5 text-[10px] text-gray-400">
             <span>v1 {pick.ai_v1_score.toFixed(3)}</span>
             <span>opp {pick.ai_opp_score.toFixed(3)}</span>
           </div>
+
           <AIFlagChips flags={pick.flags} />
+
           {pick.explanation && (
             <button
               onClick={() => setExpanded(v => !v)}
               className="mt-1 text-[10px] text-blue-500 hover:text-blue-700"
             >
-              {expanded ? '▲ 閉じる' : '▼ 推奨理由'}
+              {expanded ? '▲ 閉じる' : '▼ AI評価理由'}
             </button>
           )}
           {expanded && (
@@ -392,6 +412,7 @@ function AIRaceCard({ race }: { race: AIRace }) {
         <span className="text-sm font-bold">{venue} {race.race_num}R</span>
         <span className="text-xs opacity-75 flex-1 truncate">{race.race_name}</span>
         <span className="text-xs opacity-75">{race.surface} {race.distance}m</span>
+        <span className="text-xs opacity-60">{race.picks.length}頭</span>
         {race.grade_code && (
           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/20">
             {race.grade_code}
@@ -401,7 +422,7 @@ function AIRaceCard({ race }: { race: AIRace }) {
       <div>
         {race.picks.map(p => <AIPickRow key={p.horse_id} pick={p} />)}
         {race.picks.length === 0 && (
-          <p className="px-4 py-3 text-sm text-gray-400">推奨馬なし</p>
+          <p className="px-4 py-3 text-sm text-gray-400">スコアデータなし</p>
         )}
       </div>
     </div>

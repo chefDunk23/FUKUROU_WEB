@@ -90,8 +90,6 @@ _V1_FEATURES = [
 
 _JST = ZoneInfo("Asia/Tokyo")
 _ALPHA = 0.5
-_TOP_N = 5
-_RANK_LABELS = ["一押し", "二押し", "三押し", "注意", "穴注意"]
 _HIST_ROWS_PER_HORSE = 15  # 履歴として保持する最大行数（rolling 5走の安全マージン）
 
 
@@ -417,56 +415,42 @@ def _ensemble_and_normalize(
 
 # ── ランク・ラベル付与 ────────────────────────────────────────────────────────
 
-def _assign_labels(
+def _score_all_horses(
     ensemble: pd.Series,
     flags_df: pd.DataFrame,
     entries: list[dict],
     v1_df: pd.DataFrame,
     opp_df: pd.DataFrame,
 ) -> list[dict]:
-    """上位 _TOP_N 頭にラベルを付与して horse pick dict のリストを返す。"""
+    """全馬をアンサンブルスコア順に並べて返す（上位制限なし）。"""
     sorted_idx = ensemble.sort_values(ascending=False).index
-
-    # 穴馬候補: スコア上位だが人気薄（umaban 8番以降 or 低スコアから浮上）
-    mapper = ConditionMapper()
     picks = []
-    label_idx = 0
 
     for rank, idx in enumerate(sorted_idx):
-        if rank >= _TOP_N:
-            break
-
         entry = next((e for e in entries if e["horse_id"] == v1_df.loc[idx, "horse_id"]), {})
         horse_id = str(v1_df.loc[idx, "horse_id"])
         umaban   = int(v1_df.loc[idx, "umaban"])
         score    = float(ensemble.loc[idx])
 
-        # ラベル決定
         flags = flags_df.loc[idx].to_dict() if idx in flags_df.index else {}
-        is_anaba = flags.get("is_step") == 1 or flags.get("won_and_classup") == 1
-        if label_idx < len(_RANK_LABELS) - 1:
-            label = _RANK_LABELS[label_idx]
-        elif is_anaba:
-            label = "穴注意"
-        else:
-            label = "注意"
 
-        # 説明生成
-        v1_row  = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
-        opp_row = opp_df.loc[idx] if idx in opp_df.index else None
-
-        expl = HorseExplanation(
-            race_id=str(v1_row.get("race_id", "")),
-            umaban=umaban,
-            ai_score=score,
-            top_explanations=_make_feature_explanations(v1_row),
-            summary=_make_summary(v1_row, flags),
-        )
-        explanation_text = expl.to_full_report(
-            horse_name=entry.get("horse_name", ""),
-            opp_row=opp_row,
-            flags=flags,
-        )
+        # 説明生成（上位3頭のみ）
+        explanation_text = ""
+        if rank < 3:
+            v1_row  = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
+            opp_row = opp_df.loc[idx] if idx in opp_df.index else None
+            expl = HorseExplanation(
+                race_id=str(v1_row.get("race_id", "")),
+                umaban=umaban,
+                ai_score=score,
+                top_explanations=_make_feature_explanations(v1_row),
+                summary=_make_summary(v1_row, flags),
+            )
+            explanation_text = expl.to_full_report(
+                horse_name=entry.get("horse_name", ""),
+                opp_row=opp_row,
+                flags=flags,
+            )
 
         picks.append({
             "horse_id":     horse_id,
@@ -476,11 +460,9 @@ def _assign_labels(
             "ai_opp_score": float(opp_df.loc[idx, "_opp_score"] if "_opp_score" in opp_df.columns else 0),
             "ai_ensemble":  round(score, 4),
             "rank":         rank + 1,
-            "label":        label,
             "flags":        {k: (None if pd.isna(v) else v) for k, v in flags.items()},
             "explanation":  explanation_text,
         })
-        label_idx += 1
 
     return picks
 
@@ -650,9 +632,9 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
                 index=df_rot_target.index,
             )
 
-        # ── ラベル付与 ──────────────────────────────────────────────────────
+        # ── 全馬スコアリング ────────────────────────────────────────────────
         opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
-        picks = _assign_labels(
+        picks = _score_all_horses(
             ensemble, flags_df.reset_index(drop=True),
             entries, v1_df, opp_feat_reindexed,
         )
