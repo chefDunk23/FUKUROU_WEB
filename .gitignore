@@ -49,11 +49,6 @@ admin_frontend/.vite/
 admin_frontend/.env.local
 admin_frontend/.env.production
 
-# ── owl_video ─────────────────────────────────────────────────────────────────
-owl_video/node_modules/
-owl_video/out/
-owl_video/public/dynamic_data/
-
 # ── OS / エディタ ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

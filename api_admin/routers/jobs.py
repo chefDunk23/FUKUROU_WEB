@@ -31,8 +31,6 @@ _KNOWN_JOB_TYPES = frozenset({
     "merge_v2_submodel_scores",
     "enrich_ability_v3",
     "backtest_strategies_v3",
-    "classic_video_generate_prompt",
-    "classic_video_render",
     "import_bloodline_masters",
     "run_tipster_evaluation",
     "run_tipster_backtest",

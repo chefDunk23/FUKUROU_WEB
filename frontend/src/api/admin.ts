@@ -104,18 +104,6 @@ export const JOB_TYPES: JobType[] = [
     defaultParams: {},
   },
   {
-    id: 'classic_video_generate_prompt',
-    label: '映像プロンプト生成',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
-    id: 'classic_video_render',
-    label: '映像レンダリング',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
     id: 'run_tipster_evaluation',
     label: '予想家評価実行',
     implemented: true,

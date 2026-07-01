@@ -9,10 +9,6 @@ rem    so there is no separate admin frontend anymore)
 rem Does NOT start:
 rem   - job worker (kept non-resident on purpose. After pressing sync
 rem     buttons in the DB admin screen, run worker.bat)
-rem   - V1 video API (port 8001): not used by the current frontend
-rem     (no route calls it anymore). Start it manually only if you
-rem     need the video generation feature:
-rem       py -m uvicorn api_v1.main:app --port 8001 --reload
 rem
 rem If you are editing code and want auto-reload, use dev.bat instead.
 

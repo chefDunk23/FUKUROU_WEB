@@ -19,8 +19,3 @@ python-dotenv>=1.0.0
 apscheduler>=3.10.0
 pytz>=2024.1
 requests>=2.31.0
-
-# ── TTS パイプライン（V1 / api_v1 用）────────────────────────────────────
-# MeCab は OS 依存のため pip ではなく別途インストール
-# pip install mecab-python3  (MeCab 本体が必要)
-# voicevox-core は別途 SDK を参照
