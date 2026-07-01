@@ -11,6 +11,7 @@ api_v2/routers/tipster.py
   P2-A  GET  /api/v2/tipster/log                  SNS出力用ログ一覧（日付指定）
         GET  /api/v2/tipster/weekend               picks_race_data.json を返す
         POST /api/v2/tipster/refresh               picks_race_data.json を再生成
+        GET  /api/v2/tipster/data-freshness         予想対象レースに対するデータ鮮度チェック
 
 tipster/ 配下のロジックは変更しない。
 このルーターは薄いラッパーとして呼び出すだけ。
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 
 from shared.config import DB_V2
 from shared.db.jvdata import get_conn as get_v2_conn
+from shared.db.jvdl import get_conn as get_jvdl_conn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2/tipster", tags=["tipster"])
@@ -560,3 +562,175 @@ def post_ai_refresh():
             pass
 
     return {"status": "ok", "generated_at": None, "race_count": 0}
+
+
+# ── データ鮮度チェック ────────────────────────────────────────────────────────
+# 「同期を飛ばしたまま予想を生成すると古いデータで無警告に生成される」リスクへの対応。
+# 予想生成ロジック（generate_ai_picks.py / generate_picks_report.py）は変更せず、
+# 画面表示用に現在のDB状態を検査するだけの読み取り専用エンドポイント。
+
+_SYNC_WARNING_DAYS  = 3   # この日数以上 JV-Link 同期が無ければ黄色警告
+_SYNC_CRITICAL_DAYS = 7   # この日数以上なら赤警告
+
+
+class FreshnessWarning(BaseModel):
+    level:   str  # "warning" | "critical"
+    code:    str
+    message: str
+
+
+class TableFreshness(BaseModel):
+    max_date:   str | None
+    days_since: int | None
+
+
+class DataFreshnessResponse(BaseModel):
+    checked_at:    str
+    target_dates:  list[str]
+    tables:        dict[str, TableFreshness]
+    warnings:      list[FreshnessWarning]
+    overall_level: str  # "ok" | "warning" | "critical"
+
+
+def _parse_target_dates(target_dates: str | None) -> list[date]:
+    if target_dates:
+        parsed = [date.fromisoformat(d.strip()) for d in target_dates.split(",") if d.strip()]
+        if parsed:
+            return parsed
+    today = date.today()
+    sat = today + timedelta(days=(5 - today.weekday()) % 7)
+    return [sat, sat + timedelta(days=1)]
+
+
+def _overall_level(warnings: list[FreshnessWarning]) -> str:
+    if any(w.level == "critical" for w in warnings):
+        return "critical"
+    if warnings:
+        return "warning"
+    return "ok"
+
+
+@router.get("/data-freshness", response_model=DataFreshnessResponse)
+def get_data_freshness(
+    target_dates: str | None = Query(
+        None, description="カンマ区切り YYYY-MM-DD。省略時は今週末"
+    ),
+):
+    """予想対象レースに対するデータ鮮度をチェックして返す。
+
+    予想生成ロジック自体は変更しない。picks / AI推奨 画面がこのエンドポイントを
+    呼び、同期を飛ばしたまま古いデータで予想が生成されていないかを表示するための
+    読み取り専用チェック。
+    """
+    dates = _parse_target_dates(target_dates)
+
+    warnings: list[FreshnessWarning] = []
+
+    with get_v2_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(race_date) FROM races")
+            races_max = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT MAX(r.race_date)
+                FROM races r JOIN race_entries e ON e.race_id = r.id
+                WHERE e.umaban IS NOT NULL AND e.umaban > 0
+            """)
+            entries_max = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT MAX(r.race_date)
+                FROM races r JOIN race_entries e ON e.race_id = r.id
+                WHERE e.kakutei_chakujun IS NOT NULL
+            """)
+            results_max = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT MAX(r.race_date)
+                FROM races r JOIN race_entries e ON e.race_id = r.id
+                WHERE e.tan_odds IS NOT NULL
+            """)
+            odds_max = cur.fetchone()[0]
+
+            # 予想対象レース日の枠番確定状況
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE e.umaban IS NULL OR e.umaban = 0) AS unconfirmed,
+                    COUNT(*) AS total
+                FROM races r JOIN race_entries e ON e.race_id = r.id
+                WHERE r.race_date = ANY(%s)
+            """, (dates,))
+            row = cur.fetchone()
+            unconfirmed, total = (row[0], row[1]) if row else (0, 0)
+
+    # ── JV-Link 同期ウォーターマーク（最終同期からの経過日数） ──────────────
+    watermark_max: datetime | None = None
+    try:
+        with get_jvdl_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(updated_at) FROM sync_watermark")
+                watermark_max = cur.fetchone()[0]
+    except Exception as e:
+        logger.warning("sync_watermark 取得失敗: %s", e)
+
+    def _days_since_date(d) -> int | None:
+        return (date.today() - d).days if d else None
+
+    days_since_sync = None
+    if watermark_max:
+        now = datetime.now(watermark_max.tzinfo) if watermark_max.tzinfo else datetime.now()
+        days_since_sync = (now - watermark_max).days
+
+    tables: dict[str, TableFreshness] = {
+        "races":        TableFreshness(max_date=str(races_max) if races_max else None,
+                                        days_since=_days_since_date(races_max)),
+        "race_entries": TableFreshness(max_date=str(entries_max) if entries_max else None,
+                                        days_since=_days_since_date(entries_max)),
+        "results":      TableFreshness(max_date=str(results_max) if results_max else None,
+                                        days_since=_days_since_date(results_max)),
+        "odds":         TableFreshness(max_date=str(odds_max) if odds_max else None,
+                                        days_since=_days_since_date(odds_max)),
+        "jvlink_sync":  TableFreshness(
+            max_date=watermark_max.isoformat() if watermark_max else None,
+            days_since=days_since_sync,
+        ),
+    }
+
+    # ── warning 1: 予想対象レースの枠番未確定 ──────────────────────────────
+    if total > 0 and unconfirmed > 0:
+        warnings.append(FreshnessWarning(
+            level="warning",
+            code="umaban_unconfirmed",
+            message=f"⚠️ 枠順未確定（{unconfirmed}/{total}頭）。脚質・隊列予想の精度が下がります",
+        ))
+
+    # ── warning 2: 対象レース日より前の確定成績が未取り込み ────────────────
+    min_target = min(dates)
+    if races_max and races_max < min_target and (not results_max or results_max < races_max):
+        lag_days = (races_max - results_max).days if results_max else None
+        level = "critical" if (lag_days is None or lag_days >= _SYNC_WARNING_DAYS) else "warning"
+        warnings.append(FreshnessWarning(
+            level=level,
+            code="results_not_synced",
+            message=(
+                f"⚠️ 直近の成績が未同期（レース情報は{races_max}まで、"
+                f"確定成績は{results_max or '未取得'}まで）。対戦相手データが古い可能性"
+            ),
+        ))
+
+    # ── warning 3: JV-Link同期から一定期間経過 ──────────────────────────────
+    if days_since_sync is not None and days_since_sync >= _SYNC_WARNING_DAYS:
+        level = "critical" if days_since_sync >= _SYNC_CRITICAL_DAYS else "warning"
+        warnings.append(FreshnessWarning(
+            level=level,
+            code="sync_stale",
+            message=f"⚠️ 最終同期から{days_since_sync}日経過。JV-Link同期を推奨",
+        ))
+
+    return DataFreshnessResponse(
+        checked_at=datetime.now().isoformat(),
+        target_dates=[str(d) for d in dates],
+        tables=tables,
+        warnings=warnings,
+        overall_level=_overall_level(warnings),
+    )

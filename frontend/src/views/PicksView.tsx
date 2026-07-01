@@ -55,6 +55,26 @@ interface AIPicksData {
   race_data:    AIRace[]
 }
 
+// データ鮮度チェック用型（GET /api/v2/tipster/data-freshness）
+interface FreshnessWarning {
+  level:   'warning' | 'critical'
+  code:    string
+  message: string
+}
+
+interface TableFreshness {
+  max_date:   string | null
+  days_since: number | null
+}
+
+interface DataFreshness {
+  checked_at:    string
+  target_dates:  string[]
+  tables:        Record<string, TableFreshness>
+  warnings:      FreshnessWarning[]
+  overall_level: 'ok' | 'warning' | 'critical'
+}
+
 interface Condition {
   id:     string
   label:  string
@@ -506,6 +526,71 @@ function AIRaceCard({ race }: { race: AIRace }) {
   )
 }
 
+// ── データ鮮度バナー ──────────────────────────────────────────────────────────
+// 同期を飛ばしたまま予想が生成されていないかを表示する（表示のみ、予想ロジックには影響しない）
+
+const FRESHNESS_STYLE: Record<DataFreshness['overall_level'], { cls: string; icon: string; label: string }> = {
+  ok:       { cls: 'bg-emerald-50 border-emerald-200 text-emerald-800', icon: '🟢', label: 'データ最新' },
+  warning:  { cls: 'bg-amber-50 border-amber-200 text-amber-800',       icon: '🟡', label: '一部データが古い可能性' },
+  critical: { cls: 'bg-red-50 border-red-200 text-red-800',             icon: '🔴', label: '同期を推奨' },
+}
+
+const FRESHNESS_TABLE_LABELS: Record<string, string> = {
+  races:        'レース情報',
+  race_entries: '出馬表(枠番)',
+  results:      '確定成績',
+  odds:         'オッズ',
+  jvlink_sync:  'JV-Link最終同期',
+}
+
+function DataFreshnessBanner() {
+  const [freshness, setFreshness] = useState<DataFreshness | null>(null)
+  const [expanded,  setExpanded]  = useState(false)
+
+  useEffect(() => {
+    apiFetch('/api/v2/tipster/data-freshness')
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: DataFreshness | null) => setFreshness(d))
+      .catch(() => setFreshness(null))
+  }, [])
+
+  if (!freshness) return null
+
+  const style = FRESHNESS_STYLE[freshness.overall_level] ?? FRESHNESS_STYLE.ok
+
+  return (
+    <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${style.cls}`}>
+      <button
+        onClick={() => setExpanded(x => !x)}
+        className="w-full flex items-center justify-between gap-2 text-left"
+      >
+        <span className="font-semibold">{style.icon} {style.label}</span>
+        <span className="text-[10px] opacity-70">{expanded ? '閉じる ▲' : '詳細 ▼'}</span>
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          {freshness.warnings.length > 0 && (
+            <ul className="space-y-1">
+              {freshness.warnings.map(w => (
+                <li key={w.code}>{w.message}</li>
+              ))}
+            </ul>
+          )}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] opacity-80 pt-2 border-t border-current/20">
+            {Object.entries(FRESHNESS_TABLE_LABELS).map(([key, label]) => (
+              <span key={key}>
+                {label}: {freshness.tables[key]?.max_date?.slice(0, 10) ?? '—'}
+                {freshness.tables[key]?.days_since != null && ` (${freshness.tables[key].days_since}日前)`}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── メインビュー ──────────────────────────────────────────────────────────────
 
 type MainTab = 'conditions' | 'ai'
@@ -682,6 +767,9 @@ export default function PicksView() {
           AI推奨 (v1×opp)
         </button>
       </div>
+
+      {/* データ鮮度バナー */}
+      <DataFreshnessBanner />
 
       {/* エラーバナー */}
       {activeTab === 'conditions' && error && (
