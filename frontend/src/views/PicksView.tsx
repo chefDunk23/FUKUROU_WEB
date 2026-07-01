@@ -131,6 +131,8 @@ interface Race {
 
 interface PicksData {
   generated_at: string
+  target_dates?: string[]
+  is_fallback?:  boolean
   stats:        Record<string, number>
   race_data:    Race[]
 }
@@ -236,6 +238,22 @@ function groupByDate(races: Race[]): [string, Race[]][] {
     map.get(key)!.push(r)
   }
   return Array.from(map.entries())
+}
+
+function groupAIByDate(races: AIRace[]): [string, AIRace[]][] {
+  const map = new Map<string, AIRace[]>()
+  for (const r of races) {
+    const key = r.race_date.slice(0, 10)
+    if (!map.has(key)) map.set(key, [])
+    map.get(key)!.push(r)
+  }
+  return Array.from(map.entries())
+}
+
+function formatIsoDate(iso: string): string {
+  const dt = new Date(iso)
+  const DOW = ['日', '月', '火', '水', '木', '金', '土']
+  return `${dt.getMonth() + 1}/${dt.getDate()}（${DOW[dt.getDay()]}）`
 }
 
 // ── サブコンポーネント ─────────────────────────────────────────────────────────
@@ -604,6 +622,7 @@ export default function PicksView() {
   const [aiLoading,     setAILoading]     = useState(true)
   const [refreshing,    setRefreshing]    = useState(false)
   const [aiRefreshing,  setAIRefreshing]  = useState(false)
+  const [downloadingHtml, setDownloadingHtml] = useState(false)
   const [baba,          setBaba]          = useState<Baba>('良')
   const [showAll,       setShowAll]       = useState(false)
   const [activeTab,     setActiveTab]     = useState<MainTab>('conditions')
@@ -659,6 +678,30 @@ export default function PicksView() {
       .then(() => loadAIData())
       .catch((e: unknown) => setAIError(e instanceof Error ? e.message : String(e)))
       .finally(() => setAIRefreshing(false))
+  }
+
+  const handleDownloadHtml = () => {
+    setDownloadingHtml(true)
+    apiFetch('/api/v2/tipster/picks-report-html')
+      .then(async r => {
+        if (!r.ok) {
+          const j = await r.json().catch(() => null)
+          throw new Error(j?.detail ?? `ダウンロード失敗: ${r.status}`)
+        }
+        return r.blob()
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `picks_report_${new Date().toISOString().slice(0, 10)}.html`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        URL.revokeObjectURL(url)
+      })
+      .catch((e: unknown) => alert(e instanceof Error ? e.message : String(e)))
+      .finally(() => setDownloadingHtml(false))
   }
 
   useEffect(() => { loadData(); loadAIData() }, [])
@@ -721,27 +764,37 @@ export default function PicksView() {
               : `AI生成: ${aiData?.generated_at ?? '未生成'}`}
           </p>
         </div>
-        {activeTab === 'conditions' ? (
+        <div className="flex-shrink-0 flex items-center gap-2">
           <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-            title="generate_picks_report.py を実行して予想を再生成します（数分かかります）"
+            onClick={handleDownloadHtml}
+            disabled={downloadingHtml}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            title="表示中の予想レポート（条件ベース+AI推奨）をスタンドアロンHTMLとしてダウンロードします。仲間への共有用。"
           >
-            <span className={refreshing ? 'animate-spin' : ''}>↻</span>
-            {refreshing ? '再生成中...' : '最新化'}
+            ⬇ {downloadingHtml ? '準備中...' : 'HTMLダウンロード'}
           </button>
-        ) : (
-          <button
-            onClick={handleAIRefresh}
-            disabled={aiRefreshing}
-            className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            title="generate_ai_picks.py を実行してAI推奨を再生成します（数分かかります）"
-          >
-            <span className={aiRefreshing ? 'animate-spin' : ''}>↻</span>
-            {aiRefreshing ? '生成中...' : '最新化(AI)'}
-          </button>
-        )}
+          {activeTab === 'conditions' ? (
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+              title="generate_picks_report.py を実行して予想を再生成します（数分かかります）"
+            >
+              <span className={refreshing ? 'animate-spin' : ''}>↻</span>
+              {refreshing ? '再生成中...' : '最新化'}
+            </button>
+          ) : (
+            <button
+              onClick={handleAIRefresh}
+              disabled={aiRefreshing}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              title="generate_ai_picks.py を実行してAI推奨を再生成します（数分かかります）"
+            >
+              <span className={aiRefreshing ? 'animate-spin' : ''}>↻</span>
+              {aiRefreshing ? '生成中...' : '最新化(AI)'}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* メインタブ */}
@@ -801,6 +854,11 @@ export default function PicksView() {
             <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
               合計 {data.stats.total ?? 0}R
             </span>
+            {data.is_fallback && (
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">
+                ※直近開催日 ({(data.target_dates ?? []).join(', ')})
+              </span>
+            )}
           </div>
 
           {/* コントロールバー */}
@@ -908,8 +966,15 @@ export default function PicksView() {
                   </span>
                 )}
               </div>
-              {aiRaces.map(race => (
-                <AIRaceCard key={race.race_id} race={race} />
+              {groupAIByDate(aiRaces).map(([dateKey, races]) => (
+                <section key={dateKey} className="mb-6">
+                  <h2 className="text-sm font-bold text-gray-500 mb-3 pb-1 border-b border-gray-200">
+                    {formatIsoDate(dateKey)}
+                  </h2>
+                  {races.map(race => (
+                    <AIRaceCard key={race.race_id} race={race} />
+                  ))}
+                </section>
               ))}
             </>
           )}

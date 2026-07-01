@@ -53,15 +53,6 @@ from ._race_common import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2", tags=["v2-races"])
 
-# ── 定数 ──────────────────────────────────────────────────────────────────────
-
-_COURSE_TYPE_TO_TRACK_CODE: dict[str, str] = {
-    "芝":    "10",
-    "ダート": "23",   # JV-Data ダート下限; 10-22=芝, 23-29=ダ, 51-59=障
-    "障害":   "51",
-}
-
-
 # ── ヘルパー関数 ──────────────────────────────────────────────────────────────
 
 def _fmt_time(raw: str | None) -> str | None:
@@ -164,30 +155,29 @@ WHERE  race_date = %s
 ORDER  BY keibajo_code, race_num
 """
 
+# 2026-07 修正: 従来 fukurou_jvdl.races/race_entries（JVDLフォーマット・旧スキーマ）を
+# 参照していたが、このテーブルは bulk_ingest_v2 が書き込まなくなって以降更新が
+# 止まっている「旧・未使用」テーブル（2026-06-14で停止）。実際に最新データが
+# 入り続けている races_v2（列名が keiba_v2.races とほぼ同一のため _build_from_v2
+# をそのまま再利用できる）を参照するよう修正した。
 _SQL_JVDL_RACES_BY_DATE = """
 SELECT
-    r.id              AS race_id,
-    r.race_number     AS race_num,
-    r.place_code      AS keibajo_code,
-    COALESCE(NULLIF(TRIM(r.name), ''), '') AS race_name,
-    r.distance,
-    r.course_type,
-    r.grade_code,
-    r.start_time,
-    r.race_type_code,
-    r.jyoken_cd_2,
-    r.jyoken_cd_3,
-    r.jyoken_cd_4,
-    r.jyoken_cd_5,
-    COUNT(e.horse_id) AS syusso_tosu
-FROM   races r
-LEFT   JOIN race_entries e ON e.race_id = r.id
-WHERE  r.date >= %s AND r.date < %s + INTERVAL '1 day'
-GROUP  BY r.id, r.race_number, r.place_code, r.name, r.date,
-          r.distance, r.course_type, r.grade_code, r.start_time,
-          r.race_type_code, r.jyoken_cd_2, r.jyoken_cd_3,
-          r.jyoken_cd_4, r.jyoken_cd_5
-ORDER  BY r.place_code, r.race_number
+    race_id             AS race_id,
+    race_num,
+    keibajo_code,
+    distance,
+    track_code,
+    grade_code,
+    race_name_hondai,
+    race_name_short_10,
+    shusso_tosu         AS syusso_tosu,
+    hassou_time,
+    tenko_code,
+    shiba_baba_code,
+    dirt_baba_code
+FROM   races_v2
+WHERE  LEFT(race_id, 8) = %s
+ORDER  BY keibajo_code, race_num
 """
 
 
@@ -246,42 +236,6 @@ def _build_from_v2(rows: list) -> list[RaceSummary]:
     return summaries
 
 
-def _build_from_jvdl(rows: list) -> list[RaceSummary]:
-    summaries: list[RaceSummary] = []
-    for row in rows:
-        kc          = str(row["keibajo_code"]).strip().zfill(2)
-        course_type = str(row["course_type"] or "").strip()
-        track_code  = _COURSE_TYPE_TO_TRACK_CODE.get(course_type, "10")
-        grade       = str(row["grade_code"]).strip() if row["grade_code"] else None
-        name_raw    = str(row["race_name"]).strip()
-        lbl = _compute_class_label(
-            grade,
-            str(row["race_type_code"] or "").strip() or None,
-            str(row["jyoken_cd_2"] or "").strip() or None,
-            str(row["jyoken_cd_3"] or "").strip() or None,
-            str(row["jyoken_cd_4"] or "").strip() or None,
-            str(row["jyoken_cd_5"] or "").strip() or None,
-            name_raw,
-        )
-        # 名称が空のときはクラスラベルで補完（例: "3歳未勝利"）、それもなければ "NR"
-        display_name = name_raw or lbl or f"{row['race_num']}R"
-        summaries.append(RaceSummary(
-            race_id      = str(row["race_id"]),
-            race_num     = int(row["race_num"]),
-            keibajo_code = kc,
-            keibajo_name = _KEIBAJO_NAME.get(kc, kc),
-            distance     = int(row["distance"]) if row["distance"] else 0,
-            track_code   = track_code,
-            grade_code   = grade,
-            race_name    = display_name,
-            syusso_tosu  = int(row["syusso_tosu"]) if row["syusso_tosu"] else None,
-            hassou_time  = _fmt_time(row.get("start_time")),
-            class_label  = lbl,
-            is_special   = (grade == "E"),
-        ))
-    return summaries
-
-
 # ── エンドポイント ────────────────────────────────────────────────────────────
 
 @router.get("/races", response_model=RaceListResponse)
@@ -301,19 +255,19 @@ def list_races(
     if rows:
         return RaceListResponse(date=str(date), races=_build_from_v2(rows))
 
-    # Step 2: jvdl フォールバック（今週末など未来レース用）
-    logger.info("[V2Races] keiba_v2 に %s のデータなし → jvdl フォールバック", date)
+    # Step 2: jvdl フォールバック（今週末など未来レース用。races_v2 参照）
+    logger.info("[V2Races] keiba_v2 に %s のデータなし → jvdl(races_v2) フォールバック", date)
     try:
         with get_jvdl_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(_SQL_JVDL_RACES_BY_DATE, (date, date))
+                cur.execute(_SQL_JVDL_RACES_BY_DATE, (date.strftime("%Y%m%d"),))
                 jvdl_rows = cur.fetchall()
     except Exception as exc:
         logger.exception("[V2Races] jvdl フォールバック失敗: %s", exc)
         raise HTTPException(status_code=500, detail="データ取得エラーが発生しました")
 
-    logger.info("[V2Races] jvdl から %d レース取得: %s", len(jvdl_rows), date)
-    return RaceListResponse(date=str(date), races=_build_from_jvdl(jvdl_rows))
+    logger.info("[V2Races] jvdl(races_v2) から %d レース取得: %s", len(jvdl_rows), date)
+    return RaceListResponse(date=str(date), races=_build_from_v2(jvdl_rows))
 
 
 class WeekendRacesResponse(BaseModel):
@@ -356,9 +310,9 @@ def _fetch_races_for_date(d: date) -> list[RaceSummary]:
     try:
         with get_jvdl_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(_SQL_JVDL_RACES_BY_DATE, (d, d))
+                cur.execute(_SQL_JVDL_RACES_BY_DATE, (d.strftime("%Y%m%d"),))
                 jvdl_rows = cur.fetchall()
-        return _build_from_jvdl(jvdl_rows)
+        return _build_from_v2(jvdl_rows)
     except Exception as exc:
         logger.warning("[WeekendRaces] jvdl 失敗 %s: %s", d, exc)
         return []

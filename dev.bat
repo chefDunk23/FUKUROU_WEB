@@ -1,38 +1,67 @@
 @echo off
 rem dev.bat
 rem ====================================
-rem 開発用の起動バッチ。コードを編集しながら動作確認したい時に使う
-rem （API・管理APIとも --reload 付きで起動するため、ファイル保存のたびに
-rem   自動再起動する）。
+rem Dev-mode launcher. Use this while actively editing code, since
+rem API + admin API run with --reload (auto-restart on file save).
 rem
-rem 日常運用（開発しない時）は dev.bat ではなく start.bat を使うこと
-rem （--reload なしの方が安定動作する）。
+rem For normal day-to-day use (not actively coding), use start.bat
+rem instead (more stable without --reload).
 
 echo ====================================
-echo  Fukurou - 開発起動 (dev.bat, --reload あり)
+echo  Fukurou - Dev Startup (dev.bat, --reload enabled)
 echo ====================================
 echo.
 
-echo [1/4] 予測API (port 8002, --reload) を起動...
-start "Fukurou-API" cmd /k "cd /d C:\workspace\fukurou_v2_app && py -m uvicorn api_v2.main:app --port 8002 --reload"
+rem chcp 65001 + PYTHONIOENCODING=utf-8 in each spawned window: prevents
+rem garbled Japanese log messages in the Python process consoles.
+
+echo [1/4] Starting Predict API (port 8002, --reload)...
+call :check_port 8002
+if "%PORT_BUSY%"=="1" (
+    echo   -^> Port 8002 is already in use. Skipping ^(already running? close the old window first if not^).
+) else (
+    start "Fukurou-API" cmd /k "chcp 65001 > nul && set PYTHONIOENCODING=utf-8 && cd /d C:\workspace\fukurou_v2_app && py -m uvicorn api_v2.main:app --port 8002 --reload"
+)
 timeout /t 2 /nobreak > nul
 
-echo [2/4] 管理API (port 8003, --reload, localhost only) を起動...
-start "Fukurou-Admin-API" cmd /k "cd /d C:\workspace\fukurou_v2_app && py -m uvicorn api_admin.main:app --host 127.0.0.1 --port 8003 --reload"
+echo [2/4] Starting Admin API (port 8003, --reload, localhost only)...
+call :check_port 8003
+if "%PORT_BUSY%"=="1" (
+    echo   -^> Port 8003 is already in use. Skipping ^(already running? close the old window first if not^).
+) else (
+    start "Fukurou-Admin-API" cmd /k "chcp 65001 > nul && set PYTHONIOENCODING=utf-8 && cd /d C:\workspace\fukurou_v2_app && py -m uvicorn api_admin.main:app --host 127.0.0.1 --port 8003 --reload"
+)
 timeout /t 2 /nobreak > nul
 
-echo [3/4] フロントエンド (port 5173) を起動...
-start "Fukurou-Frontend" cmd /k "cd /d C:\workspace\fukurou_v2_app\frontend && npm run dev"
+echo [3/4] Starting Frontend (port 5173)...
+call :check_port 5173
+if "%PORT_BUSY%"=="1" (
+    echo   -^> Port 5173 is already in use. Skipping ^(vite would otherwise silently switch to 5174^).
+) else (
+    start "Fukurou-Frontend" cmd /k "cd /d C:\workspace\fukurou_v2_app\frontend && npm run dev"
+)
 timeout /t 2 /nobreak > nul
 
-echo [4/4] ジョブワーカーを起動...
-echo   -^> 溜まっているジョブを処理し、新規ジョブなしで2分経過すると自動終了します
-start "Fukurou-Worker" cmd /k "cd /d C:\workspace\fukurou_v2_app && py -m shared.worker.job_runner"
+echo [4/4] Starting job worker...
+echo   -^> Processes queued jobs, then exits automatically after 2 min idle
+start "Fukurou-Worker" cmd /k "chcp 65001 > nul && set PYTHONIOENCODING=utf-8 && cd /d C:\workspace\fukurou_v2_app && py -m shared.worker.job_runner"
 
 echo.
 echo ====================================
-echo  フクロウ AI: http://localhost:5173
-echo  管理 API:    http://localhost:8003 (内部専用)
+echo  Fukurou AI: http://localhost:5173
+echo  Admin API:  http://localhost:8003 (internal only)
 echo ====================================
 echo.
 pause
+exit /b 0
+
+rem :check_port <port>
+rem Sets PORT_BUSY=1 if a process is already LISTENING on the port, else 0.
+rem Prevents double-launching (which either fails with WinError 10048 for
+rem the Python APIs, or makes vite silently jump to the next free port
+rem such as 5174 for the frontend).
+:check_port
+set PORT_BUSY=0
+powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %1 -State Listen -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"
+if errorlevel 1 set PORT_BUSY=1
+exit /b 0

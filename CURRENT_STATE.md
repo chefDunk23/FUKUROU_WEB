@@ -48,9 +48,9 @@
 |---|---|---|---|
 | api_v2(投資用予測API, port 8002) | `api_v2/routers/*`, `deps.py` | **動作確認済み** | `start.bat`起動対象（旧`start_all.bat`）。`verify_api_key`/`_surface_str`/コード変換/`public_races`機密除外がテストで網羅検証済み |
 | api_admin(ジョブ管理API, port 8003, 127.0.0.1限定) | `api_admin/routers/jobs.py`, `health.py` | **動作確認済み** | `docs/deploy.md`に詳細運用手順あり |
-| api_v1(YouTube動画生成API, port 8001, DEV_MODE専用) | `api_v1/routers/*` | **動作確認済み** | ⚠️訂正: 「v2に置き換わった旧版」ではなく**現役で別目的(動画生成)のAPI**。frontendのVideoShortView等から呼ばれる |
-| frontend(ユーザー向けSPA, port 5173) | `frontend/src/*` | **動作確認済み** | 一般ルート(api_v2のみ)とDevDashboard(api_v1+v2)の2系統が共存・稼働 |
-| admin_frontend(管理UI, port 5174) | `admin_frontend/src/*` | **動作確認済み** | api_admin専用、ヘルスダッシュボード+ジョブ管理 |
+| api_v1(YouTube動画生成API, port 8001, DEV_MODE専用) | `api_v1/routers/*` | **未使用（2026-07確認）** | ⚠️再訂正: 「frontendのVideoShortView等から呼ばれる」は誤り（現状frontendに存在しない）。`frontend/src`全体を検索しても`/api/v1`・video関連Viewへの参照はゼロ。`start.bat`の自動起動対象から外した。コード自体は残存（`vite.config.ts`のプロキシ設定も残置）、必要になれば手動起動可 |
+| frontend(ユーザー向けSPA, port 5173) | `frontend/src/*` | **動作確認済み** | 一般ルート(api_v2のみ)。`/admin`（AdminView.tsx）でapi_admin(8003)のヘルスダッシュボード+ジョブ管理も提供（2026-07、旧admin_frontendを統合） |
+| ~~admin_frontend(管理UI, port 5174)~~ | ~~`admin_frontend/src/*`~~ | **削除済み(2026-07)** | 機能はfrontendの`/admin`に統合。5174は廃止 |
 | owl_video(Remotion動画生成) | `owl_video/src/Root.tsx`他 | **動作確認済み** | ClassicVideo/PredictionShort/ReviewShort/RaceReviewPortrait/RaceReviewLandscapeの5コンポジションが現役登録、run.ps1/Makefile経由でCLI実行 |
 | `src/video_generator/`(corner_router/prompt_builder/script_generator) | — | **動作確認済み** | scripts/generate_prompt.py等から現役import |
 | frontend `_test_grade_label.mjs`, `_test_raceStory.mjs` | — | **未確認** | package.jsonに非組み込み、手動実行のロジック検証用。本体TSとの同期状況は未検証 |
@@ -92,8 +92,7 @@ fukurou_v2_app/
 ├── api_v1/            YouTube動画生成API (DEV_MODE専用, port 8001) — 現役、v2とは別目的
 ├── api_v2/             投資用予測API本体 (port 8002) — 本番フロントの主データソース
 ├── api_admin/          ジョブキュー管理用内部API (127.0.0.1限定, port 8003)
-├── frontend/            ユーザー向けSPA (React+Vite+TS)。一般ルート+DevDashboardの2系統
-├── admin_frontend/      api_admin専用の管理UI (ヘルスダッシュボード+ジョブ管理)
+├── frontend/            ユーザー向けSPA (React+Vite+TS)。一般ルート+DevDashboard+/admin(api_admin管理UI)の3系統
 ├── owl_video/           Remotionベース動画レンダリング (CLI実行、api_v1が生成したJSONを消費)
 ├── archive/
 │   └── long_video_project/  凍結済み長尺動画プロジェクト。意図的休眠、参照ゼロ

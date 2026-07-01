@@ -28,10 +28,10 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
-from shared.config import DB_V2
+from shared.config import DB_JVDL, DB_V2
 from shared.db.jvdata import get_conn as get_v2_conn
 from shared.db.jvdl import get_conn as get_jvdl_conn
 
@@ -298,6 +298,44 @@ def get_weekly_overview(target_date: str | None = Query(None)):
     finally:
         conn.close()
 
+    # ── jvdl(races_v2) フォールバック ────────────────────────────────────────────
+    # keiba_v2 にまだ入っていない日（JV-Link同期直後・DB同期前の今週末レース等）を
+    # races_v2 から補完する。races_v2 は fukurou_jvdl 側の改良版スキーマで、
+    # bulk_ingest_v2 が継続的に書き込んでいる（旧・未使用の races/race_entries
+    # とは別テーブル）。
+    covered_dates = {r["race_date"] for r in race_rows}
+    missing_dates = [
+        week_start + timedelta(days=i)
+        for i in range(7)
+        if (week_start + timedelta(days=i)) not in covered_dates
+    ]
+    if missing_dates:
+        try:
+            jconn = psycopg2.connect(**DB_JVDL)
+            try:
+                with jconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT race_id, race_num, keibajo_code, distance,
+                               track_code AS surface,
+                               COALESCE(NULLIF(TRIM(race_name_hondai), ''), race_name_short_10) AS race_name,
+                               shusso_tosu AS head_count
+                        FROM   races_v2
+                        WHERE  LEFT(race_id, 8) = ANY(%s)
+                          AND  keibajo_code ~ '^[0-9]+$' AND keibajo_code::int <= 10
+                        ORDER  BY race_id, keibajo_code, race_num
+                    """, ([d.strftime("%Y%m%d") for d in missing_dates],))
+                    jvdl_rows = cur.fetchall()
+            finally:
+                jconn.close()
+            for row in jvdl_rows:
+                row["race_date"] = datetime.strptime(str(row["race_id"])[:8], "%Y%m%d").date()
+                row["race_num"] = int(row["race_num"])
+            if jvdl_rows:
+                logger.info("[WeeklyOverview] races_v2 フォールバック: %d レース", len(jvdl_rows))
+            race_rows = list(race_rows) + jvdl_rows
+        except Exception as exc:
+            logger.warning("[WeeklyOverview] jvdl フォールバック失敗: %s", exc)
+
     race_ids = [r["race_id"] for r in race_rows]
     race_id_set = set(race_ids)
 
@@ -454,6 +492,29 @@ def get_picks_weekend():
     except Exception as e:
         raise HTTPException(500, f"キャッシュ読み込み失敗: {e}")
     return data
+
+
+# ── 予想レポート（HTMLダウンロード。仲間への共有用）────────────────────────────────
+
+_PICKS_REPORT_HTML = _ROOT / "data" / "output" / "tipster" / "picks_report.html"
+
+
+@router.get("/picks-report-html")
+def get_picks_report_html():
+    """picks_report.html（条件ベース推奨+AI推奨を1ファイルにまとめた静的HTML）を
+    ダウンロード用に返す。generate_picks_report.py の出力をそのまま流用している。"""
+    if not _PICKS_REPORT_HTML.exists():
+        raise HTTPException(
+            404,
+            "picks_report.html が未生成です。「最新化」を一度実行してください。",
+        )
+    html_content = _PICKS_REPORT_HTML.read_text(encoding="utf-8")
+    filename = f"picks_report_{date.today().isoformat()}.html"
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── picks再生成 ──────────────────────────────────────────────────────────────

@@ -271,14 +271,19 @@ def _load_course_master() -> pd.DataFrame:
 # ── DB 照会 SQL ───────────────────────────────────────────────────────────────
 
 # ── jvdl フォールバック SQL（keiba_v2 にデータがない今週末レース用）────────────
+# 2026-07 修正: 従来 fukurou_jvdl.races/race_entries（JVDLフォーマット・旧スキーマ）
+# を参照していたが、このテーブルは bulk_ingest_v2 が書き込まなくなって以降更新が
+# 止まっている「旧・未使用」テーブル（2026-06-14で停止）。実際に最新データが
+# 入り続けている races_v2/race_entries_v2 を参照するよう修正した。
 
 _SQL_JVDL_RACE_ENTRIES = """
 WITH all_confirmed AS (
-    SELECT e.race_id, e.horse_id, r.date AS race_date, e.confirmed_rank AS kakutei_chakujun
-    FROM   race_entries e
-    JOIN   races r ON e.race_id = r.id
-    WHERE  e.confirmed_rank IS NOT NULL
-      AND  e.confirmed_rank > 0
+    SELECT e.race_id, e.blood_no AS horse_id,
+           TO_DATE(LEFT(e.race_id, 8), 'YYYYMMDD') AS race_date,
+           e.kakutei_chakujun
+    FROM   race_entries_v2 e
+    WHERE  e.kakutei_chakujun IS NOT NULL
+      AND  e.kakutei_chakujun > 0
 ),
 past_stats AS (
     SELECT
@@ -299,53 +304,48 @@ past_stats AS (
 ),
 target_entries AS (
     SELECT *,
-        ROW_NUMBER() OVER (ORDER BY horse_id)::integer AS entry_order
-    FROM   race_entries
+        ROW_NUMBER() OVER (ORDER BY blood_no)::integer AS entry_order
+    FROM   race_entries_v2
     WHERE  race_id = %s
 )
 SELECT
-    r.id              AS race_id,
-    r.date::date      AS race_date,
-    r.race_number     AS race_num,
-    r.place_code      AS keibajo_code,
-    COALESCE(NULLIF(TRIM(r.name), ''), '') AS race_name_hondai,
+    r.race_id         AS race_id,
+    TO_DATE(LEFT(r.race_id, 8), 'YYYYMMDD') AS race_date,
+    r.race_num::integer AS race_num,
+    r.keibajo_code,
+    COALESCE(NULLIF(TRIM(r.race_name_hondai), ''), '') AS race_name_hondai,
     r.distance,
-    CASE r.course_type
-        WHEN '芝'     THEN '10'
-        WHEN 'ダート' THEN '23'
-        WHEN '障害'   THEN '51'
-        ELSE '10'
-    END               AS track_code,
+    r.track_code,
     NULL::text        AS course_kubun,
     r.grade_code,
-    r.track_condition AS jvdl_track_condition,
-    r.weather         AS jvdl_weather,
-    NULL::text        AS shiba_baba_code,
-    NULL::text        AS dirt_baba_code,
-    r.zenhan_3f       AS zen_3f,
-    r.kohan_3f        AS go_3f,
+    NULL::text        AS jvdl_track_condition,
+    NULL::text        AS jvdl_weather,
+    r.shiba_baba_code,
+    r.dirt_baba_code,
+    NULL::numeric     AS zen_3f,
+    NULL::numeric     AS go_3f,
     NULL::text[]      AS lap_time_array,
-    COALESCE(NULLIF(e.horse_number::integer, 0), e.entry_order) AS umaban,
-    e.horse_id,
+    COALESCE(NULLIF(e.umaban::integer, 0), e.entry_order) AS umaban,
+    e.blood_no        AS horse_id,
     h.name            AS horse_name,
     h.sire_id,
     h.bms_id,
-    e.trainer_id      AS trainer_cd,
-    e.jockey_id       AS jockey_cd,
+    e.chokyosi_code   AS trainer_cd,
+    e.kishu_code      AS jockey_cd,
     e.horse_weight,
-    e.horse_weight_diff AS weight_diff,
-    e.weight          AS basis_weight,
-    CASE WHEN e.win_odds  > 0 THEN e.win_odds  ELSE NULL END AS tan_odds,
-    CASE WHEN e.popularity > 0 THEN e.popularity ELSE NULL END AS ninki,
-    CASE WHEN e.confirmed_rank > 0 THEN e.confirmed_rank ELSE NULL END AS kakutei_chakujun,
+    e.zogen_sa        AS weight_diff,
+    (e.kinryo::numeric / 10.0) AS basis_weight,
+    CASE WHEN e.tansho_odds  > 0 THEN e.tansho_odds  ELSE NULL END AS tan_odds,
+    CASE WHEN e.tansho_ninki > 0 THEN e.tansho_ninki ELSE NULL END AS ninki,
+    CASE WHEN e.kakutei_chakujun > 0 THEN e.kakutei_chakujun ELSE NULL END AS kakutei_chakujun,
     COALESCE(ps.feature_past_starts, 0) AS feature_past_starts,
     COALESCE(ps.feature_past_wins,   0) AS feature_past_wins,
     COALESCE(ps.feature_past_top3,   0) AS feature_past_top3
-FROM   races r
-JOIN   target_entries e ON e.race_id = r.id
-LEFT   JOIN horses   h ON h.id = e.horse_id
-LEFT   JOIN past_stats ps ON ps.race_id = r.id AND ps.horse_id = e.horse_id
-ORDER  BY COALESCE(NULLIF(e.horse_number::integer, 0), e.entry_order)
+FROM   races_v2 r
+JOIN   target_entries e ON e.race_id = r.race_id
+LEFT   JOIN horses   h ON h.id = e.blood_no
+LEFT   JOIN past_stats ps ON ps.race_id = r.race_id AND ps.horse_id = e.blood_no
+ORDER  BY COALESCE(NULLIF(e.umaban::integer, 0), e.entry_order)
 """
 
 

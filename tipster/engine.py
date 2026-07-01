@@ -111,14 +111,25 @@ def _collect_past_race_ids(horses_raw: list[dict], limit: int = 5) -> set[str]:
 
 
 def _fetch_past_race_extra(race_ids: set[str]) -> dict[str, dict]:
-    """過去走の grade_code / place_code / jyoken_cd_3 をまとめて取得する。"""
+    """過去走の grade_code / place_code / jyoken_cd_3 をまとめて取得する。
+
+    2026-07 修正: 従来 ml.db.engine (fukurou_jvdl) の races テーブル
+    （JVDLフォーマット・旧スキーマ）を参照していたが、このテーブルは
+    bulk_ingest_v2 が書き込まなくなって以降更新が止まっている
+    「旧・未使用」テーブル（2026-06-14で停止）。実際に最新データが
+    入り続けている races_v2 を参照するよう修正した。
+    """
     if not race_ids:
         return {}
     from ml.db import engine as _engine
 
     with _engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT id, grade_code, place_code, jyoken_cd_3 FROM races WHERE id = ANY(:ids)"),
+            text("""
+                SELECT race_id, grade_code, keibajo_code AS place_code, jyoken_cd_3
+                FROM   races_v2
+                WHERE  race_id = ANY(:ids)
+            """),
             {"ids": list(race_ids)},
         ).fetchall()
     return {row[0]: {"grade_code": row[1], "place_code": row[2], "jyoken_cd_3": row[3]} for row in rows}
@@ -159,18 +170,34 @@ def _parse_past_race(pr: dict, extra_map: dict[str, dict]) -> PastRaceInfo:
 
 
 def _fetch_race_meta(race_id: str) -> dict:
+    """2026-07 修正: races（旧・未使用テーブル）ではなく races_v2 を参照する。
+    races_v2 には course_type(日本語表記)・date(DATE型)の列が無いため、
+    track_code から変換し、race_id の先頭8桁から日付を復元する。
+    """
     from ml.db import engine as _engine
+    from api_v2.routers._race_common import _surface_str
 
     with _engine.connect() as conn:
         row = conn.execute(
-            text("SELECT place_code, distance, course_type, date, jyoken_cd_3 FROM races WHERE id = :rid"),
+            text("""
+                SELECT keibajo_code, distance, track_code, jyoken_cd_3
+                FROM   races_v2
+                WHERE  race_id = :rid
+            """),
             {"rid": race_id},
         ).fetchone()
     if row is None:
         return {}
+    race_date = None
+    rid_str = str(race_id)
+    if len(rid_str) >= 8:
+        try:
+            race_date = datetime.strptime(rid_str[:8], "%Y%m%d").date()
+        except ValueError:
+            race_date = None
     return {
-        "place_code": row[0], "distance": row[1], "course_type": row[2], "date": row[3],
-        "jyoken_cd_3": row[4],
+        "place_code": row[0], "distance": row[1], "course_type": _surface_str(row[2]), "date": race_date,
+        "jyoken_cd_3": row[3],
     }
 
 
@@ -349,13 +376,12 @@ def _fetch_baba_supplement_batch(horse_ids: list[str], race_date: str) -> dict[s
 
 
 def _to_db_race_id(race_id: str) -> str:
-    """JV-Data 16桁 race_id (日付8+場2+回2+日2+R番2) を races.id の12桁形式 (日付8+場2+R番2) に変換する。
+    """race_detail_cache の payload.extra.past_races[].race_id (JV-Data 生形式・16桁) を返す。
 
-    race_detail_cache の payload.extra.past_races[].race_id は JV-Data 生形式(16桁)で
-    格納されているため、DB_JVDL の races/race_entries を直接引く際は変換が必要。
+    2026-07 修正: 以前は races.id の12桁形式（日付8+場2+R番2、旧・未使用テーブル用）に
+    変換していたが、参照先を races_v2/race_entries_v2（16桁ネイティブ）に統一したため
+    変換は不要になった。呼び出し元の互換のため関数自体は残し、恒等関数にしている。
     """
-    if len(race_id) == 16:
-        return race_id[:10] + race_id[14:16]
     return race_id
 
 
@@ -367,13 +393,19 @@ def _fetch_supplementary(race_id: str, meta: dict, horses_raw: list[dict]) -> di
     place_code = meta.get("place_code")
     out: dict[str, dict] = {}
 
+    # 2026-07 修正: race_entries/races（旧・未使用テーブル）ではなく
+    # race_entries_v2/races_v2 を参照する。列名対応: horse_id→blood_no,
+    # jockey_id→kishu_code, trainer_id→chokyosi_code, weight→kinryo(0.1kg単位のためkg換算),
+    # races.date→races_v2.race_id 先頭8桁, races.place_code→races_v2.keibajo_code。
+    race_date_compact = race_date.strftime("%Y%m%d") if race_date else None
+
     with _engine.connect() as conn:
         for h in horses_raw:
             hid = h["horse_id"]
             entry: dict = {}
 
             row = conn.execute(
-                text("SELECT jockey_id, trainer_id FROM race_entries WHERE race_id=:rid AND horse_id=:hid"),
+                text("SELECT kishu_code, chokyosi_code FROM race_entries_v2 WHERE race_id=:rid AND blood_no=:hid"),
                 {"rid": race_id, "hid": hid},
             ).fetchone()
             jockey_id, trainer_id = (row[0], row[1]) if row else (None, None)
@@ -386,28 +418,29 @@ def _fetch_supplementary(race_id: str, meta: dict, horses_raw: list[dict]) -> di
             prev_jockey_id = None
             if prev_race_id:
                 prow = conn.execute(
-                    text("SELECT weight, jockey_id FROM race_entries WHERE race_id=:rid AND horse_id=:hid"),
+                    text("SELECT kinryo, kishu_code FROM race_entries_v2 WHERE race_id=:rid AND blood_no=:hid"),
                     {"rid": prev_race_id, "hid": hid},
                 ).fetchone()
                 if prow:
-                    entry["prev_burden_weight"] = prow[0]
+                    entry["prev_burden_weight"] = float(prow[0]) / 10.0 if prow[0] is not None else None
                     prev_jockey_id = prow[1]
                     entry["prev_jockey_id"] = prev_jockey_id
 
             if prev_jockey_id and jockey_id and prev_jockey_id != jockey_id:
                 step1 = conn.execute(
-                    text("SELECT 1 FROM race_entries WHERE race_id=:rid AND jockey_id=:jid "
-                         "AND horse_id != :hid LIMIT 1"),
+                    text("SELECT 1 FROM race_entries_v2 WHERE race_id=:rid AND kishu_code=:jid "
+                         "AND blood_no != :hid LIMIT 1"),
                     {"rid": race_id, "jid": prev_jockey_id, "hid": hid},
                 ).fetchone() is not None
                 entry["step1"] = step1
 
                 step2 = False
-                if not step1 and race_date and place_code:
+                if not step1 and race_date_compact and place_code:
                     step2 = conn.execute(
-                        text("SELECT 1 FROM race_entries se JOIN races r ON se.race_id = r.id "
-                             "WHERE r.date = :rd AND se.jockey_id = :jid AND r.place_code != :pc LIMIT 1"),
-                        {"rd": race_date, "jid": prev_jockey_id, "pc": place_code},
+                        text("SELECT 1 FROM race_entries_v2 se JOIN races_v2 r ON se.race_id = r.race_id "
+                             "WHERE LEFT(r.race_id, 8) = :rd AND se.kishu_code = :jid "
+                             "AND r.keibajo_code != :pc LIMIT 1"),
+                        {"rd": race_date_compact, "jid": prev_jockey_id, "pc": place_code},
                     ).fetchone() is not None
                 entry["step2"] = step2
 

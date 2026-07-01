@@ -1,13 +1,16 @@
 /**
- * admin.ts — api_admin (port 8003) 専用クライアント
+ * frontend/src/api/admin.ts
+ * ===========================
+ * api_admin (port 8003) 専用クライアント。/admin 画面（AdminView.tsx）専用。
+ * admin_frontend (旧ポート5174) を frontend に統合した際に移植した。
  *
  * 環境変数:
  *   VITE_ADMIN_API_BASE  デフォルト http://127.0.0.1:8003
- *   VITE_ADMIN_API_KEY   X-API-Key ヘッダに設定
+ *   VITE_API_KEY         X-API-Key ヘッダに設定（frontend 既存の環境変数を流用）
  */
 
 const _BASE = import.meta.env.VITE_ADMIN_API_BASE ?? 'http://127.0.0.1:8003'
-const _KEY  = import.meta.env.VITE_ADMIN_API_KEY  ?? ''
+const _KEY  = import.meta.env.VITE_API_KEY ?? ''
 
 // ── 型定義 ────────────────────────────────────────────────────────────────────
 
@@ -138,7 +141,7 @@ export const JOB_TYPES: JobType[] = [
   },
 ]
 
-// ── Z-3: ダッシュボード型定義 ─────────────────────────────────────────────────
+// ── ダッシュボード型定義 ───────────────────────────────────────────────────────
 
 export interface FeatureStoreItem {
   name:           string

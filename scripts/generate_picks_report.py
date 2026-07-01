@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import psycopg2
 
-from api_v2.routers.races import get_weekend_races
+from api_v2.routers.races import get_weekend_races, _fetch_races_for_date, _this_weekend
 from shared.config import DB_V2, DB_JVDL
 import tipster.conditions_v2  # noqa: F401 — v2_* 条件を CONDITION_REGISTRY に登録するため先にimport
 from tipster.engine import evaluate_race_context, fetch_race_context, load_strategy
@@ -1508,11 +1508,43 @@ class _DecimalEncoder(json.JSONEncoder):
         return super().default(o)
 
 
+def _resolve_weekend_or_fallback() -> tuple[dict, bool, list[str]]:
+    """今週末（土日）にレースが無ければ、直近の開催日にフォールバックする。
+
+    generate_ai_picks.py の _resolve_target_dates() と同じ方針（フォールバックあり）に
+    統一し、条件ベース推奨とAI推奨で挙動を揃えた。
+    Returns: (races_by_date, is_fallback, target_dates)
+    """
+    sat, sun = _this_weekend()
+    weekend = get_weekend_races()
+    if weekend.races_by_date:
+        return weekend.races_by_date, False, [str(sat), str(sun)]
+
+    print(f"[picks] 今週末({sat}, {sun})にレースなし → 直近開催日にフォールバック")
+    conn = psycopg2.connect(**DB_V2)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT race_date FROM races WHERE race_date <= %s ORDER BY race_date DESC LIMIT 2",
+                (sat,),
+            )
+            fallback_dates = sorted(row[0] for row in cur.fetchall())
+    finally:
+        conn.close()
+
+    races_by_date: dict[str, list] = {}
+    for d in fallback_dates:
+        races = _fetch_races_for_date(d)
+        if races:
+            races_by_date[str(d)] = races
+    return races_by_date, bool(races_by_date), [str(d) for d in fallback_dates]
+
+
 # ─── コアデータ生成（Phase 1-4）─────────────────────────────────────────────────
 
-def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int, int]:
+def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int, int, bool, list[str]]:
     """Phase 1-4 を実行。
-    Returns: (sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng)
+    Returns: (sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng, is_fallback, target_dates)
     """
     print("[picks] 戦略ロード中...")
     try:
@@ -1528,10 +1560,10 @@ def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int
     _S1_N_CONDS = len(s1_strat_cond_ids)  # 5条件
 
     print("[picks] 今週末のレース取得中...")
-    weekend = get_weekend_races()
+    races_by_date, is_fallback, target_dates = _resolve_weekend_or_fallback()
     race_ids = [
         race.race_id
-        for races in weekend.races_by_date.values()
+        for races in races_by_date.values()
         for race in races
     ]
     print(f"[picks] 対象レース数: {len(race_ids)}")
@@ -1804,7 +1836,7 @@ def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int
     print(f"[picks] 三押し暫定: {tier_counts['other']}レース")
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng
+    return sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng, is_fallback, target_dates
 
 
 # ─── 共通データ生成（CLI / API 共用）────────────────────────────────────────────
@@ -1812,13 +1844,19 @@ def _run_picks_core() -> tuple[list[str], list[dict], list[dict], dict, str, int
 def build_picks_json() -> tuple[list[dict], dict, str]:
     """CLIとAPIの共通データ生成関数。(race_data_list, stats, generated_at) を返す。
     副作用: data/output/tipster/picks_race_data.json を書き出す。"""
-    _sections, race_data_list, picks_data, tier_counts, generated_at, ok, _ng = _run_picks_core()
+    _sections, race_data_list, picks_data, tier_counts, generated_at, ok, _ng, is_fallback, target_dates = _run_picks_core()
     stats = {**tier_counts, "total": ok}
     cache_path = _OUTPUT_PATH.parent / "picks_race_data.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
         json.dumps(
-            {"generated_at": generated_at, "race_data": race_data_list, "stats": stats},
+            {
+                "generated_at": generated_at,
+                "target_dates": target_dates,
+                "is_fallback": is_fallback,
+                "race_data": race_data_list,
+                "stats": stats,
+            },
             ensure_ascii=False,
             cls=_DecimalEncoder,
             indent=2,
@@ -1921,7 +1959,7 @@ def _render_ai_section(ai_picks_path: Path) -> str:
 
 
 def main() -> None:
-    sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng = _run_picks_core()
+    sections, race_data_list, picks_data, tier_counts, generated_at, ok, ng, is_fallback, target_dates = _run_picks_core()
     stats = {**tier_counts, "total": ok}
     race_data_json = json.dumps(race_data_list, ensure_ascii=False, cls=_DecimalEncoder)
     html_content = _render_html(sections, race_data_json, generated_at, stats)
@@ -1943,7 +1981,13 @@ def main() -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
         json.dumps(
-            {"generated_at": generated_at, "race_data": race_data_list, "stats": stats},
+            {
+                "generated_at": generated_at,
+                "target_dates": target_dates,
+                "is_fallback": is_fallback,
+                "race_data": race_data_list,
+                "stats": stats,
+            },
             ensure_ascii=False,
             cls=_DecimalEncoder,
             indent=2,
