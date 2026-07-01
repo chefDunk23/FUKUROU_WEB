@@ -124,6 +124,18 @@ export const JOB_TYPES: JobType[] = [
     implemented: true,
     defaultParams: { strategy: 'honmei_v1', reference_date: 'today', periods: ['3m', '6m', '1y'] },
   },
+  {
+    id: 'update_tipster_results',
+    label: '条件ベース推奨 実績取込',
+    implemented: true,
+    defaultParams: { from_date: '2026-06-01', to_date: '2026-06-28' },
+  },
+  {
+    id: 'update_ai_tipster_results',
+    label: 'AI推奨 実績取込 (v1×opponent_v3)',
+    implemented: true,
+    defaultParams: { from_date: '2026-06-01', to_date: '2026-06-28' },
+  },
 ]
 
 // ── Z-3: ダッシュボード型定義 ─────────────────────────────────────────────────

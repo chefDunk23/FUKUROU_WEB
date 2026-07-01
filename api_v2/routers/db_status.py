@@ -3,9 +3,16 @@ api_v2/routers/db_status.py
 ============================
 DB状態管理エンドポイント。
 
-  GET  /api/v2/db-status   — テーブル行数・最新日付・同期状況を返す
-  POST /api/v2/db-sync     — sync_jvdata / sync_races_from_jvdl ジョブを投入
+  GET  /api/v2/db-status   — テーブル行数・最新日付・同期状況・ワーカー稼働状態を返す
+  POST /api/v2/db-sync     — sync_jvdata / sync_races_from_jvdl ジョブをキューに投入
   GET  /api/v2/db-sync/{job_id} — ジョブ状態を返す
+
+運用方針（常駐ワーカーなし）:
+  ジョブはキューに積むだけで、このAPIプロセス内では実行しない
+  （旧: BackgroundTasks によるインプロセス実行は --reload 再起動時に
+  ジョブが無言で消失する不具合があったため廃止）。
+  実行するには `worker.bat` でワーカーを起動する（起動すると
+  溜まっているジョブを全て処理し、アイドルになると自動終了する）。
 """
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from shared.config import DB_JVDL, DB_V2
@@ -37,6 +44,33 @@ def _jvdl_conn():
 
 def _v2_conn():
     return psycopg2.connect(**DB_V2)
+
+
+def _is_worker_running() -> bool:
+    """shared/worker/job_runner.py が現在起動中かを advisory lock の保持有無で判定する。
+
+    job_runner.py は起動時に pg_try_advisory_lock(_ADVISORY_LOCK_KEY) を保持し続ける。
+    ここで同じキーの取得を試み、取得できれば「誰も保持していない=ワーカー未起動」、
+    取得できなければ「誰かが保持している=ワーカー起動中」と判定する
+    （取得できた場合は直ちに解放し、本来のワーカーの動作に影響を与えない）。
+    """
+    from shared.worker.job_runner import _ADVISORY_LOCK_KEY
+
+    try:
+        conn = _jvdl_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (_ADVISORY_LOCK_KEY,))
+                acquired = bool(cur.fetchone()[0])
+                if acquired:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
+            conn.commit()
+            return not acquired
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("ワーカー稼働状態の判定に失敗: %s", e)
+        return False
 
 
 def _race_id_to_date(race_id: str | None) -> str | None:
@@ -101,16 +135,31 @@ def get_db_status():
                 "count":    int(r["cnt"]) if r else 0,
             }
 
-            # races (JVDL)
-            r = _safe_query(cur, "SELECT MAX(id) AS max_id, COUNT(*) AS cnt FROM races")
+            # races_v2 / race_entries_v2（改良版スキーマ = 予測パイプラインが実際に使用するテーブル）
+            r = _safe_query(cur, "SELECT MAX(race_id) AS max_id, COUNT(*) AS cnt FROM races_v2")
             jvdl_tables["races"] = {
                 "max_date": _race_id_to_date(r["max_id"] if r else None),
                 "count":    int(r["cnt"]) if r else 0,
             }
 
-            # race_entries (JVDL)
-            r = _safe_query(cur, "SELECT MAX(race_id) AS max_id, COUNT(*) AS cnt FROM race_entries")
+            r = _safe_query(cur, "SELECT MAX(race_id) AS max_id, COUNT(*) AS cnt FROM race_entries_v2")
             jvdl_tables["race_entries"] = {
+                "max_date": _race_id_to_date(r["max_id"] if r else None),
+                "count":    int(r["cnt"]) if r else 0,
+            }
+
+            # races / race_entries（JVDLフォーマット・旧スキーマ）
+            # bulk_ingest_v2.py / jvdl_parser.sink はこのテーブルには一切書き込まない
+            # （races_v2 / race_entries_v2 に統合済み）。予測パイプラインからも未参照。
+            # 参考表示のみのため画面上は「旧・未使用」と明記する。
+            r = _safe_query(cur, "SELECT MAX(id) AS max_id, COUNT(*) AS cnt FROM races")
+            jvdl_tables["races_legacy"] = {
+                "max_date": _race_id_to_date(r["max_id"] if r else None),
+                "count":    int(r["cnt"]) if r else 0,
+            }
+
+            r = _safe_query(cur, "SELECT MAX(race_id) AS max_id, COUNT(*) AS cnt FROM race_entries")
+            jvdl_tables["race_entries_legacy"] = {
                 "max_date": _race_id_to_date(r["max_id"] if r else None),
                 "count":    int(r["cnt"]) if r else 0,
             }
@@ -228,6 +277,7 @@ def get_db_status():
         "watermarks":     watermarks,
         "sync_jobs":      sync_jobs,
         "weekend_status": weekend_status,
+        "worker_running": _is_worker_running(),
     }
 
 
@@ -237,58 +287,13 @@ class SyncRequest(BaseModel):
     job_type: str
 
 
-def _run_job_inline(job_id: int, job_type: str) -> None:
-    """ジョブをインプロセスで実行する（BackgroundTasks から呼ばれる）。"""
-    from shared.worker.job_runner import _HANDLERS, JobContext
-
-    conn = _jvdl_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE jobs SET status='running', started_at=now(), progress=0 WHERE id=%s",
-                (job_id,),
-            )
-        conn.commit()
-
-        handler = _HANDLERS.get(job_type)
-        if handler is None:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE jobs SET status='failed', finished_at=now(), log_tail=%s WHERE id=%s",
-                    (f"未知の job_type: {job_type!r}", job_id),
-                )
-            conn.commit()
-            return
-
-        ctx = JobContext(job_id=job_id, _conn=conn)
-        try:
-            handler({}, ctx)
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE jobs SET status='done', progress=100, finished_at=now() WHERE id=%s",
-                    (job_id,),
-                )
-            conn.commit()
-            logger.info("db-sync インライン完了: id=%d type=%s", job_id, job_type)
-        except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            ctx._log_buf.append(tb[-1000:])
-            tail = "\n".join(ctx._log_buf)
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE jobs SET status='failed', finished_at=now(), log_tail=%s WHERE id=%s",
-                    (tail, job_id),
-                )
-            conn.commit()
-            logger.exception("db-sync インライン失敗: id=%d type=%s", job_id, job_type)
-    finally:
-        conn.close()
-
-
 @router.post("/db-sync", status_code=201)
-def post_db_sync(req: SyncRequest, background_tasks: BackgroundTasks):
-    """ジョブを投入し、インプロセスのバックグラウンドタスクとして直接実行する。"""
+def post_db_sync(req: SyncRequest):
+    """ジョブをキューに投入する（このAPIプロセス内では実行しない）。
+
+    実行するには worker.bat でワーカーを起動すること。
+    ワーカーが既に起動中であれば数秒以内に自動的に処理される。
+    """
     if req.job_type not in _ALLOWED_JOB_TYPES:
         raise HTTPException(400, f"不正な job_type: {req.job_type!r}")
 
@@ -306,12 +311,17 @@ def post_db_sync(req: SyncRequest, background_tasks: BackgroundTasks):
         raise HTTPException(503, f"ジョブ投入失敗: {e}")
 
     logger.info("db-sync ジョブ投入: id=%d type=%s", row["id"], row["job_type"])
-    background_tasks.add_task(_run_job_inline, row["id"], row["job_type"])
+    worker_running = _is_worker_running()
     return {
         "job_id":    row["id"],
         "job_type":  row["job_type"],
         "status":    row["status"],
         "created_at": row["created_at"].isoformat(),
+        "worker_running": worker_running,
+        "message": (
+            None if worker_running
+            else "ワーカーが起動していません。worker.bat を実行するとジョブが処理されます。"
+        ),
     }
 
 

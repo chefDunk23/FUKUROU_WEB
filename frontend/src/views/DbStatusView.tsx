@@ -54,6 +54,7 @@ interface DbStatusResponse {
   watermarks:     Watermark[]
   sync_jobs:      SyncJob[]
   weekend_status: WeekendStatus
+  worker_running: boolean
 }
 
 // ── 定数・ユーティリティ ──────────────────────────────────────────────────────
@@ -133,6 +134,26 @@ function JobBadge({ status }: { status: string }) {
   )
 }
 
+function WorkerStatusBanner({ running }: { running: boolean }) {
+  if (running) {
+    return (
+      <div className="mb-4 px-4 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs flex items-center gap-2">
+        <span>🟢</span>
+        <span>ワーカー稼働中 — キューに投入したジョブはすぐに処理されます。</span>
+      </div>
+    )
+  }
+  return (
+    <div className="mb-4 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs flex items-center gap-2">
+      <span>🔴</span>
+      <span>
+        ワーカー未起動 — ボタンを押してもジョブはキューに溜まるだけです。
+        処理するには <code className="bg-red-100 px-1 rounded">worker.bat</code> をダブルクリックしてください。
+      </span>
+    </div>
+  )
+}
+
 function SyncButton({
   label, jobType, onDone,
 }: {
@@ -140,19 +161,21 @@ function SyncButton({
   jobType: string
   onDone:  (jobId: number) => void
 }) {
-  const [busy, setBusy] = useState(false)
-  const [err,  setErr]  = useState<string | null>(null)
+  const [busy, setBusy]   = useState(false)
+  const [err,  setErr]    = useState<string | null>(null)
+  const [hint, setHint]   = useState<string | null>(null)
 
   const handleClick = () => {
     setBusy(true)
     setErr(null)
+    setHint(null)
     apiFetch('/api/v2/db-sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_type: jobType }),
     })
       .then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(j.detail ?? r.status)))
-      .then(d => { onDone(d.job_id); setBusy(false) })
+      .then(d => { onDone(d.job_id); if (d.message) setHint(d.message); setBusy(false) })
       .catch(e => { setErr(String(e)); setBusy(false) })
   }
 
@@ -168,6 +191,7 @@ function SyncButton({
         {busy ? '投入中...' : label}
       </button>
       {err && <p className="text-red-600 text-xs mt-1">{err}</p>}
+      {hint && <p className="text-amber-600 text-xs mt-1 max-w-xs">{hint}</p>}
     </div>
   )
 }
@@ -286,6 +310,9 @@ export default function DbStatusView() {
         </button>
       </div>
 
+      {/* ワーカー稼働状態 */}
+      <WorkerStatusBanner running={d.worker_running} />
+
       {pendingJobs.length > 0 && (
         <div className="mb-4 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-xs">
           ジョブ実行中... (id: {pendingJobs.join(', ')}) — 5秒ごとに状態を確認しています
@@ -337,11 +364,11 @@ export default function DbStatusView() {
       </div>
 
       {/* JVDL テーブル状況 */}
-      <SectionTitle>JVDL DB テーブル状況</SectionTitle>
+      <SectionTitle>JVDL DB テーブル状況（予測パイプラインが実際に使用）</SectionTitle>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
         <StatCard label="払戻 (payouts)"       maxDate={d.jvdl_tables.payouts?.max_date}       count={d.jvdl_tables.payouts?.count ?? 0} />
-        <StatCard label="レース (races)"       maxDate={d.jvdl_tables.races?.max_date}         count={d.jvdl_tables.races?.count ?? 0} />
-        <StatCard label="出馬表 (race_entries)" maxDate={d.jvdl_tables.race_entries?.max_date}  count={d.jvdl_tables.race_entries?.count ?? 0} />
+        <StatCard label="レース (races_v2)"       maxDate={d.jvdl_tables.races?.max_date}         count={d.jvdl_tables.races?.count ?? 0} />
+        <StatCard label="出馬表 (race_entries_v2)" maxDate={d.jvdl_tables.race_entries?.max_date}  count={d.jvdl_tables.race_entries?.count ?? 0} />
         <StatCard label="調教坂路 (training_slope)" maxDate={d.jvdl_tables.training_slope?.max_date} count={d.jvdl_tables.training_slope?.count ?? 0} />
         <StatCard label="調教ウッド (training_wood)" maxDate={d.jvdl_tables.training_wood?.max_date}  count={d.jvdl_tables.training_wood?.count ?? 0} />
         <StatCard
@@ -349,6 +376,27 @@ export default function DbStatusView() {
           maxDate={null}
           count={d.jvdl_tables.horse_weights?.count ?? 0}
           note={d.jvdl_tables.horse_weights?.count === 0 ? '未取得' : undefined}
+        />
+      </div>
+
+      {/* JVDL 旧テーブル（未使用） */}
+      <SectionTitle>JVDL DB 旧テーブル（未使用・参考表示のみ）</SectionTitle>
+      <p className="text-[11px] text-gray-400 -mt-2 mb-3">
+        races_v2 / race_entries_v2 への移行後、現在の取り込み処理（bulk_ingest_v2）は
+        このテーブルに書き込みません。日付が古くても異常ではありません。
+      </p>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <StatCard
+          label="レース (races・旧)"
+          maxDate={d.jvdl_tables.races_legacy?.max_date}
+          count={d.jvdl_tables.races_legacy?.count ?? 0}
+          note="旧・未使用"
+        />
+        <StatCard
+          label="出馬表 (race_entries・旧)"
+          maxDate={d.jvdl_tables.race_entries_legacy?.max_date}
+          count={d.jvdl_tables.race_entries_legacy?.count ?? 0}
+          note="旧・未使用"
         />
       </div>
 

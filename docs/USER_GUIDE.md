@@ -27,13 +27,17 @@
 
 ### 一括起動（推奨）
 
-`start_all.bat` をダブルクリックするだけで 3 プロセスが自動起動する。
+`start.bat`（旧 `start_all.bat`）をダブルクリックするだけで API・フロントエンドが自動起動する。
 
 ```
-C:\workspace\fukurou_v2_app\start_all.bat
+C:\workspace\fukurou_v2_app\start.bat
 ```
 
 少し待ってからブラウザで `http://localhost:5173` を開く。
+
+> DB管理画面でJV-Link同期・DB同期ボタンを使う場合は、押した後に
+> `worker.bat` を別途ダブルクリックすること（ジョブワーカーは常駐させず、
+> 使う時だけ起動する方針のため）。詳細は `DB_OPERATIONS_GUIDE.md` 参照。
 
 ---
 

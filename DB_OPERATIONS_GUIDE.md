@@ -5,6 +5,29 @@
 
 ---
 
+## 起動バッチの使い分け（まずここを見る）
+
+プロジェクト直下の `.bat` は3つだけ。迷ったらこの表を見る。
+
+| バッチ | いつ叩くか | 何をするか |
+|---|---|---|
+| **`start.bat`** | 日常的にアプリを使う時（毎回） | V2予測API・V1動画API・フロントエンド・管理API・管理UIを一括起動（`--reload`なし）。ダブルクリックのみ |
+| **`worker.bat`** | DB管理画面でJV-Link同期／DB同期ボタンを押した後、または成績取り込み等のジョブを処理したい時 | 溜まっているジョブを全部処理して、新規ジョブが来なければ2分で自動終了する。ワーカーは常駐させない方針なので、使う時だけ叩く |
+| **`dev.bat`** | コードを編集しながら動作確認したい時（開発時のみ） | API・管理APIを`--reload`付きで起動 + ジョブワーカーも起動。日常運用では使わない |
+
+**典型的な流れ（週末予想を出す時）**:
+```
+1. start.bat をダブルクリック（まだ起動していなければ）
+2. ブラウザで /db-status を開き、JV-Link同期 → DB同期ボタンを押す
+3. worker.bat をダブルクリック → 溜まったジョブが処理される
+4. /picks 画面で picks最新化 → AI最新化
+```
+
+> 旧名: `start.bat`(旧`start_all.bat`) / `worker.bat`(旧`start_worker.bat`) / `dev.bat`(旧`start_dev.bat`)。
+> 過去のメモ等に旧名が残っていても上記の新名に読み替えること。
+
+---
+
 ## 全体像
 
 ```
@@ -206,14 +229,20 @@ py -3.13 -m jvdl_client.sync_jvdata --dry-run --dataspecs RACE
 
 ## 週次の運用フロー
 
+> **重要（2026-07 運用変更）**: ワーカー（`shared/worker/job_runner.py`）は
+> 常駐させない方針にした。DB管理画面のボタンはジョブを**キューに投入するだけ**で、
+> 実際に処理されるのは `worker.bat` を起動した時（またはワーカーが既に
+> 起動中の時）のみ。ボタンを押した後は必ず `worker.bat` をダブルクリック
+> すること。DB管理画面上部に🟢稼働中／🔴未起動のバナーが出るので確認する。
+
 ### 金曜夜（出馬確定後 / 19:00 以降）
 
 ```
-1. JV-Link同期ボタン を実行
+1. JV-Link同期ボタン を実行 → worker.bat を起動
    → 週末レース出馬表・調教データが fukurou_jvdl に取り込まれる
    → 完了まで 5〜10 分待つ（ジョブ履歴が done になるまで）
 
-2. DB同期ボタン を実行
+2. DB同期ボタン を実行 → worker.bat を起動（既に閉じていれば）
    → fukurou_keiba_v2.races / race_entries に最新データが反映される
    → 完了まで 1〜3 分
 
@@ -227,23 +256,30 @@ py -3.13 -m jvdl_client.sync_jvdata --dry-run --dataspecs RACE
 ### 土曜・日曜当日（レース前の確認）
 
 ```
-1. DB同期ボタン を実行（出走取消・馬体重の最終更新を反映）
+1. DB同期ボタン を実行 → worker.bat を起動（出走取消・馬体重の最終更新を反映）
 2. picks最新化 → AI最新化
 ```
 
 ### 月曜朝（成績取り込み）
 
 ```
-1. JV-Link同期ボタン を実行
+1. JV-Link同期ボタン を実行 → worker.bat を起動
    → 土日の確定成績（DIFN）が取り込まれる
    → ウォーターマーク DIFN が当日日付に更新される
 
-2. DB同期ボタン を実行
+2. DB同期ボタン を実行 → worker.bat を起動
    → kakutei_chakujun（確定着順）が race_entries に反映される
+
+3. 管理画面のジョブ投入フォームから update_tipster_results を手動投入
+   → worker.bat を起動 → 先週末の成績が tipster_results に書き込まれる
+   → params 例: {"from_date": "2026-06-27", "to_date": "2026-06-28"}
 ```
 
-> **注**: 月曜 07:00 にワーカーが自動で `update_tipster_results` ジョブを実行し、
-> 先週末の成績を `tipster_results` テーブルに書き込む（手動不要）。
+> **注**: 常駐ワーカーを廃止したため、月曜 07:00 の自動実行（APScheduler）は
+> ワーカーがその時刻にたまたま起動していない限り発火しない。
+> `update_tipster_results` は上記の通り手動投入すること
+> （ハンドラ自体は正常に動作する。過去分をまとめて取り込みたい場合は
+> `from_date`/`to_date` の範囲を広げて投入すればよい）。
 
 ---
 
@@ -317,36 +353,56 @@ opponent_v3（対戦相手レベル）の2モデルをアンサンブルしてAI
 | `32-bit Python launcher が見つかりません` | py.exe 未インストール | Python Launcher を再インストール |
 | `comtypes が利用できません` | 32-bit comtypes 未インストール | `py -3.13-32 -m pip install comtypes` |
 | DB同期が失敗する | races_v2 にデータがない | 先に JV-Link同期を実行 |
-| ジョブが queued のまま | worker プロセス停止 | `pm2 restart jvdl-worker` で再起動 |
+| ジョブが queued のまま | ワーカー未起動 | `worker.bat` をダブルクリック（DB管理画面の🔴未起動バナーで判別可能） |
 
 ---
 
-## ワーカープロセスの確認
+## ワーカープロセスの確認（2026-07 運用変更: 常駐させない）
 
-ジョブは `shared/worker/job_runner.py` が処理する。プロセスが停止するとジョブは `queued` のまま実行されない。
+ジョブは `shared/worker/job_runner.py` が処理するが、**常駐させる運用はやめた**
+（面倒なため）。代わりに「使いたい時に手動起動 → 溜まったジョブを処理 → アイドル
+になったら自動終了」という一回限りの起動方式にしている。
 
-```powershell
-# ワーカーの状態確認
-pm2 list
-
-# ワーカーの再起動
-pm2 restart jvdl-worker
-
-# ログ確認
-pm2 logs jvdl-worker --lines 50
 ```
+worker.bat をダブルクリック
+  → 起動時に queued の孤児ジョブがあればまずリセット・再実行される
+  → キューに溜まっているジョブを全て順番に処理する（進捗はコンソールに表示）
+  → 新規ジョブが来ないまま 2分（WORKER_IDLE_EXIT_SECONDS、既定120秒）経過すると
+    自動的に終了する
+  → 終了時に「n件のジョブを処理しました」のサマリーが出るので、それを見て閉じてよい
+```
+
+- 起動中かどうかは DB管理画面 (`/db-status`) 上部のバナー（🟢稼働中／🔴未起動）で確認できる。
+  内部的には PostgreSQL の advisory lock（キー: 42002）の保持有無で判定している。
+- 旧来通り常駐させ続けたい場合は、起動前に環境変数
+  `WORKER_IDLE_EXIT_SECONDS=0` を設定してから `py -m shared.worker.job_runner`
+  を実行する（0 を指定するとアイドル終了が無効化される）。
+- 手動でログを見ながら動かしたい場合は `py -m shared.worker.job_runner` を直接
+  実行してもよい（`worker.bat` の中身と同じ）。
+- 二重起動しても advisory lock により後発のプロセスは即座に終了するため安全。
+
+**ボタン押下との関係**: DB管理画面のボタン（JV-Link同期・DB同期）を押すと
+`jobs` テーブルに `queued` で積まれるだけで、APIプロセス自身はジョブを実行しない
+（旧: BackgroundTasks によるインプロセス実行は `--reload` 再起動時にジョブが
+無言で消失する不具合があったため廃止した）。ワーカーが既に起動中ならボタンを
+押した数秒後に処理され、起動していなければ次に `worker.bat` を起動した
+時に処理される。
 
 ---
 
 ## 自動スケジュール（ワーカー内 APScheduler）
 
-| 時刻 | 処理 |
-|------|------|
-| 毎日 09:00 JST | ヘルスチェック（Discord 通知） |
-| 金曜 21:00 JST | 週末レース予測再計算 |
-| 土曜 08:30 JST | 当日レース予測再計算 |
-| 日曜 08:30 JST | 当日レース予測再計算 |
-| 月曜 07:00 JST | 先週末成績取り込み (`update_tipster_results`) |
+以下はワーカー内に登録されているが、**常駐させない運用にしたため、
+この時刻にたまたまワーカーが起動していない限り発火しない**。
+確実に実行したい処理は、対応する job_type を手動でジョブキューに投入すること。
 
-> JV-Link同期（sync_jvdata）とDB同期（sync_races_from_jvdl）は**自動スケジュールなし**。
-> 金曜夜に手動で実行する必要がある。
+| 時刻 | 処理 | job_type |
+|------|------|------|
+| 毎日 09:00 JST | ヘルスチェック（Discord 通知） | （直接実行、投入不要） |
+| 金曜 21:00 JST | 週末レース予測再計算 | `recompute_predictions` (`{"mode":"weekend"}`) |
+| 土曜 08:30 JST | 当日レース予測再計算 | `recompute_predictions` (`{"mode":"today"}`) |
+| 日曜 08:30 JST | 当日レース予測再計算 | `recompute_predictions` (`{"mode":"today"}`) |
+| 月曜 07:00 JST | 先週末成績取り込み | `update_tipster_results` |
+
+> JV-Link同期（sync_jvdata）とDB同期（sync_races_from_jvdl）はもともと自動
+> スケジュールなし。手動でボタンを押した後、`worker.bat` を起動すること。

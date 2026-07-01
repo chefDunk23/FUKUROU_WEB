@@ -53,6 +53,13 @@ LOG_MAX_LINES = 50         # log_tail に保持する最大行数
 _HEALTH_CHECK_HOUR_JST = 9  # 毎日 09:00 JST にヘルスチェック
 _ADVISORY_LOCK_KEY = 42002  # ワーカー起動唯一性保証（batch_predictor の 42001 と別）
 
+# ── アイドル自動終了 ──────────────────────────────────────────────────────────
+# 常駐させない運用方針: 起動時にキューを一括処理（ドレイン）した後、
+# この秒数だけ新規ジョブが来なければ自動終了する。
+# 0 を指定すると無効化（旧来通り常駐し続ける）。
+_IDLE_EXIT_ENV = "WORKER_IDLE_EXIT_SECONDS"
+_DEFAULT_IDLE_EXIT_SECONDS = 120
+
 # スケジュール定義（hour/minute は JST）
 _SCHEDULES = [
     # 毎日 09:00 — health_check（_scheduled_health_check を直接呼ぶ）
@@ -735,17 +742,28 @@ def _handle_update_tipster_results(params: dict, ctx: JobContext) -> None:
     ctx.report_progress(5)
 
     # 確定済みレース（kakutei_chakujun が存在する）を取得
-    from ml.db import engine as _engine
-    with _engine.connect() as _conn:
+    # 注意: ml.db.engine (fukurou_jvdl) の races/race_entries は「旧・未使用」の
+    # レガシーテーブルで、bulk_ingest_v2 が書き込まなくなって以降更新が止まっている
+    # （2026-07 時点で 2026-06-14 で停止）。実際に予測パイプラインが使う
+    # fukurou_keiba_v2.races / race_entries を参照する（DB_OPERATIONS_GUIDE.md 参照）。
+    from sqlalchemy import create_engine as _create_engine
+
+    _v2_cfg = DB_V2
+    _v2_engine = _create_engine(
+        f"postgresql+psycopg2://{_v2_cfg['user']}:{_v2_cfg['password']}"
+        f"@{_v2_cfg['host']}:{_v2_cfg['port']}/{_v2_cfg['dbname']}"
+    )
+
+    with _v2_engine.connect() as _conn:
         rows = _conn.execute(_text("""
-            SELECT DISTINCT r.id AS race_id, r.date AS race_date
+            SELECT DISTINCT r.id AS race_id, r.race_date AS race_date
             FROM   races r
             JOIN   race_entries e ON e.race_id = r.id
-            WHERE  r.date BETWEEN :start AND :end
-              AND  e.confirmed_rank IS NOT NULL AND e.confirmed_rank > 0
-              AND  r.place_code <= '10'
-              AND  r.course_type IN ('芝', 'ダート')
-            ORDER  BY r.date, r.id
+            WHERE  r.race_date BETWEEN :start AND :end
+              AND  e.kakutei_chakujun IS NOT NULL AND e.kakutei_chakujun > 0
+              AND  r.keibajo_code <= '10'
+              AND  r.race_syubetsu_code IN ('11', '12')
+            ORDER  BY r.race_date, r.id
         """), {"start": from_dt, "end": to_dt}).fetchall()
 
     race_ids = [(r[0], r[1]) for r in rows]
@@ -786,10 +804,10 @@ def _handle_update_tipster_results(params: dict, ctx: JobContext) -> None:
                 picks.append((cand.horse_id, "穴推奨"))
                 break
 
-        # 実際の着順・オッズを取得
-        with _engine.connect() as _conn:
+        # 実際の着順・オッズを取得（fukurou_keiba_v2.race_entries を参照）
+        with _v2_engine.connect() as _conn:
             result_rows = _conn.execute(_text("""
-                SELECT horse_id, confirmed_rank, tan_odds
+                SELECT horse_id, kakutei_chakujun, tan_odds
                 FROM   race_entries
                 WHERE  race_id = :rid
             """), {"rid": race_id}).fetchall()
@@ -830,6 +848,146 @@ def _handle_update_tipster_results(params: dict, ctx: JobContext) -> None:
     ctx.report_progress(100)
     ctx.append_log(
         f"[update_tipster_results] 完了: UPSERT={len(upsert_rows)} 行 / 失敗レース={failed}"
+    )
+
+
+@register("update_ai_tipster_results")
+def _handle_update_ai_tipster_results(params: dict, ctx: JobContext) -> None:
+    """直近の確定レースにAI推奨(v1×opponent_v3アンサンブル)を適用し、
+    実績を tipster_results テーブルに UPSERT する。
+
+    honmei/anaba（JSON戦略ベース）と同じ tipster_results テーブルを共有し、
+    strategy='ai_v1_opp' で区別する（既存の /cumulative-stats 等の集計
+    エンドポイントをそのまま流用できるため）。計算パイプラインが完全に別
+    （LightGBMアンサンブル）のため update_tipster_results とは別ハンドラにしている。
+
+    params:
+        from_date: str | None — "YYYY-MM-DD"。省略時は14日前
+        to_date:   str | None — "YYYY-MM-DD"。省略時は昨日
+    """
+    import datetime as _dt
+
+    import lightgbm as _lgb
+    import psycopg2 as _pg2
+    import psycopg2.extras as _extras
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy import text as _text
+
+    from pace_bias_ai.opponent_model.features import load_all_race_history
+    from scripts.generate_ai_picks import (
+        _OPP_MODEL,
+        _V1_MODEL,
+        _get_race_entries,
+        _get_race_meta_by_id,
+        _jvdl_engine,
+        compute_unified_rank,
+        score_race_ai,
+    )
+    from shared.config import DB_V2
+
+    to_dt = _dt.date.fromisoformat(params["to_date"]) if params.get("to_date") else \
+            _dt.date.today() - _dt.timedelta(days=1)
+    from_dt = _dt.date.fromisoformat(params["from_date"]) if params.get("from_date") else \
+              to_dt - _dt.timedelta(days=14)
+
+    ctx.append_log(f"[update_ai_tipster_results] {from_dt}〜{to_dt}")
+    ctx.report_progress(5)
+
+    _v2_cfg = DB_V2
+    _v2_engine = _create_engine(
+        f"postgresql+psycopg2://{_v2_cfg['user']}:{_v2_cfg['password']}"
+        f"@{_v2_cfg['host']}:{_v2_cfg['port']}/{_v2_cfg['dbname']}"
+    )
+
+    with _v2_engine.connect() as _conn:
+        rows = _conn.execute(_text("""
+            SELECT DISTINCT r.id AS race_id
+            FROM   races r
+            JOIN   race_entries e ON e.race_id = r.id
+            WHERE  r.race_date BETWEEN :start AND :end
+              AND  e.kakutei_chakujun IS NOT NULL AND e.kakutei_chakujun > 0
+              AND  r.keibajo_code <= '10'
+              AND  r.race_syubetsu_code IN ('11', '12')
+            ORDER  BY r.id
+        """), {"start": from_dt, "end": to_dt}).fetchall()
+
+    race_ids = [r[0] for r in rows]
+    ctx.append_log(f"  対象レース: {len(race_ids)} 件")
+    ctx.report_progress(10)
+
+    ctx.append_log("  モデルロード: v1, opponent_v3")
+    model_v1  = _lgb.Booster(model_file=str(_V1_MODEL))
+    model_opp = _lgb.Booster(model_file=str(_OPP_MODEL))
+    engine_jvdl = _jvdl_engine()
+    df_ent_hist, df_races_hist = load_all_race_history(engine_jvdl)
+    ctx.report_progress(15)
+
+    upsert_rows: list[tuple] = []
+    failed = 0
+
+    for i, race_id in enumerate(race_ids):
+        race_meta = _get_race_meta_by_id(race_id)
+        entries = _get_race_entries(race_id) if race_meta else []
+
+        result = None
+        if race_meta is not None:
+            try:
+                result = score_race_ai(
+                    race_meta, entries, model_v1, model_opp,
+                    engine_jvdl, df_ent_hist, df_races_hist,
+                )
+            except Exception as e:
+                ctx.append_log(f"  skip race_id={race_id}: {e}")
+                failed += 1
+
+        if result is not None:
+            with _v2_engine.connect() as _conn:
+                result_rows = _conn.execute(_text("""
+                    SELECT horse_id, kakutei_chakujun, tan_odds
+                    FROM   race_entries
+                    WHERE  race_id = :rid
+                """), {"rid": race_id}).fetchall()
+            result_map = {r[0]: (r[1], r[2]) for r in result_rows}
+
+            race_date = _dt.date.fromisoformat(result["race_date"])
+            for pick in result["picks"]:
+                label = compute_unified_rank(pick["rank"], pick["confidence_label"])
+                if label is None:
+                    continue
+                horse_id = pick["horse_id"]
+                final_rank, tan_odds = result_map.get(horse_id, (None, None))
+                is_win    = (final_rank == 1) if final_rank is not None else None
+                is_placed = (final_rank <= 3) if final_rank is not None else None
+                upsert_rows.append((
+                    race_id, horse_id, race_date, "ai_v1_opp", label,
+                    is_placed, is_win, final_rank, tan_odds,
+                ))
+
+        ctx.report_progress(15 + int(80 * (i + 1) / max(len(race_ids), 1)))
+
+    if upsert_rows:
+        db_conn = _pg2.connect(**DB_V2)
+        try:
+            _extras.execute_values(db_conn.cursor(), """
+                INSERT INTO tipster_results
+                    (race_id, horse_id, race_date, strategy, rank_label,
+                     is_placed, is_win, final_rank, tan_odds)
+                VALUES %s
+                ON CONFLICT (race_id, horse_id, strategy) DO UPDATE SET
+                    rank_label  = EXCLUDED.rank_label,
+                    is_placed   = EXCLUDED.is_placed,
+                    is_win      = EXCLUDED.is_win,
+                    final_rank  = EXCLUDED.final_rank,
+                    tan_odds    = EXCLUDED.tan_odds,
+                    recorded_at = now()
+            """, upsert_rows, page_size=200)
+            db_conn.commit()
+        finally:
+            db_conn.close()
+
+    ctx.report_progress(100)
+    ctx.append_log(
+        f"[update_ai_tipster_results] 完了: UPSERT={len(upsert_rows)} 行 / 失敗レース={failed}"
     )
 
 
@@ -912,14 +1070,15 @@ WHERE  id = %s
 """
 
 
-def _process_one(conn: psycopg2.extensions.connection) -> bool:
-    """キューから 1 件取り出して実行する。実行した場合 True を返す。"""
+def _process_one(conn: psycopg2.extensions.connection) -> str | None:
+    """キューから 1 件取り出して実行する。実行した場合はその job_type を、
+    キューが空だった場合は None を返す（呼び出し側での集計・アイドル判定用）。"""
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(_SQL_DEQUEUE)
         row = cur.fetchone()
         if row is None:
             conn.rollback()
-            return False
+            return None
 
         job_id = row["id"]
         job_type = row["job_type"]
@@ -939,7 +1098,7 @@ def _process_one(conn: psycopg2.extensions.connection) -> bool:
         with conn.cursor() as cur:
             cur.execute(_SQL_MARK_FAILED, (msg, job_id))
         conn.commit()
-        return True
+        return job_type
 
     try:
         handler(params, ctx)
@@ -956,7 +1115,7 @@ def _process_one(conn: psycopg2.extensions.connection) -> bool:
             cur.execute(_SQL_MARK_FAILED, (tail, job_id))
         conn.commit()
 
-    return True
+    return job_type
 
 
 _SQL_RESET_ORPHANS = """
@@ -1034,7 +1193,16 @@ def _scheduled_health_check() -> None:
 
 
 def run_worker() -> None:
-    """ワーカーのメインループ。Ctrl+C で停止する。"""
+    """ワーカーのメインループ。
+
+    常駐させない運用方針のため、起動したら:
+      1. キューに溜まっている queued ジョブを全て順に処理する（ドレイン）
+      2. 新規ジョブが来ないまま WORKER_IDLE_EXIT_SECONDS 秒経過したら自動終了する
+         （0 を指定すると旧来通り常駐し続ける）
+    Ctrl+C でもいつでも停止できる。
+    """
+    idle_exit_seconds = int(os.getenv(_IDLE_EXIT_ENV, str(_DEFAULT_IDLE_EXIT_SECONDS)))
+
     # ワーカー起動唯一性保証（advisory lock）
     lock_conn = psycopg2.connect(**DB_JVDL)
     lock_conn.autocommit = True
@@ -1045,7 +1213,11 @@ def run_worker() -> None:
             lock_conn.close()
             sys.exit(1)
 
-    logger.info("ワーカー起動: POLL_INTERVAL=%ds", POLL_INTERVAL)
+    logger.info(
+        "ワーカー起動: POLL_INTERVAL=%ds  自動終了=%s",
+        POLL_INTERVAL,
+        f"新規ジョブなし{idle_exit_seconds}秒で終了" if idle_exit_seconds > 0 else "無効（常駐し続けます）",
+    )
 
     # 未適用 DDL チェック（警告のみ、起動は続行）
     try:
@@ -1073,15 +1245,38 @@ def run_worker() -> None:
                 "APScheduler 登録: enqueue %s %s  dow=%s %d:%02d JST",
                 sched["job_type"], sched["params"], dow, h, m,
             )
+    if idle_exit_seconds > 0:
+        logger.warning(
+            "常駐しない運用のため、上記の自動スケジュールはワーカー起動中の"
+            "タイミングとしか一致しません。確実に実行したい処理は"
+            "手動でジョブを投入してください。"
+        )
     scheduler.start()
 
     work_conn = psycopg2.connect(**DB_JVDL)
     _reset_orphan_jobs(work_conn)
+
+    processed_count = 0
+    processed_types: dict[str, int] = {}
+    last_activity = time.monotonic()
+
+    logger.info("キューのドレインを開始します（溜まっているジョブを処理中）...")
+
     try:
         while True:
             try:
-                ran = _process_one(work_conn)
-                if not ran:
+                processed_type = _process_one(work_conn)
+                if processed_type is not None:
+                    processed_count += 1
+                    processed_types[processed_type] = processed_types.get(processed_type, 0) + 1
+                    last_activity = time.monotonic()
+                else:
+                    idle_for = time.monotonic() - last_activity
+                    if idle_exit_seconds > 0 and idle_for >= idle_exit_seconds:
+                        logger.info(
+                            "新規ジョブなしのまま%d秒経過したため終了します。", idle_exit_seconds
+                        )
+                        break
                     time.sleep(POLL_INTERVAL)
             except psycopg2.OperationalError:
                 logger.warning("DB 接続断。再接続を試みます...")
@@ -1100,6 +1295,11 @@ def run_worker() -> None:
             cur.execute("SELECT pg_advisory_unlock(%s)", (_ADVISORY_LOCK_KEY,))
         lock_conn.close()
         work_conn.close()
+        if processed_count == 0:
+            logger.info("処理対象のジョブはありませんでした。")
+        else:
+            detail = ", ".join(f"{t}×{n}" for t, n in processed_types.items())
+            logger.info("完了: %d件のジョブを処理しました（%s）", processed_count, detail)
 
 
 if __name__ == "__main__":

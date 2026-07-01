@@ -46,7 +46,7 @@
 
 | 機能 | 主なファイル | 判定 | 根拠 |
 |---|---|---|---|
-| api_v2(投資用予測API, port 8002) | `api_v2/routers/*`, `deps.py` | **動作確認済み** | `start_all.bat`起動対象。`verify_api_key`/`_surface_str`/コード変換/`public_races`機密除外がテストで網羅検証済み |
+| api_v2(投資用予測API, port 8002) | `api_v2/routers/*`, `deps.py` | **動作確認済み** | `start.bat`起動対象（旧`start_all.bat`）。`verify_api_key`/`_surface_str`/コード変換/`public_races`機密除外がテストで網羅検証済み |
 | api_admin(ジョブ管理API, port 8003, 127.0.0.1限定) | `api_admin/routers/jobs.py`, `health.py` | **動作確認済み** | `docs/deploy.md`に詳細運用手順あり |
 | api_v1(YouTube動画生成API, port 8001, DEV_MODE専用) | `api_v1/routers/*` | **動作確認済み** | ⚠️訂正: 「v2に置き換わった旧版」ではなく**現役で別目的(動画生成)のAPI**。frontendのVideoShortView等から呼ばれる |
 | frontend(ユーザー向けSPA, port 5173) | `frontend/src/*` | **動作確認済み** | 一般ルート(api_v2のみ)とDevDashboard(api_v1+v2)の2系統が共存・稼働 |

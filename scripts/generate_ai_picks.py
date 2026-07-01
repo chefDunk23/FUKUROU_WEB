@@ -158,37 +158,54 @@ def _resolve_target_dates(target_dates: list[date]) -> list[date]:
     return fallback
 
 
+_RACE_META_COLS = (
+    "id, race_date, keibajo_code, kaiji, nichiji, race_num, "
+    "race_name_hondai, distance, track_code, grade_code, "
+    "joken_code_youngest, syusso_tosu"
+)
+
+
+def _row_to_race_meta(row) -> dict:
+    return {
+        "race_id":          row[0],
+        "race_date":        str(row[1]),
+        "keibajo_code":     str(row[2]).zfill(2),
+        "kaiji":            row[3],
+        "nichiji":          row[4],
+        "race_num":         row[5],
+        "race_name":        row[6] or "",
+        "distance":         int(row[7]) if row[7] else 1800,
+        "track_code":       str(row[8]) if row[8] else "10",
+        "grade_code":       str(row[9]) if row[9] else "",
+        "joken_cd_youngest": str(row[10]) if row[10] else "",
+        "field_size":       int(row[11]) if row[11] else 0,
+    }
+
+
 def _get_upcoming_races(days: list[date]) -> list[dict]:
     """指定日のレース一覧を v2 DB から取得する。"""
     races: list[dict] = []
     with _v2_conn() as conn:
         with conn.cursor() as cur:
             for d in days:
-                cur.execute("""
-                    SELECT id, race_date, keibajo_code, kaiji, nichiji, race_num,
-                           race_name_hondai, distance, track_code, grade_code,
-                           joken_code_youngest, syusso_tosu
+                cur.execute(f"""
+                    SELECT {_RACE_META_COLS}
                     FROM races
                     WHERE race_date = %s
                     ORDER BY keibajo_code, race_num
                 """, (d,))
-                for row in cur.fetchall():
-                    races.append({
-                        "race_id":          row[0],
-                        "race_date":        str(row[1]),
-                        "keibajo_code":     str(row[2]).zfill(2),
-                        "kaiji":            row[3],
-                        "nichiji":          row[4],
-                        "race_num":         row[5],
-                        "race_name":        row[6] or "",
-                        "distance":         int(row[7]) if row[7] else 1800,
-                        "track_code":       str(row[8]) if row[8] else "10",
-                        "grade_code":       str(row[9]) if row[9] else "",
-                        "joken_cd_youngest": str(row[10]) if row[10] else "",
-                        "field_size":       int(row[11]) if row[11] else 0,
-                    })
+                races.extend(_row_to_race_meta(row) for row in cur.fetchall())
     log.info("週末レース: %d件", len(races))
     return races
+
+
+def _get_race_meta_by_id(race_id: str) -> dict | None:
+    """race_id を指定して1レース分のメタ情報を v2 DB から取得する（過去レースの再スコアリング向け）。"""
+    with _v2_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {_RACE_META_COLS} FROM races WHERE id = %s", (race_id,))
+            row = cur.fetchone()
+    return _row_to_race_meta(row) if row else None
 
 
 def _get_race_entries(race_id: str) -> list[dict]:
@@ -663,6 +680,21 @@ def _score_all_horses(
     return picks
 
 
+# frontend/src/views/PicksView.tsx の computeUnifiedRank() と同一ロジック
+# （実績集計側でも同じ基準でラベルを再現する必要があるため Python 側にも用意する）
+def compute_unified_rank(rank: int, confidence_label: str) -> str | None:
+    """rank(1始まり) と confidence_label(A/B/C) から統合推奨ラベルを返す。"""
+    if rank == 1 and confidence_label == "A":
+        return "一押し"
+    if (rank == 1 and confidence_label == "B") or (rank == 2 and confidence_label == "A"):
+        return "二押し"
+    if rank <= 5 and confidence_label == "C":
+        return "見送り"
+    if 2 <= rank <= 5:
+        return "三押し"
+    return None
+
+
 def _make_feature_explanations(v1_row: pd.Series) -> list[FeatureExplanation]:
     """v1 行から主要特徴量の説明リストを生成する（SHAP不使用）。"""
     explanations = []
@@ -719,6 +751,120 @@ def _make_summary(v1_row: pd.Series, flags: dict) -> str:
     return "、".join(parts) + "のため高評価"
 
 
+# ── 1レース単位のスコアリング（バックフィル等での再利用向けに切り出し） ──────
+
+def score_race_ai(
+    race_meta: dict,
+    entries: list[dict],
+    model_v1: lgb.Booster,
+    model_opp: lgb.Booster,
+    engine_jvdl: sqlalchemy.engine.Engine,
+    df_ent_hist: pd.DataFrame,
+    df_races_hist: pd.DataFrame,
+) -> dict | None:
+    """1レース分のAI推奨（v1×opponent_v3アンサンブル）を計算する。
+
+    generate_ai_picks() のメインループ本体を関数化したもの。過去レースの
+    実績記録（update_ai_tipster_results）からも同じロジックで再利用できるよう
+    に切り出している。出走馬が2頭未満、またはv1特徴量計算に失敗した場合は
+    None を返す（呼び出し側でスキップ判定に使う）。
+    """
+    race_id = race_meta["race_id"]
+
+    if len(entries) < 2:
+        log.warning("出走馬不足 (%d頭) → スキップ: %s", len(entries), race_id)
+        return None
+
+    horse_ids = [e["horse_id"] for e in entries]
+
+    # ── v1 特徴量計算 ──────────────────────────────────────────────────
+    # 対象馬の全確定済み過去走を都度DBロード（parquet陳腐化を回避、PIT-safe）
+    hist_df = _load_pace_v4_history(engine_jvdl, horse_ids, race_id[:8])
+    pred_rows = [_build_pred_row(e, race_meta) for e in entries]
+
+    v1_df = _compute_v1_features(pred_rows, hist_df)
+    if v1_df.empty:
+        log.warning("v1 特徴量計算失敗 → スキップ: %s", race_id)
+        return None
+    v1_df = v1_df.reset_index(drop=True)
+
+    v1_scores_raw = _predict_v1(v1_df, model_v1)
+    v1_df["_v1_score"] = v1_scores_raw
+
+    # ── opponent 特徴量計算 ────────────────────────────────────────────
+    df_target_opp = _build_opponent_target(race_meta, entries)
+    df_ent_aug    = _augment_entries_for_opponent(df_ent_hist, df_target_opp)
+    df_races_aug  = _augment_races_for_opponent(df_races_hist, race_meta)
+
+    try:
+        opp_scores_raw = _predict_opponent(
+            df_target_opp, df_ent_aug, df_races_aug, model_opp
+        )
+    except Exception:
+        log.exception("opponent 予測失敗: %s → v1 スコアのみ使用", race_id)
+        opp_scores_raw = v1_scores_raw.copy()
+
+    opp_feat_df = build_opponent_features(df_target_opp, df_ent_aug, df_races_aug)
+    opp_feat_df["_opp_score"] = opp_scores_raw.values
+
+    # ── アンサンブル（検証と同じ: per-race min-max → ブレンド） ────────
+    # v1_scores_raw と opp_scores_raw はインデックスが別々なのでリセット
+    v1_s   = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
+    opp_s  = pd.Series(opp_scores_raw.values, index=range(len(entries)))
+    v1_norm, opp_norm, norm_blend = _blend_normalized(v1_s, opp_s)
+    deviation = _to_deviation(norm_blend)
+
+    # ── ローテーションフラグ ────────────────────────────────────────────
+    df_rot_target = v1_df[["horse_id", "race_id", "race_date", "keibajo_code",
+                            "grade_code"]].copy()
+    df_rot_target = df_rot_target.rename(columns={"grade_code": "cur_grade_code"})
+    # race_interval (休養日数) を追加
+    race_dt = pd.Timestamp(race_meta["race_date"])
+    intervals = []
+    for hid in df_rot_target["horse_id"].astype(str):
+        h = hist_df[hist_df["horse_id"] == hid]
+        if not h.empty:
+            last_dt = pd.Timestamp(h.iloc[-1]["race_date"])
+            intervals.append((race_dt - last_dt).days)
+        else:
+            intervals.append(np.nan)
+    df_rot_target["race_interval"] = intervals
+
+    try:
+        flags_df = build_rotation_flags(df_rot_target, engine_jvdl)
+    except Exception:
+        log.exception("rotation_flags 失敗: %s", race_id)
+        flags_df = pd.DataFrame(
+            [{c: np.nan for c in ROTATION_COLS} for _ in range(len(entries))],
+            index=df_rot_target.index,
+        )
+
+    # ── 全馬スコアリング ────────────────────────────────────────────────
+    opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
+    picks = _score_all_horses(
+        norm_blend, deviation, v1_norm, opp_norm,
+        flags_df.reset_index(drop=True),
+        entries, v1_df, opp_feat_reindexed, race_meta,
+    )
+
+    # レース内 top pick の自信度をレース単位に持つ
+    top_confidence = picks[0]["confidence_label"] if picks else "C"
+
+    return {
+        "race_id":        race_id,
+        "race_name":      race_meta["race_name"],
+        "race_date":      race_meta["race_date"],
+        "keibajo_code":   race_meta["keibajo_code"],
+        "race_num":       race_meta["race_num"],
+        "distance":       race_meta["distance"],
+        "surface":        "芝" if str(race_meta["track_code"]).startswith("1") else "ダート",
+        "grade_code":     race_meta["grade_code"],
+        "field_size":     len(entries),
+        "top_confidence": top_confidence,
+        "picks":          picks,
+    }
+
+
 # ── メイン処理 ─────────────────────────────────────────────────────────────────
 
 def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
@@ -757,103 +903,16 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
 
     race_results = []
     for race_meta in races:
-        race_id = race_meta["race_id"]
-        log.info("処理中: %s %s %s %dm", race_id, race_meta["race_name"],
+        log.info("処理中: %s %s %s %dm", race_meta["race_id"], race_meta["race_name"],
                  race_meta["keibajo_code"], race_meta["distance"])
 
-        entries = _get_race_entries(race_id)
-        if len(entries) < 2:
-            log.warning("出走馬不足 (%d頭) → スキップ: %s", len(entries), race_id)
-            continue
-
-        horse_ids = [e["horse_id"] for e in entries]
-
-        # ── v1 特徴量計算 ──────────────────────────────────────────────────
-        # 対象馬の全確定済み過去走を都度DBロード（parquet陳腐化を回避、PIT-safe）
-        hist_df = _load_pace_v4_history(engine_jvdl, horse_ids, race_id[:8])
-        pred_rows = [_build_pred_row(e, race_meta) for e in entries]
-
-        v1_df = _compute_v1_features(pred_rows, hist_df)
-        if v1_df.empty:
-            log.warning("v1 特徴量計算失敗 → スキップ: %s", race_id)
-            continue
-        v1_df = v1_df.reset_index(drop=True)
-
-        v1_scores_raw = _predict_v1(v1_df, model_v1)
-        v1_df["_v1_score"] = v1_scores_raw
-
-        # ── opponent 特徴量計算 ────────────────────────────────────────────
-        df_target_opp = _build_opponent_target(race_meta, entries)
-        df_ent_aug    = _augment_entries_for_opponent(df_ent_hist, df_target_opp)
-        df_races_aug  = _augment_races_for_opponent(df_races_hist, race_meta)
-
-        try:
-            opp_scores_raw = _predict_opponent(
-                df_target_opp, df_ent_aug, df_races_aug, model_opp
-            )
-        except Exception:
-            log.exception("opponent 予測失敗: %s → v1 スコアのみ使用", race_id)
-            opp_scores_raw = v1_scores_raw.copy()
-
-        opp_feat_df = build_opponent_features(df_target_opp, df_ent_aug, df_races_aug)
-        opp_feat_df["_opp_score"] = opp_scores_raw.values
-
-        # ── アンサンブル（検証と同じ: per-race min-max → ブレンド） ────────
-        # v1_scores_raw と opp_scores_raw はインデックスが別々なのでリセット
-        v1_s   = pd.Series(v1_scores_raw.values,  index=range(len(entries)))
-        opp_s  = pd.Series(opp_scores_raw.values, index=range(len(entries)))
-        v1_norm, opp_norm, norm_blend = _blend_normalized(v1_s, opp_s)
-        deviation = _to_deviation(norm_blend)
-
-        # ── ローテーションフラグ ────────────────────────────────────────────
-        df_rot_target = v1_df[["horse_id", "race_id", "race_date", "keibajo_code",
-                                "grade_code"]].copy()
-        df_rot_target = df_rot_target.rename(columns={"grade_code": "cur_grade_code"})
-        # race_interval (休養日数) を追加
-        race_dt = pd.Timestamp(race_meta["race_date"])
-        intervals = []
-        for hid in df_rot_target["horse_id"].astype(str):
-            h = hist_df[hist_df["horse_id"] == hid]
-            if not h.empty:
-                last_dt = pd.Timestamp(h.iloc[-1]["race_date"])
-                intervals.append((race_dt - last_dt).days)
-            else:
-                intervals.append(np.nan)
-        df_rot_target["race_interval"] = intervals
-
-        try:
-            flags_df = build_rotation_flags(df_rot_target, engine_jvdl)
-        except Exception:
-            log.exception("rotation_flags 失敗: %s", race_id)
-            flags_df = pd.DataFrame(
-                [{c: np.nan for c in ROTATION_COLS} for _ in range(len(entries))],
-                index=df_rot_target.index,
-            )
-
-        # ── 全馬スコアリング ────────────────────────────────────────────────
-        opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
-        picks = _score_all_horses(
-            norm_blend, deviation, v1_norm, opp_norm,
-            flags_df.reset_index(drop=True),
-            entries, v1_df, opp_feat_reindexed, race_meta,
+        entries = _get_race_entries(race_meta["race_id"])
+        race_result = score_race_ai(
+            race_meta, entries, model_v1, model_opp,
+            engine_jvdl, df_ent_hist, df_races_hist,
         )
-
-        # レース内 top pick の自信度をレース単位に持つ
-        top_confidence = picks[0]["confidence_label"] if picks else "C"
-
-        race_results.append({
-            "race_id":        race_id,
-            "race_name":      race_meta["race_name"],
-            "race_date":      race_meta["race_date"],
-            "keibajo_code":   race_meta["keibajo_code"],
-            "race_num":       race_meta["race_num"],
-            "distance":       race_meta["distance"],
-            "surface":        "芝" if str(race_meta["track_code"]).startswith("1") else "ダート",
-            "grade_code":     race_meta["grade_code"],
-            "field_size":     len(entries),
-            "top_confidence": top_confidence,
-            "picks":          picks,
-        })
+        if race_result is not None:
+            race_results.append(race_result)
 
     sat, sun = _this_weekend()
     is_fallback = target_dates != [sat, sun] and target_dates != [sat] and target_dates != [sun]
