@@ -328,3 +328,69 @@ class TestPhase3HandlerIntegrity:
         conf = _HANDLERS["O1_PLACE"]
         assert "odds_min" in conf.columns
         assert "odds_max" in conf.columns
+
+
+# ── _HANDLERS 全エントリのテーブル名網羅テスト ─────────────────────────────────
+#
+# 従来は WH_ENTRY のみ .table を検証していた（test_wh_entry_targets_race_entries_v2）。
+# 「旧テーブル参照バグ」（races/race_entries を誤って旧スキーマのまま参照し続ける）が
+# 過去に複数回発生しているため、_HANDLERS の全エントリについて現行テーブルを
+# 指していることを網羅的に検証し、今後 _HANDLERS に新しいレコード種別が追加された
+# 際に旧テーブル名が紛れ込んだら即座に検知できるようにする。
+
+_CURRENT_TABLES: frozenset[str] = frozenset({
+    "races_v2",
+    "race_entries_v2",
+    "training_slope",
+    "training_wood",
+    "payouts",
+    "odds_win_v2",
+    "odds_place_v2",
+    "weather_track_updates",
+    "scratch_updates",
+    "jockey_changes",
+    "start_time_changes",
+    "course_changes",
+})
+
+# 「旧・未使用」テーブル（bulk_ingest_v2 / jvdl_parser.sink が書き込みを停止したテーブル）。
+# _HANDLERS のいずれのエントリもこれらを指してはならない。
+_LEGACY_TABLES: frozenset[str] = frozenset({"races", "race_entries", "horses", "jockeys", "trainers"})
+
+
+class TestAllHandlersTargetCurrentTables:
+    """_HANDLERS の全エントリが現行テーブルのみを指すことを網羅的に検証する。"""
+
+    @pytest.mark.parametrize("record_type", sorted(_HANDLERS.keys()))
+    def test_handler_table_is_a_known_current_table(self, record_type):
+        conf = _HANDLERS[record_type]
+        assert conf.table in _CURRENT_TABLES, (
+            f"_HANDLERS[{record_type!r}].table = {conf.table!r} は "
+            f"現行テーブルの許可リストに含まれていない。新規追加なら _CURRENT_TABLES に"
+            f"追記するか、旧テーブルを誤参照していないか確認すること。"
+        )
+
+    @pytest.mark.parametrize("record_type", sorted(_HANDLERS.keys()))
+    def test_handler_table_is_not_a_legacy_table(self, record_type):
+        conf = _HANDLERS[record_type]
+        assert conf.table not in _LEGACY_TABLES, (
+            f"_HANDLERS[{record_type!r}].table = {conf.table!r} は"
+            f"「旧・未使用」テーブルを指している（bulk_ingest_v2/jvdl_parser.sinkの"
+            f"書き込み対象外）。races_v2/race_entries_v2 等の現行テーブルに修正すること。"
+        )
+
+    def test_all_handlers_covered_by_current_or_legacy_set(self):
+        """_CURRENT_TABLES / _LEGACY_TABLES のどちらにも属さない未知のテーブル名が
+        紛れ込んだ場合に検知する（新規テーブル追加時にこのテストが通知として落ちる）。"""
+        unknown = {
+            conf.table for conf in _HANDLERS.values()
+            if conf.table not in _CURRENT_TABLES and conf.table not in _LEGACY_TABLES
+        }
+        assert not unknown, (
+            f"_HANDLERS に未分類のテーブル名がある: {unknown}。"
+            f"_CURRENT_TABLES（現行）か _LEGACY_TABLES（旧・禁止）のいずれかに分類すること。"
+        )
+
+    def test_handlers_registry_is_non_empty(self):
+        """このテスト自体が無意味に成功し続けないためのガード（レジストリが空でないこと）。"""
+        assert len(_HANDLERS) >= 10
