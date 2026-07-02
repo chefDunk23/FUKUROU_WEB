@@ -14,6 +14,7 @@ pace_bias_ai/features/rotation_flag.py
 | is_step | 叩き台疑惑フラグ (長期休養明け or 大幅格下げ) |
 | transport_flag | 長距離輸送フラグ（所属と今走競馬場が東西反対）|
 | class_vs_best | 過去最高クラスと今走のクラス差（正=格上参戦, 負=未知クラス）|
+| best_class_rank | 過去最高クラスのgrade_rank（1=G1...5=D, 6=条件戦のみ=デフォルト）。2026-07 重賞用confidence判定の class_vs_best 内訳分類に追加 |
 
 ## 競馬場の東西分類
 - 東系(美浦圏): keibajo_code 01-06（札幌・函館・福島・新潟・東京・中山）
@@ -60,6 +61,7 @@ ROTATION_COLS = [
     'transport_flag',
     'class_vs_best',
     'won_and_classup',
+    'best_class_rank',
 ]
 
 
@@ -220,6 +222,7 @@ def build_rotation_flags(
             cur_grade_rank_v = _grade_rank(row.get('cur_grade_code') or row.get('grade_code'))
             class_vs_best = best_class_rank - cur_grade_rank_v  # 正=今走が格上（格上参戦）
         else:
+            best_class_rank = np.nan
             class_vs_best = np.nan
 
         # ─── won_and_classup ──────────────────────────────────────────────
@@ -246,6 +249,7 @@ def build_rotation_flags(
             'transport_flag': transport_flag,
             'class_vs_best': class_vs_best,
             'won_and_classup': won_and_classup,
+            'best_class_rank': best_class_rank,
         })
 
     return pd.DataFrame(results, index=df_target.index)

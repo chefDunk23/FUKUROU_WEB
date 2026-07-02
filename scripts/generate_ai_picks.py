@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -53,6 +54,13 @@ from pace_bias_ai.opponent_model.features import (
     FEATURE_COLS as OPP_FEATURE_COLS,
 )
 from pace_bias_ai.features.rotation_flag import build_rotation_flags, ROTATION_COLS
+from pace_bias_ai.features.graded_confidence import (
+    is_graded_race,
+    classify_class_transition,
+    class_transition_is_positive,
+    is_excuse_margin_eligible,
+    is_age_veteran,
+)
 from pace_bias_ai.features.condition_mapper import (
     ConditionMapper,
     HorseExplanation,
@@ -111,6 +119,12 @@ def _jvdl_conn():
 
 def _jvdl_engine() -> sqlalchemy.engine.Engine:
     cfg = DB_JVDL
+    url = f"postgresql+psycopg2://{cfg['user']}:{cfg['password']}@{cfg['host']}:{cfg['port']}/{cfg['dbname']}"
+    return create_engine(url, pool_pre_ping=True)
+
+
+def _v2_engine() -> sqlalchemy.engine.Engine:
+    cfg = DB_V2
     url = f"postgresql+psycopg2://{cfg['user']}:{cfg['password']}@{cfg['host']}:{cfg['port']}/{cfg['dbname']}"
     return create_engine(url, pool_pre_ping=True)
 
@@ -350,6 +364,118 @@ def _load_pace_v4_history(
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["race_date"] = pd.to_datetime(df["race_id"].str[:8], format="%Y%m%d", errors="coerce")
     return df
+
+
+# ── 重賞用confidence判定 補助データ取得 ────────────────────────────────────────
+# pace_bias_ai/features/graded_confidence.py の分岐が grade_code in (A/B/C/L/E)
+# のレースでのみ必要とする追加データ。通常レースでは呼び出されない
+# （score_race_ai 内で is_graded の場合のみ取得する）。
+
+_TIME_DIFF_RE = re.compile(r"^[+-]\d+$")
+
+
+def _fetch_prev_race_excuse_info(
+    horse_ids: list[str],
+    before_date: str,
+) -> dict[str, dict]:
+    """対象馬の直前確定レースの grade_code と着差(秒)を取得する（度外視判定用）。
+
+    fukurou_keiba_v2 (races/race_entries) を参照する。time_diff は
+    符号付き3桁整数文字列(0.1秒単位、例 "+024"=2.4秒, "-000"=0.0秒)。
+
+    Returns: {horse_id: {"grade_code": str|None, "margin_sec": float|None}}
+    """
+    if not horse_ids:
+        return {}
+    sql = sqlalchemy.text("""
+        SELECT DISTINCT ON (e.horse_id)
+            e.horse_id, r.grade_code, e.time_diff
+        FROM race_entries e
+        JOIN races r ON r.id = e.race_id
+        WHERE e.horse_id IN :horse_ids
+          AND r.race_date < :before_date
+          AND e.kakutei_chakujun IS NOT NULL AND e.kakutei_chakujun > 0
+        ORDER BY e.horse_id, r.race_date DESC, r.id DESC
+    """).bindparams(bindparam("horse_ids", expanding=True))
+
+    with _v2_engine().connect() as conn:
+        rows = conn.execute(sql, {"horse_ids": list(horse_ids), "before_date": before_date}).fetchall()
+
+    result: dict[str, dict] = {}
+    for hid, grade_code, time_diff in rows:
+        margin_sec = None
+        td = (time_diff or "").strip()
+        if _TIME_DIFF_RE.match(td):
+            margin_sec = abs(int(td)) / 10.0
+        result[str(hid)] = {"grade_code": grade_code, "margin_sec": margin_sec}
+    return result
+
+
+def _fetch_training_condition1_flags(
+    engine: sqlalchemy.engine.Engine,
+    blood_nos: list[str],
+    race_date: str,
+) -> dict[str, bool]:
+    """対象馬が tipster/training_ranker.py の条件①（坂路ラスト1F≤11.9秒かつ
+    全区間加速ラップ）に該当するかを判定する（調教①該当フラグ、重賞用confidence用）。
+
+    generate_picks_report.py::_fetch_training_for_race と同一パターン
+    （training_slope/training_wood を都度クエリしrank_horses_by_trainingへ）。
+
+    Returns: {blood_no: bool}
+    """
+    from tipster.training_ranker import SlopeRow, WoodRow, load_config as _load_tr_config, rank_horses_by_training
+
+    if not blood_nos:
+        return {}
+    d = pd.Timestamp(race_date[:4] + "-" + race_date[4:6] + "-" + race_date[6:8])
+    since = (d - pd.Timedelta(days=30)).strftime("%Y%m%d")
+
+    slope_by: dict[str, list] = {bn: [] for bn in blood_nos}
+    wood_by: dict[str, list] = {bn: [] for bn in blood_nos}
+
+    with engine.connect() as conn:
+        for r in conn.execute(
+            sqlalchemy.text(
+                "SELECT blood_no, chokyo_date, chokyo_time, center_cd,"
+                " time_4f, lap_l4_l3, lap_l3_l2, lap_l2_l1, lap_l1"
+                " FROM training_slope"
+                " WHERE blood_no IN :bns AND chokyo_date >= :since AND chokyo_date <= :until"
+            ).bindparams(bindparam("bns", expanding=True)),
+            {"bns": list(blood_nos), "since": since, "until": race_date},
+        ).fetchall():
+            slope_by.setdefault(r[0], []).append(
+                SlopeRow(blood_no=r[0], chokyo_date=r[1], chokyo_time=r[2],
+                         center_cd=r[3], time_4f=r[4], lap_l4_l3=r[5],
+                         lap_l3_l2=r[6], lap_l2_l1=r[7], lap_l1=r[8])
+            )
+        for r in conn.execute(
+            sqlalchemy.text(
+                "SELECT blood_no, chokyo_date, chokyo_time, time_5f, lap_l2_l1, lap_l1"
+                " FROM training_wood"
+                " WHERE blood_no IN :bns AND chokyo_date >= :since AND chokyo_date <= :until"
+            ).bindparams(bindparam("bns", expanding=True)),
+            {"bns": list(blood_nos), "since": since, "until": race_date},
+        ).fetchall():
+            wood_by.setdefault(r[0], []).append(
+                WoodRow(blood_no=r[0], chokyo_date=r[1], chokyo_time=r[2],
+                        time_5f=r[3], lap_l2_l1=r[4], lap_l1=r[5])
+            )
+
+    try:
+        config = _load_tr_config()
+        ranked = rank_horses_by_training(
+            blood_nos=blood_nos,
+            slope_rows_by_horse=slope_by,
+            wood_rows_by_horse=wood_by,
+            race_date=race_date,
+            config=config,
+        )
+    except Exception:
+        log.exception("調教①判定失敗（重賞用confidence）")
+        return {}
+
+    return {r.blood_no: (r.condition_label == "①") for r in ranked}
 
 
 def _load_jockey_recent_wins(
@@ -823,9 +949,16 @@ def _compute_confidence(
     flags: dict,
     race_meta: dict,
     v1_row: pd.Series,
+    is_graded: bool = False,
+    graded_extra: dict | None = None,
 ) -> tuple[int, str]:
     """
     自信度スコアを計算する。
+
+    grade_code が A/B/C/L/E（重賞・OP・L）のレースは is_graded=True で
+    呼ばれ、_compute_confidence_graded に分岐する（重賞用confidence判定、
+    docs/validation/GRADED_CONFIDENCE_ANALYSIS.md で検証済み）。
+    通常レース（is_graded=False）の判定ロジックは以下の通り変更なし。
 
     加点条件:
       +1 得意セグメント（中距離1600m超 or 長距離 or 東京/函館）
@@ -838,6 +971,9 @@ def _compute_confidence(
 
     ラベル: A(3以上) / B(1〜2) / C(0以下)
     """
+    if is_graded:
+        return _compute_confidence_graded(flags, race_meta, v1_row, graded_extra or {})
+
     score = 0
 
     # 得意セグメント判定（レース条件ベース）
@@ -867,6 +1003,85 @@ def _compute_confidence(
     return score, label
 
 
+def _compute_confidence_graded(
+    flags: dict,
+    race_meta: dict,
+    v1_row: pd.Series,
+    graded_extra: dict,
+) -> tuple[int, str]:
+    """重賞（grade_code in A/B/C/L/E）専用の自信度計算。
+
+    通常レース用 _compute_confidence との差分（docs/validation/
+    GRADED_CONFIDENCE_ANALYSIS.md で検証済み、学習期間2022-01〜2025-05・
+    グレード+OP/L N=4,092）:
+
+    無効化する条件（重賞では効かないと実証済み）:
+      is_step（重賞の計画的休養を誤検知するため）
+      is_genuine
+      long_rest（休み明け3ヶ月以上は重賞では26.3%と最高、ネガ扱い禁止。
+                 is_stepの判定条件の一部のためis_step無効化で自動的に無効化）
+      transport_flag（再計測で-2〜3ptのみ、無効化）
+
+    据え置き（通常レースと同じ）:
+      +1 得意セグメント
+      +1 近走好成績
+      won_and_classup によるネガ判定・ネガ条件ゼロ加点
+
+    追加する条件（重賞専用）:
+      クラス移動: 格下げ/同格ローテ=+1（29.9%/26.5%）、
+                  格上挑戦・条件戦からの挑戦=-1（18.7%/15.9%）
+      +1 調教①該当（+5.4pt）
+      +1 度外視（前走G1/G2 かつ 着差0.5秒以内、32.4%）
+      -1 高齢（7歳以上、重賞でも有効）
+
+    ラベル: A(3以上) / B(1〜2) / C(0以下)（通常レースと同一閾値）
+    """
+    graded_extra = graded_extra or {}
+    score = 0
+
+    # 得意セグメント（据え置き）
+    dist  = int(race_meta.get("distance", 0))
+    venue = str(race_meta.get("keibajo_code", ""))
+    if dist > 1600 or venue in ("05", "02"):
+        score += 1
+
+    # 近走好成績（据え置き）
+    avg_r = v1_row.get("avg_rank_3", np.nan)
+    if not pd.isna(avg_r) and float(avg_r) <= 3.5:
+        score += 1
+
+    # ネガ条件: won_and_classup のみ判定（is_step/transport_flag は重賞で無効化）
+    if flags.get("won_and_classup") == 1:
+        score -= 1
+    else:
+        score += 1
+
+    # クラス移動
+    transition = classify_class_transition(
+        flags.get("class_vs_best"), flags.get("best_class_rank")
+    )
+    transition_positive = class_transition_is_positive(transition)
+    if transition_positive is True:
+        score += 1
+    elif transition_positive is False:
+        score -= 1
+
+    # 調教①該当
+    if graded_extra.get("training_condition1"):
+        score += 1
+
+    # 度外視（前走G1/G2 かつ 着差0.5秒以内）
+    if graded_extra.get("excuse_margin"):
+        score += 1
+
+    # 高齢（7歳以上）
+    if graded_extra.get("age_veteran"):
+        score -= 1
+
+    label = "A" if score >= 3 else "B" if score >= 1 else "C"
+    return score, label
+
+
 # ── 全馬スコアリング ──────────────────────────────────────────────────────────
 
 def _score_all_horses(
@@ -879,10 +1094,19 @@ def _score_all_horses(
     v1_df: pd.DataFrame,
     opp_df: pd.DataFrame,
     race_meta: dict,
+    is_graded: bool = False,
+    graded_extra_by_horse: dict[str, dict] | None = None,
 ) -> list[dict]:
-    """全馬を偏差値降順に並べて返す（上位制限なし）。"""
+    """全馬を偏差値降順に並べて返す（上位制限なし）。
+
+    is_graded=True の場合、grade_code in (A/B/C/L/E) のレース用confidence判定
+    （_compute_confidence_graded）を使う。graded_extra_by_horse は
+    {horse_id: {"training_condition1": bool, "excuse_margin": bool,
+    "age_veteran": bool}} を渡す（is_graded=False の場合は無視される）。
+    """
     sorted_idx = deviation.sort_values(ascending=False).index
     picks = []
+    graded_extra_by_horse = graded_extra_by_horse or {}
 
     for rank, idx in enumerate(sorted_idx):
         entry = next((e for e in entries if e["horse_id"] == v1_df.loc[idx, "horse_id"]), {})
@@ -895,7 +1119,11 @@ def _score_all_horses(
         v1_row = v1_df.loc[idx] if idx in v1_df.index else pd.Series(dtype=float)
 
         # 自信度
-        conf_score, conf_label = _compute_confidence(flags, race_meta, v1_row)
+        conf_score, conf_label = _compute_confidence(
+            flags, race_meta, v1_row,
+            is_graded=is_graded,
+            graded_extra=graded_extra_by_horse.get(horse_id),
+        )
 
         # 説明生成（上位3頭のみ）
         explanation_text = ""
@@ -1113,12 +1341,42 @@ def score_race_ai(
             index=df_rot_target.index,
         )
 
+    # ── 重賞用confidence判定 補助データ（grade_code in A/B/C/L/E のレースのみ）──
+    is_graded = is_graded_race(race_meta.get("grade_code"))
+    graded_extra_by_horse: dict[str, dict] = {}
+    if is_graded:
+        try:
+            excuse_info = _fetch_prev_race_excuse_info(horse_ids, race_meta["race_date"])
+        except Exception:
+            log.exception("度外視判定用データ取得失敗（重賞用confidence）: %s", race_id)
+            excuse_info = {}
+        try:
+            training1_flags = _fetch_training_condition1_flags(
+                engine_jvdl, horse_ids, race_id[:8]
+            )
+        except Exception:
+            log.exception("調教①判定失敗（重賞用confidence）: %s", race_id)
+            training1_flags = {}
+
+        for e in entries:
+            hid = e["horse_id"]
+            excuse = excuse_info.get(hid, {})
+            graded_extra_by_horse[hid] = {
+                "training_condition1": bool(training1_flags.get(hid, False)),
+                "excuse_margin": is_excuse_margin_eligible(
+                    excuse.get("grade_code"), excuse.get("margin_sec")
+                ),
+                "age_veteran": is_age_veteran(e.get("horse_age")),
+            }
+
     # ── 全馬スコアリング ────────────────────────────────────────────────
     opp_feat_reindexed = opp_feat_df.reset_index(drop=True)
     picks = _score_all_horses(
         norm_blend, deviation, v1_norm, opp_norm,
         flags_df.reset_index(drop=True),
         entries, v1_df, opp_feat_reindexed, race_meta,
+        is_graded=is_graded,
+        graded_extra_by_horse=graded_extra_by_horse,
     )
 
     # レース内 top pick の自信度をレース単位に持つ
@@ -1136,6 +1394,7 @@ def score_race_ai(
         "field_size":     len(entries),
         "top_confidence": top_confidence,
         "data_kubun":     race_meta.get("data_kubun"),
+        "rank_mode":      "graded" if is_graded else "standard",
         "picks":          picks,
     }
 
