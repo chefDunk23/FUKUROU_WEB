@@ -191,7 +191,7 @@ def scan_repo_for_legacy_table_refs() -> dict[str, list[tuple[int, str]]]:
 #
 # (相対パス, 行番号): 理由
 #
-# 2026-07 V2アンサンブル引退の一環で対応済み（許可リストから除去）:
+# 2026-07 V2アンサンブル引退・到達不能コード整理の一環で対応済み（許可リストから除去）:
 #   - api_v2/routers/races.py:1365 (_fetch_detail_supplements) は
 #     _compute_detail ごと削除（V2アンサンブル専用ロジックのため）。
 #   - api_v2/routers/races.py:1420 (get_race_training) は
@@ -199,14 +199,11 @@ def scan_repo_for_legacy_table_refs() -> dict[str, list[tuple[int, str]]]:
 #   - api_v2/routers/public_races.py:189 (_SQL_BLOODLINE) は
 #     races_v2 移行の実データ検証ができていないため、エンドポイント自体を
 #     503 で一時無効化した（クエリ定数は参考のため残置、実行はされない）。
+#   - tipster/hit_rate_analysis.py は到達不能コード（呼び出し元CLIが
+#     archive/ 移動済み）として削除済み。
 #
-# tipster/hit_rate_analysis.py は、到達不能コード（呼び出し元CLIが
-# archive/ 移動済み）として別途削除予定。削除時にこのエントリも除去する。
-ALLOWLIST: dict[tuple[str, int], str] = {
-    ("tipster/hit_rate_analysis.py", 141):
-        "_fetch_popularity_map: 人気順位(popularity)取得（jvdl側のrace_entriesのみに存在）"
-        "。到達不能コードとして別途削除予定",
-}
+# 現時点で該当する既知の意図的参照は無い。
+ALLOWLIST: dict[tuple[str, int], str] = {}
 
 
 class TestDbReferenceGuard:
