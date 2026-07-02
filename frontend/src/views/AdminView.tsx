@@ -111,22 +111,20 @@ const STORE_TO_JOB_PARAM: Record<string, string | null> = {
 }
 
 interface Stats {
-  total:         number
-  running:       number
-  queued:        number
-  failed:        number
-  done:          number
-  lastRecompute: Job | null
+  total:   number
+  running: number
+  queued:  number
+  failed:  number
+  done:    number
 }
 
 function calcStats(jobs: Job[]): Stats {
   return {
-    total:         jobs.length,
-    running:       jobs.filter(j => j.status === 'running').length,
-    queued:        jobs.filter(j => j.status === 'queued').length,
-    failed:        jobs.filter(j => j.status === 'failed').length,
-    done:          jobs.filter(j => j.status === 'done').length,
-    lastRecompute: jobs.find(j => j.job_type === 'recompute_predictions') ?? null,
+    total:   jobs.length,
+    running: jobs.filter(j => j.status === 'running').length,
+    queued:  jobs.filter(j => j.status === 'queued').length,
+    failed:  jobs.filter(j => j.status === 'failed').length,
+    done:    jobs.filter(j => j.status === 'done').length,
   }
 }
 
@@ -148,8 +146,6 @@ function AdminDashboardSection() {
   const [healthErr,       setHealthErr]       = useState<string | null>(null)
   const [stats,           setStats]           = useState<Stats | null>(null)
   const [loading,         setLoading]         = useState(true)
-  const [submitting,      setSubmitting]      = useState(false)
-  const [submitMsg,       setSubmitMsg]       = useState<string | null>(null)
   // フィーチャーストア更新
   const [storeUpdating,   setStoreUpdating]   = useState<string | null>(null)  // storeName or '__bulk__'
   const [storeMsg,        setStoreMsg]        = useState<string | null>(null)
@@ -164,7 +160,6 @@ function AdminDashboardSection() {
   const [jvSyncMsg,       setJvSyncMsg]       = useState<string | null>(null)
   const jvSyncMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const storeMsgTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const submitMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const syncMsgTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // メッセージを N 秒後に自動消去
@@ -172,11 +167,6 @@ function AdminDashboardSection() {
     setStoreMsg(msg)
     if (storeMsgTimer.current) clearTimeout(storeMsgTimer.current)
     storeMsgTimer.current = setTimeout(() => setStoreMsg(null), ms)
-  }
-  function showSubmitMsg(msg: string, ms = 6000) {
-    setSubmitMsg(msg)
-    if (submitMsgTimer.current) clearTimeout(submitMsgTimer.current)
-    submitMsgTimer.current = setTimeout(() => setSubmitMsg(null), ms)
   }
   function showSyncMsg(msg: string, ms = 6000) {
     setSyncMsg(msg)
@@ -310,20 +300,6 @@ function AdminDashboardSection() {
       showJvSyncMsg(`エラー: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setJvSyncRunning(false)
-    }
-  }
-
-  async function handleQuickRecompute(mode: 'weekend' | 'today') {
-    setSubmitting(true)
-    setSubmitMsg(null)
-    try {
-      const job = await submitJob('recompute_predictions', { mode })
-      showSubmitMsg(`ジョブ #${job.id} を投入しました`)
-      void load()
-    } catch (e) {
-      showSubmitMsg(`エラー: ${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setSubmitting(false)
     }
   }
 
@@ -531,28 +507,6 @@ function AdminDashboardSection() {
         </section>
       )}
 
-      {/* 最終 recompute_predictions */}
-      {stats?.lastRecompute && (
-        <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-1">
-          <div className="flex items-center gap-2">
-            <StatusBadge status={stats.lastRecompute.status} />
-            <span className="text-sm text-gray-600">
-              #{stats.lastRecompute.id} / mode={String(stats.lastRecompute.params.mode ?? '-')}
-            </span>
-          </div>
-          {stats.lastRecompute.started_at && (
-            <p className="text-xs text-gray-400">
-              開始: {new Date(stats.lastRecompute.started_at).toLocaleString('ja-JP')}
-            </p>
-          )}
-          {stats.lastRecompute.log_tail && (
-            <pre className="mt-2 text-xs bg-gray-50 rounded p-2 overflow-auto max-h-24 text-gray-700">
-              {stats.lastRecompute.log_tail.split('\n').slice(-5).join('\n')}
-            </pre>
-          )}
-        </div>
-      )}
-
       {/* クイックアクション */}
       <section>
         <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide mb-3">
@@ -574,31 +528,10 @@ function AdminDashboardSection() {
               JV-Data 同期
             </button>
           )}
-          <button
-            onClick={() => void handleQuickRecompute('weekend')}
-            disabled={submitting}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-          >
-            <PlayIcon size={14} />
-            週末レース予測を再計算
-          </button>
-          <button
-            onClick={() => void handleQuickRecompute('today')}
-            disabled={submitting}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-700 text-white text-sm font-medium rounded-lg hover:bg-gray-800 disabled:opacity-50"
-          >
-            <PlayIcon size={14} />
-            今日のレースを再計算
-          </button>
         </div>
         {jvSyncMsg && (
           <p className={`mt-2 text-sm ${jvSyncMsg.startsWith('エラー') ? 'text-red-600' : 'text-green-600'}`}>
             {jvSyncMsg}
-          </p>
-        )}
-        {submitMsg && (
-          <p className={`mt-2 text-sm ${submitMsg.startsWith('エラー') ? 'text-red-600' : 'text-green-600'}`}>
-            {submitMsg}
           </p>
         )}
       </section>
@@ -923,7 +856,7 @@ function AdminJobsSection() {
 
 function SubmitJobForm({ onSubmit }: { onSubmit: () => void }) {
   const [open,       setOpen]       = useState(false)
-  const [jobTypeId,  setJobTypeId]  = useState('recompute_predictions')
+  const [jobTypeId,  setJobTypeId]  = useState('update_feature_stores')
   const [paramsJson, setParamsJson] = useState('{"mode":"weekend"}')
   const [submitting, setSubmitting] = useState(false)
   const [msg,        setMsg]        = useState<string | null>(null)

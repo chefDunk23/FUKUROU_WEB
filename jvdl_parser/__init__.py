@@ -8,12 +8,10 @@ from .fields import F, RECORD_DEFS
 from .parser import RecordLengthError, iter_records, parse_record
 from .sink import BulkSink
 from .processor import ProcessResult, process_stream
-from .hook import post_recompute
 
 __all__ = [
     "F", "RECORD_DEFS",
     "RecordLengthError", "iter_records", "parse_record",
     "BulkSink",
     "ProcessResult", "process_stream",
-    "post_recompute",
 ]

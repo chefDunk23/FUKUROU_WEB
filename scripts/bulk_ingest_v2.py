@@ -45,12 +45,8 @@ from shared.config import DB_JVDL
 from jvdl_parser.parser import (
     parse_record, parse_wh_entries, parse_o1_entries, parse_hr_payouts, stats,
 )
-from jvdl_parser.sink import BulkSink, _build_race_id
+from jvdl_parser.sink import BulkSink
 from jvdl_parser.processor import _write_dlq
-from jvdl_parser.hook import post_recompute
-
-# WH/O1 に加えて hook を発火させる追加種別
-_HOOK_AFFECTING = frozenset(["WH", "WE", "O1", "RA", "SE", "AV", "JC", "TC", "CC", "HR"])
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,11 +64,10 @@ def _ingest_file(
     sink: BulkSink | None,
     conn,
     dry_run: bool,
-) -> tuple[int, int, dict[str, int], set[str]]:
-    """1 ファイルを行単位でパース → BulkSink へ投入。(ok, dlq, type_counts, affected_race_ids) を返す。"""
+) -> tuple[int, int, dict[str, int]]:
+    """1 ファイルを行単位でパース → BulkSink へ投入。(ok, dlq, type_counts) を返す。"""
     ok = dlq = 0
     type_counts: dict[str, int] = defaultdict(int)
-    affected: set[str] = set()
     dataspec = fpath.stem  # raw_DIFN -> DIFN
     log_interval = 500_000
 
@@ -110,12 +105,6 @@ def _ingest_file(
                     else:
                         sink.feed(rtype, row)
 
-                # hook 用: レース影響範囲を収集
-                if rtype in _HOOK_AFFECTING:
-                    rid = _build_race_id(row)
-                    if rid.strip("0"):
-                        affected.add(rid)
-
                 type_counts[rtype] += 1
                 ok += 1
 
@@ -142,10 +131,10 @@ def _ingest_file(
         sink.flush()
         conn.commit()
 
-    return ok, dlq, dict(type_counts), affected
+    return ok, dlq, dict(type_counts)
 
 
-def run_ingest(files: list[str], dry_run: bool = False, hook: bool = False) -> None:
+def run_ingest(files: list[str], dry_run: bool = False) -> None:
     target_files: list[Path] = []
     for fname in files:
         p = _RAW_DIR / fname
@@ -164,7 +153,6 @@ def run_ingest(files: list[str], dry_run: bool = False, hook: bool = False) -> N
 
     total_ok = total_dlq = 0
     all_type_counts: dict[str, int] = defaultdict(int)
-    all_affected: set[str] = set()
     t0 = time.monotonic()
 
     conn = psycopg2.connect(**DB_JVDL, connect_timeout=10)
@@ -174,12 +162,11 @@ def run_ingest(files: list[str], dry_run: bool = False, hook: bool = False) -> N
             logger.info("[%d/%d] 処理中: %s (%.1f MB)",
                         i, len(target_files), fpath.name,
                         fpath.stat().st_size / (1024 * 1024))
-            ok, dlq, type_counts, affected = _ingest_file(fpath, sink, conn, dry_run)
+            ok, dlq, type_counts = _ingest_file(fpath, sink, conn, dry_run)
             total_ok += ok
             total_dlq += dlq
             for k, v in type_counts.items():
                 all_type_counts[k] += v
-            all_affected |= affected
             elapsed = time.monotonic() - t0
             dlq_pct = dlq / max(ok + dlq, 1) * 100
             logger.info("  ok=%d dlq=%d dlq率=%.4f%% elapsed=%.0fs",
@@ -236,19 +223,6 @@ def run_ingest(files: list[str], dry_run: bool = False, hook: bool = False) -> N
 
     print("=" * 62)
 
-    # ── hook: 影響レースの再計算ジョブを api_admin に投入 ──────────────────────
-    if hook and not dry_run and all_affected:
-        import os
-        admin_url = os.environ.get("ADMIN_BASE_URL", "http://127.0.0.1:8003")
-        api_key   = os.environ.get("ADMIN_API_KEY") or os.environ.get("API_KEY", "")
-        logger.info("[Hook] 影響 race_ids=%d 件 → recompute_predictions ジョブ投入",
-                    len(all_affected))
-        try:
-            result = post_recompute(all_affected, admin_base_url=admin_url, api_key=api_key)
-            logger.info("[Hook] ジョブ投入完了: %s", result)
-        except Exception as exc:
-            logger.error("[Hook] ジョブ投入失敗 (続行): %s", exc)
-
     sys.exit(0 if dlq_rate < 0.1 else 1)
 
 
@@ -264,16 +238,11 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="DB 書き込みなしでパースのみ"
     )
-    parser.add_argument(
-        "--hook", action="store_true",
-        help="処理後に api_admin/jobs へ recompute_predictions ジョブを投入する",
-    )
     args = parser.parse_args()
 
     run_ingest(
         files=[f.strip() for f in args.files.split(",") if f.strip()],
         dry_run=args.dry_run,
-        hook=args.hook,
     )
 
 

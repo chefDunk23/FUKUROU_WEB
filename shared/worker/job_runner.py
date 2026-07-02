@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 5          # 秒
 LOG_MAX_LINES = 50         # log_tail に保持する最大行数
 _HEALTH_CHECK_HOUR_JST = 9  # 毎日 09:00 JST にヘルスチェック
-_ADVISORY_LOCK_KEY = 42002  # ワーカー起動唯一性保証（batch_predictor の 42001 と別）
+_ADVISORY_LOCK_KEY = 42002  # ワーカー起動唯一性保証
 
 # ── アイドル自動終了 ──────────────────────────────────────────────────────────
 # 常駐させない運用方針: 起動時にキューを一括処理（ドレイン）した後、
@@ -61,18 +61,12 @@ _IDLE_EXIT_ENV = "WORKER_IDLE_EXIT_SECONDS"
 _DEFAULT_IDLE_EXIT_SECONDS = 120
 
 # スケジュール定義（hour/minute は JST）
+# 2026-07: V2アンサンブル引退に伴い recompute_predictions（V2の事前計算バッチ）の
+# 週次スケジュールは削除した。予想生成は generate_ai_picks.py / generate_picks_report.py
+# の手動・API経由実行（api_v2/routers/tipster.py の /ai-refresh, /refresh）に一本化。
 _SCHEDULES = [
     # 毎日 09:00 — health_check（_scheduled_health_check を直接呼ぶ）
     {"kind": "direct",  "day_of_week": "*",    "hour": 9,  "minute": 0,  "fn": "_scheduled_health_check"},
-    # 金曜 21:00 — 週末レース事前計算をジョブキューに投入
-    {"kind": "enqueue", "day_of_week": "fri",  "hour": 21, "minute": 0,
-     "job_type": "recompute_predictions", "params": {"mode": "weekend"}},
-    # 土曜 08:30 — 当日レース再計算をジョブキューに投入
-    {"kind": "enqueue", "day_of_week": "sat",  "hour": 8,  "minute": 30,
-     "job_type": "recompute_predictions", "params": {"mode": "today"}},
-    # 日曜 08:30 — 当日レース再計算をジョブキューに投入
-    {"kind": "enqueue", "day_of_week": "sun",  "hour": 8,  "minute": 30,
-     "job_type": "recompute_predictions", "params": {"mode": "today"}},
     # 月曜 07:00 — 先週末の実績を tipster_results に取り込む
     {"kind": "enqueue", "day_of_week": "mon",  "hour": 7,  "minute": 0,
      "job_type": "update_tipster_results", "params": {}},
@@ -598,64 +592,36 @@ def _handle_sync_jvdata(params: dict, ctx: JobContext) -> None:
         raise RuntimeError(f"一部 dataspec 失敗: {failed}")
 
 
-@register("recompute_predictions")
-def _handle_recompute_predictions(params: dict, ctx: JobContext) -> None:
-    """今週末（または指定 race_ids）の予測キャッシュを再計算する。
+def _get_weekend_race_ids() -> list[str]:
+    """JST での今週末（土日）の race_id 一覧を fukurou_keiba_v2.races から返す。
 
-    params:
-        race_ids:  list[str] | None — 省略時は今週末の全レース
-        mode:      "weekend" | "today" | "ids" — デフォルト "weekend"
+    2026-07: V2アンサンブル引退に伴い削除した api_v2/services/batch_predictor.py
+    の同名関数から、tipster系ジョブが引き続き必要とする部分のみを移植した。
     """
-    mode = params.get("mode", "weekend")
-    race_ids: list[str] | None = params.get("race_ids")
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZoneInfo
 
-    ctx.append_log(f"[recompute_predictions] mode={mode} started")
-    ctx.report_progress(5)
+    from shared.config import DB_V2
 
-    # 意図的なレイヤー違反の例外（AD-1 で判断・記録）:
-    # _run_batch 自体が api_v2.routers.prediction / api_v2.routers.races の
-    # 計算ロジック（_compute_prediction, _compute_detail 等）に依存しているため、
-    # shared/ に切り出しても api_v2 依存が shared 側に移るだけで解消しない。
-    # 予測計算ロジックを api_v2 から動かす設計変更が必要になるため、ここでは
-    # 遅延 import のまま残す。
-    from api_v2.services.batch_predictor import (
-        _run_batch,
-        get_weekend_race_ids,
-        get_today_race_ids,
-    )
+    jst = _ZoneInfo("Asia/Tokyo")
+    today = _dt.datetime.now(jst).date()
+    days_to_sat = (5 - today.weekday()) % 7
+    sat = today + _dt.timedelta(days=days_to_sat)
+    sun = sat + _dt.timedelta(days=1)
 
-    if mode == "ids" and race_ids:
-        ids = race_ids
-    elif mode == "today":
-        ids = get_today_race_ids()
-    else:
-        ids = get_weekend_race_ids()
-
-    ctx.append_log(f"対象 race_ids: {len(ids)} 件")
-    ctx.report_progress(10)
-
-    if not ids:
-        ctx.append_log("対象レースなし — 完了")
-        return
-
-    saved, failed_cnt, skipped = _run_batch(ids, batch_label=f"worker_{mode}")
-    ctx.report_progress(100)
-
-    # Redis 無効化
-    redis_deleted = 0
+    race_ids: list[str] = []
+    conn = psycopg2.connect(**DB_V2)
     try:
-        from shared.cache import RACE_DETAIL_CACHE_PFX, get_redis_client
-        r = get_redis_client()
-        if r:
-            keys = [f"{RACE_DETAIL_CACHE_PFX}{rid}" for rid in ids]
-            redis_deleted = r.delete(*keys)
-    except Exception as e:
-        ctx.append_log(f"Redis 無効化スキップ: {e}")
-
-    ctx.append_log(
-        f"完了: 計算対象={len(ids)} / 保存={saved} / スキップ(データなし)={skipped}"
-        f" / 失敗={failed_cnt} / Redis削除={redis_deleted}"
-    )
+        with conn.cursor() as cur:
+            for d in (sat, sun):
+                cur.execute(
+                    "SELECT id FROM races WHERE date >= %s AND date < %s + INTERVAL '1 day' ORDER BY id",
+                    (d, d),
+                )
+                race_ids.extend(row[0] for row in cur.fetchall())
+    finally:
+        conn.close()
+    return race_ids
 
 
 @register("run_tipster_evaluation")
@@ -679,8 +645,7 @@ def _handle_run_tipster_evaluation(params: dict, ctx: JobContext) -> None:
     ctx.report_progress(5)
 
     if not race_ids:
-        from api_v2.services.batch_predictor import get_weekend_race_ids
-        race_ids = get_weekend_race_ids()
+        race_ids = _get_weekend_race_ids()
 
     ctx.append_log(f"対象 race_ids: {len(race_ids)} 件")
     if not race_ids:

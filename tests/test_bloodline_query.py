@@ -4,6 +4,11 @@ tests/test_bloodline_query.py
 X-2: _SQL_BLOODLINE の win_odds カラム確認 + 実データ疎通テスト。
 
 DB 未接続環境では全テストを skip する。
+
+2026-07: 対応する本番エンドポイント（GET /api/v2/public/analysis/bloodline）は
+races_v2 移行が未検証のため一時無効化中（api_v2/routers/public_races.py 参照）。
+本テストが検証する fukurou_jvdl 旧スキーマ（races/race_entries/horses）自体は
+引き続き存在するため、クエリロジックの健全性チェックとして維持する。
 """
 import sys
 from pathlib import Path

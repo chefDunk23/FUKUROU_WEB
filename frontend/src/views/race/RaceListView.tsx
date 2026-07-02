@@ -20,7 +20,6 @@ import {
   type RaceSummary,
   type VenueColumn,
 } from '../../api/races'
-import { goToRace } from '../../utils/router'
 
 // ── セルサイズ設定 ────────────────────────────────────────────────────────────
 interface CellStyle { minWidth: number; pad: string; nameSize: string; metaSize: string }
@@ -95,12 +94,10 @@ function RaceCell({ race, cs }: { race: RaceSummary | null; cs: CellStyle }) {
 
   return (
     <td className="border border-gray-100 p-0 align-top" style={{ minWidth: cs.minWidth }}>
-      <div className={`${cs.pad} hover:bg-emerald-50 cursor-pointer transition-colors group`}
-        onClick={() => goToRace(race.race_id)}>
+      <div className={cs.pad}>
         {/* レース名 + クラスバッジ */}
         <div className="flex items-start justify-between gap-1 mb-0.5">
-          <span className={`${cs.nameSize} font-semibold text-gray-900 leading-snug
-                           group-hover:text-emerald-700 transition-colors`}>
+          <span className={`${cs.nameSize} font-semibold text-gray-900 leading-snug`}>
             {race.race_name}
           </span>
           <ClassBadge label={race.class_label} />

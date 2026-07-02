@@ -191,26 +191,21 @@ def scan_repo_for_legacy_table_refs() -> dict[str, list[tuple[int, str]]]:
 #
 # (相対パス, 行番号): 理由
 #
-# api_v2/routers/races.py の以下2箇所は、当週の未ETLレース（keiba_v2にまだ
-# 同期されていない今週末レース）への表示用フォールバック・調教データ取得のため
-# 意図的に fukurou_jvdl の旧スキーマを参照している（コメントで「jvdl path
-# (今週末の未来レース)」と明記）。削除するには races_v2/race_entries_v2 側での
-# 代替実装が必要（KNOWN_ISSUES_AND_HISTORY.md 優先度C参照）。
+# 2026-07 V2アンサンブル引退の一環で対応済み（許可リストから除去）:
+#   - api_v2/routers/races.py:1365 (_fetch_detail_supplements) は
+#     _compute_detail ごと削除（V2アンサンブル専用ロジックのため）。
+#   - api_v2/routers/races.py:1420 (get_race_training) は
+#     race_entries_v2 (blood_no AS horse_id) を参照するよう修正。
+#   - api_v2/routers/public_races.py:189 (_SQL_BLOODLINE) は
+#     races_v2 移行の実データ検証ができていないため、エンドポイント自体を
+#     503 で一時無効化した（クエリ定数は参考のため残置、実行はされない）。
 #
-# api_v2/routers/public_races.py と tipster/hit_rate_analysis.py の2箇所は、
-# 血統別回収率(_SQL_BLOODLINE)・人気順位(popularity)など、races_v2/race_entries_v2
-# 側にまだ存在しない（または未検証の）データを参照するために意図的に
-# fukurou_jvdl 旧スキーマを使っている。_SQL_BLOODLINE は tests/test_bloodline_query.py
-# で既に win_odds 列の存在を確認する回帰テストが用意されている。
+# tipster/hit_rate_analysis.py は、到達不能コード（呼び出し元CLIが
+# archive/ 移動済み）として別途削除予定。削除時にこのエントリも除去する。
 ALLOWLIST: dict[tuple[str, int], str] = {
-    ("api_v2/routers/races.py", 1365):
-        "_fetch_detail_supplements: 当週未ETLレースの枠番/騎手名フォールバック（jvdl path）",
-    ("api_v2/routers/races.py", 1420):
-        "get_race_training: 調教データ対象馬取得（jvdl側のrace_entriesから horse_id 取得）",
-    ("api_v2/routers/public_races.py", 189):
-        "_SQL_BLOODLINE: 血統別単勝回収率ランキング（jvdl側のhorses/win_odds/confirmed_rankを使用）",
     ("tipster/hit_rate_analysis.py", 141):
-        "_fetch_popularity_map: 人気順位(popularity)取得（jvdl側のrace_entriesのみに存在）",
+        "_fetch_popularity_map: 人気順位(popularity)取得（jvdl側のrace_entriesのみに存在）"
+        "。到達不能コードとして別途削除予定",
 }
 
 

@@ -4,7 +4,6 @@ import RaceLevelView    from './views/race/RaceLevelView'
 // ── ユーザー向けビュー ─────────────────────────────────────────────────────────
 import UserHomeView      from './views/UserHomeView'
 import RaceListView      from './views/race/RaceListView'
-import RaceDetailView    from './views/race/RaceDetailView'
 import AnalysisPage          from './views/analysis/AnalysisPage'
 import WeeklyOverviewView    from './views/WeeklyOverviewView'
 import PicksView             from './views/PicksView'
@@ -16,12 +15,13 @@ import { GlobalHeader }  from './components/GlobalHeader'
 import type { AppRoute } from './components/GlobalHeader'
 
 // ── ルーティング ──────────────────────────────────────────────────────────────
-type Route = AppRoute | 'race' | 'race-level' | 'week' | 'admin'
+// 2026-07: V2アンサンブル引退に伴い /race/:id（RaceDetailView）ルートを削除。
+// 新テーブルベースの後継画面は別途実装予定。
+type Route = AppRoute | 'race-level' | 'week' | 'admin'
 
 function getRoute(): Route {
   const p = window.location.pathname
   if (p.startsWith('/race-level/'))  return 'race-level'
-  if (p.startsWith('/race/') || p === '/race') return 'race'
   if (p.startsWith('/races'))        return 'races'
   if (p.startsWith('/analysis'))     return 'analysis'
   if (p.startsWith('/datalab'))      return 'datalab'
@@ -32,11 +32,6 @@ function getRoute(): Route {
   if (p.startsWith('/db-status'))    return 'db-status'
   if (p.startsWith('/admin'))        return 'admin'
   return 'home'
-}
-
-function getRaceId(): string | null {
-  const m = window.location.pathname.match(/^\/race\/(.+)$/)
-  return m ? m[1] : null
 }
 
 function getRaceLevelId(): string | null {
@@ -59,13 +54,11 @@ function ComingSoonView({ title }: { title: string }) {
 // ── ルートコンポーネント ───────────────────────────────────────────────────────
 export default function App() {
   const [route,       setRoute]       = useState<Route>(getRoute)
-  const [raceId,      setRaceId]      = useState<string | null>(getRaceId)
   const [raceLevelId, setRaceLevelId] = useState<string | null>(getRaceLevelId)
 
   useEffect(() => {
     const handler = () => {
       setRoute(getRoute())
-      setRaceId(getRaceId())
       setRaceLevelId(getRaceLevelId())
     }
     window.addEventListener('popstate', handler)
@@ -82,7 +75,6 @@ export default function App() {
       />
       {route === 'home'       && <UserHomeView />}
       {route === 'races'      && <RaceListView />}
-      {route === 'race'       && <RaceDetailView raceId={raceId ?? undefined} onBack={() => navigate('/')} />}
       {route === 'race-level' && <RaceLevelView raceId={raceLevelId ?? undefined} onBack={() => window.history.back()} />}
       {route === 'analysis'   && <AnalysisPage />}
       {route === 'week'       && <WeeklyOverviewView />}

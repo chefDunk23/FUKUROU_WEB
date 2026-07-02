@@ -8,9 +8,9 @@ V2 投資用 API — FastAPI アプリケーション初期化。
 
 エンドポイント一覧:
     GET /api/v2/races?date=YYYY-MM-DD       — 指定日のレース一覧
-    GET /api/v2/predict/{race_id}           — V2 スタックアンサンブル予測
-    GET /api/v2/analysis/ev                 — 期待値分析（過去統計）
     GET /healthz                            — ヘルスチェック
+
+2026-07: V2アンサンブル引退に伴い prediction ルーター（/api/v2/predict/{race_id}）を削除。
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_v2.deps import verify_api_key
-from api_v2.routers import db_status, lab, prediction, public_races, race_level, races, tipster
+from api_v2.routers import db_status, lab, public_races, race_level, races, tipster
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -82,7 +82,6 @@ app.add_middleware(
 _auth = [Depends(verify_api_key)]
 app.include_router(races.router,         dependencies=_auth)
 app.include_router(race_level.router,    dependencies=_auth)
-app.include_router(prediction.router,    dependencies=_auth)
 app.include_router(tipster.router,       dependencies=_auth)
 app.include_router(db_status.router,     dependencies=_auth)
 app.include_router(lab.router,           dependencies=_auth)

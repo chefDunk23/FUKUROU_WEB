@@ -7,7 +7,6 @@
  *   - 木〜日: 実レースデータを表示し、正しい race_id でレース詳細へ遷移
  */
 import { useEffect, useState } from 'react'
-import { goToRace } from '../utils/router'
 import { fetchWeekendRaces, surfaceLabel } from '../api/races'
 import type { RaceSummary } from '../api/races'
 import {
@@ -211,15 +210,6 @@ function HeroCard({ homeData }: { homeData: HomeData }) {
               </span>
             </div>
           </div>
-          <div className="flex-shrink-0">
-            <button
-              onClick={() => goToRace(race.race_id)}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-3 rounded-lg transition-colors shadow-sm"
-            >
-              AI出馬表を見る
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -232,15 +222,14 @@ function NotableRaceItem({ race }: { race: RaceSummary }) {
   const grade = _gradeLabel(race)
   return (
     <div
-      className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 -mx-4 px-4 rounded-lg cursor-pointer transition-colors group"
-      onClick={() => goToRace(race.race_id)}
+      className="flex items-center justify-between py-3 border-b border-gray-100 last:border-0 -mx-4 px-4 rounded-lg"
     >
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-md bg-gray-100 flex items-center justify-center flex-shrink-0">
           <span className="text-[11px] font-bold text-gray-600">{race.race_num}R</span>
         </div>
         <div>
-          <p className="text-sm font-semibold text-gray-800 group-hover:text-emerald-700 transition-colors">
+          <p className="text-sm font-semibold text-gray-800">
             {race.race_name}
           </p>
           <p className="text-xs text-gray-400">
@@ -254,7 +243,6 @@ function NotableRaceItem({ race }: { race: RaceSummary }) {
             {grade}
           </span>
         )}
-        <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-emerald-600 transition-colors" />
       </div>
     </div>
   )

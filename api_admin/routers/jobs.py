@@ -21,15 +21,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["jobs"])
 
 # 受け付ける job_type 一覧（ドキュメント + バリデーション用）
+# 2026-07: V2アンサンブル引退に伴い recompute_predictions/train_v2_submodels/
+# train_v2_ensemble/merge_v2_submodel_scores/enrich_ability_v3 を削除した。
 _KNOWN_JOB_TYPES = frozenset({
-    "recompute_predictions",
     "update_feature_stores",
     "sync_races_from_jvdl",
     "sync_jvdata",
-    "train_v2_submodels",
-    "train_v2_ensemble",
-    "merge_v2_submodel_scores",
-    "enrich_ability_v3",
     "backtest_strategies_v3",
     "import_bloodline_masters",
     "run_tipster_evaluation",

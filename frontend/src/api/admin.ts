@@ -44,12 +44,6 @@ export type JobType = {
 
 export const JOB_TYPES: JobType[] = [
   {
-    id: 'recompute_predictions',
-    label: '予測再計算',
-    implemented: true,
-    defaultParams: { mode: 'weekend' },
-  },
-  {
     id: 'update_feature_stores',
     label: 'フィーチャーストア更新',
     implemented: true,
@@ -70,30 +64,6 @@ export const JOB_TYPES: JobType[] = [
   {
     id: 'import_bloodline_masters',
     label: '血統マスタ取込',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
-    id: 'train_v2_submodels',
-    label: 'V2 サブモデル訓練',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
-    id: 'train_v2_ensemble',
-    label: 'V2 アンサンブル訓練',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
-    id: 'merge_v2_submodel_scores',
-    label: 'V2 スコアマージ',
-    implemented: false,
-    defaultParams: {},
-  },
-  {
-    id: 'enrich_ability_v3',
-    label: '能力指数 V3 付与',
     implemented: false,
     defaultParams: {},
   },
