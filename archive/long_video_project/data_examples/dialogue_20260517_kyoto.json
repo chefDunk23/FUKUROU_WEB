@@ -1,0 +1,326 @@
+{
+  "session": "2026-05-17 京都",
+  "template": "B",
+  "corners": {
+    "teppan": "京都3R ダート1900m / 馬番9番",
+    "spice":  "京都5R 芝2000m / 馬番3番",
+    "danger": null
+  },
+  "scenes": [
+    {
+      "scene_id": "scene_op",
+      "scene_type": "normal",
+      "section_label": "OP予告",
+      "scene_data": {},
+      "dialogue": [
+        {
+          "speaker": "ひよこ",
+          "text": "博士！今日の京都、注目レースあるんすか！？",
+          "telop": "今日の京都を分析！",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "12R分析完了だホー。バケモノ1頭とバグ馬3頭を検出したホー",
+          "telop": "バケモノ1頭 バグ馬3頭",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "バグ馬が3頭も！？何それ怖いじゃないすか！",
+          "telop": "バグ馬3頭出現！",
+          "pose": "shocked",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "scene_id": "scene_sakusaku",
+      "scene_type": "normal",
+      "section_label": "サクサク予想",
+      "scene_data": {
+        "races": [
+          "京都10R 芝1600m (1勝クラス)",
+          "京都11R ダート1400m (Listed)",
+          "京都1R ダート1800m (新馬/未勝利)",
+          "京都2R ダート1400m (新馬/未勝利)",
+          "京都6R ダート1800m (新馬/未勝利)",
+          "京都7R 芝2000m (新馬/未勝利)",
+          "京都8R ダート1900m (新馬/未勝利)",
+          "京都9R 芝2400m (1勝クラス)"
+        ]
+      },
+      "dialogue": [
+        {
+          "speaker": "ひよこ",
+          "text": "まず残り8Rはどうなんすか、全部見るんすか？",
+          "telop": "残り8Rは？",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "期待値が平凡なレースにリソースを割くな、というデータだホー",
+          "telop": "平凡レースは無視が正解",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "えっ全部スルーっすか！？",
+          "telop": "全部スルー！？",
+          "pose": "shocked",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "10Rと11Rは◯程度。残りは傍観が最適解だホー",
+          "telop": "10R・11Rは◯ 残り傍観",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "scene_id": "scene_teppan",
+      "scene_type": "pachinko",
+      "section_label": "鉄板コーナー",
+      "scene_data": {
+        "race_label": "京都3R ダート1900m (新馬/未勝利)",
+        "umaban": 9,
+        "scores": {
+          "ability_v2":  2.63,
+          "pace_v2":     2.44,
+          "course_v2":   1.11,
+          "team_v2":     0.50,
+          "pedigree_v1": 1.01
+        }
+      },
+      "dialogue": [
+        {
+          "speaker": "ひよこ",
+          "text": "じゃあバケモノって誰なんすか！？",
+          "telop": "バケモノ馬の正体は？",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "京都3R、9番馬だホー。ability Z=+2.63だホー",
+          "telop": "ability Z=+2.63 突出！",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "pachinko",
+          "pachinko_word": "物理法則確定!!",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "新馬戦っすよ！？データちゃんとあるんすか！？",
+          "telop": "新馬戦でデータある？",
+          "pose": "shocked",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "血統・身体能力の総合値だホー。着順実績は不要だホー",
+          "telop": "着順実績は不要",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "pachinko",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "2位との差が1.56σ…確かにこれは突出してますね",
+          "telop": "2位差1.56σ！",
+          "pose": "depressed",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "pace Z=+2.44も揃ったホー。物理法則として勝率最高の計算だホー",
+          "telop": "pace Z=+2.44 完璧！",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "pachinko",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "scene_id": "scene_spice",
+      "scene_type": "spice",
+      "section_label": "特注スパイス",
+      "scene_data": {
+        "race_label": "京都5R 芝2000m (新馬/未勝利)",
+        "umaban": 3,
+        "ability_v2_rank": 6,
+        "scores": {
+          "ability_v2":  -0.73,
+          "pace_v2":      0.02,
+          "course_v2":    0.49,
+          "team_v2":     -0.10,
+          "pedigree_v1":  2.27
+        }
+      },
+      "dialogue": [
+        {
+          "speaker": "ひよこ",
+          "text": "バグ馬3頭ってどれなんすか！？",
+          "telop": "バグ馬3頭の正体は？",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "まず京都5R、3番馬だホー。ability rank 6位だが注目せよだホー",
+          "telop": "5R3番 血統爆発！",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "spice",
+          "pachinko_word": "大穴血統爆発!!",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "6位の馬！？それ普通に弱い馬じゃないすか！",
+          "telop": "能力6位の馬！？",
+          "pose": "shocked",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "pedigree Z=+2.27。血統ポテンシャルがフィールド最高値だホー",
+          "telop": "血統Z=+2.27 最高値！",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "spice",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "次は4Rの13番…能力13位っすよ！？さすがにないっすよ！",
+          "telop": "能力13位！？",
+          "pose": "begging",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "pedigree Z=+2.39。数字が全てだホー。印象はノイズだホー",
+          "telop": "血統Z=+2.39 最高！",
+          "pose": "pointing",
+          "camera_zoom": "normal",
+          "text_mode": "spice",
+          "pachinko_word": "AIバグ馬爆誕!!",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "えっ13頭中一番高い血統値ってどういうことっすか！？",
+          "telop": "フィールド最高血統値",
+          "pose": "shocked",
+          "camera_zoom": "assistant_full",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "それがAIにしか見えない爆弾の根拠だホー",
+          "telop": "AIだけが見える爆弾",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "spice",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        }
+      ]
+    },
+    {
+      "scene_id": "scene_ed",
+      "scene_type": "normal",
+      "section_label": "ED",
+      "scene_data": {},
+      "dialogue": [
+        {
+          "speaker": "ひよこ",
+          "text": "まとめ！3R9番バケモノ、5R3番・4R13番・12R6番がバグ馬！",
+          "telop": "本日の厳選4頭！",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "フクロウ博士",
+          "text": "正確だホー。ただしAIは確率を示すだけだホー",
+          "telop": "AIは確率を示すのみ",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        },
+        {
+          "speaker": "ひよこ",
+          "text": "最終判断は自分で！今日もありがとうっす！",
+          "telop": "最後は自分で判断！",
+          "pose": "default",
+          "camera_zoom": "normal",
+          "text_mode": "normal",
+          "audio_url": "",
+          "audio_duration_ms": 0
+        }
+      ]
+    }
+  ]
+}
