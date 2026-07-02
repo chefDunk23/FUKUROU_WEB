@@ -38,7 +38,15 @@ from pace_bias_ai.pipeline import (
     build_layer1_features,
     LAYER1_ALL_COLS,
 )
-from pace_bias_ai.features.layer2 import build_layer2_features, LAYER2_FEATURE_COLS
+from pace_bias_ai.features.layer2 import (
+    build_layer2_features,
+    LAYER2_FEATURE_COLS,
+    _compute_pit_te,
+    _classify_surface,
+    _DIST_BINS,
+    _TE_ALPHA_JOCKEY,
+    _TE_ALPHA_SIRE,
+)
 from pace_bias_ai.opponent_model.features import (
     load_all_race_history,
     build_opponent_features,
@@ -95,6 +103,10 @@ _ALPHA = 0.5
 
 def _v2_conn():
     return psycopg2.connect(**DB_V2)
+
+
+def _jvdl_conn():
+    return psycopg2.connect(**DB_JVDL)
 
 
 def _jvdl_engine() -> sqlalchemy.engine.Engine:
@@ -209,32 +221,51 @@ def _get_race_meta_by_id(race_id: str) -> dict | None:
 
 
 def _get_race_entries(race_id: str) -> list[dict]:
-    """1レース分の出走馬を v2 DB から取得する。"""
+    """1レース分の出走馬を v2 DB から取得する。
+
+    sire_id は fukurou_keiba_v2.horses ではなく JVDL 側から取得する
+    （2026-07-02 発見: fukurou_keiba_v2.horses.sire_id は旧スクレイパー由来の
+    文字化けデータで実質的に使い物にならない。例 "Cic" 等の断片文字列。
+    JVDL 側の horses.sire_id はクリーンな値のため sire_te 等の TE 計算に
+    こちらを使う）。
+    """
     with _v2_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT e.race_id, e.umaban, e.horse_id, e.horse_name,
                        e.basis_weight, e.jockey_cd, e.age AS horse_age,
-                       e.horse_weight, e.trainer_cd, h.sire_id
+                       e.horse_weight, e.trainer_cd
                 FROM race_entries e
-                LEFT JOIN horses h ON h.horse_id = e.horse_id
                 WHERE e.race_id = %s
                 ORDER BY e.umaban
             """, (race_id,))
             rows = cur.fetchall()
+
+    horse_ids = [str(r[2]) for r in rows if r[2]]
+    sire_map: dict[str, str] = {}
+    if horse_ids:
+        with _jvdl_conn() as jconn:
+            with jconn.cursor() as jcur:
+                jcur.execute(
+                    "SELECT id, sire_id FROM horses WHERE id = ANY(%s)",
+                    (horse_ids,),
+                )
+                sire_map = {r[0]: r[1] for r in jcur.fetchall() if r[1]}
+
     entries = []
     for r in rows:
+        horse_id_str = str(r[2]) if r[2] else ""
         entries.append({
             "race_id":    r[0],
             "umaban":     int(r[1]) if r[1] else 0,
-            "horse_id":   str(r[2]) if r[2] else "",
+            "horse_id":   horse_id_str,
             "horse_name": str(r[3]) if r[3] else "",
             "basis_weight": float(r[4]) if r[4] else 55.0,
             "jockey_cd":  str(r[5]) if r[5] else "",
             "horse_age":  int(r[6]) if r[6] else 3,
             "horse_weight": float(r[7]) if r[7] else 0.0,
             "trainer_cd": str(r[8]) if r[8] else "",
-            "sire_id":    str(r[9]) if r[9] else "",
+            "sire_id":    str(sire_map.get(horse_id_str, "")),
         })
     return entries
 
@@ -245,13 +276,13 @@ def _get_race_entries(race_id: str) -> list[dict]:
 _PACE_HIST_COLS: list[str] = [
     "horse_id", "race_id", "race_date", "umaban",
     "corner_1", "corner_4", "kakutei_chakujun", "go_3f_time",
-    "distance", "track_code", "jockey_cd",
+    "distance", "track_code", "jockey_cd", "field_size",
 ]
 
 
 def _empty_pace_hist() -> pd.DataFrame:
     df = pd.DataFrame(columns=_PACE_HIST_COLS)
-    for col in ["umaban", "corner_1", "corner_4", "kakutei_chakujun", "go_3f_time", "distance"]:
+    for col in ["umaban", "corner_1", "corner_4", "kakutei_chakujun", "go_3f_time", "distance", "field_size"]:
         df[col] = df[col].astype(float)
     df["race_date"] = pd.to_datetime(df["race_date"])
     return df
@@ -273,6 +304,17 @@ def _load_pace_v4_history(
         horse_ids:   対象レースの出走馬ID (blood_no) リスト
         before_date: この日付 (YYYYMMDD文字列) より前の確定済みレースのみ取得
                      （当日・未来のレースを混入させないための PIT ガード）
+
+    Note (2026-07-02 発見・修正):
+        r.shusso_tosu（真の出走頭数）を同梱する。対象馬「自身」の過去走しか
+        読まないため、過去走の同一レースに対象馬グループの他の馬が
+        たまたま同時出走していない限り、_compute_v1_features() 側の
+        `groupby('race_id')['umaban'].transform('max')` による field_size
+        推定が「その過去レースに実際に登場する対象馬の中の最大umaban」
+        （= 真の出走頭数よりずっと小さい）になってしまい、avg_c4_norm_5 等
+        の正規化値が 1.0 を超える異常値になるバグがあった
+        （例: 真の16頭立てが umaban=1 の馬しか combined 内に無いために
+        field_size=1 相当になり、c4_norm=(8-1)/(1-1).clip(1)=7 に破綻）。
     """
     if not horse_ids:
         return _empty_pace_hist()
@@ -281,7 +323,7 @@ def _load_pace_v4_history(
         SELECT e.blood_no AS horse_id, e.race_id, e.umaban,
                e.corner_1, e.corner_4, e.kakutei_chakujun,
                e.kohan_3f AS go_3f_time, e.kishu_code AS jockey_cd,
-               r.distance, r.track_code
+               r.distance, r.track_code, r.shusso_tosu AS field_size
         FROM race_entries_v2 e
         JOIN races_v2 r ON r.race_id = e.race_id
         WHERE e.blood_no IN :horse_ids
@@ -303,7 +345,7 @@ def _load_pace_v4_history(
     df["race_id"]   = df["race_id"].astype(str)
     df["jockey_cd"] = df["jockey_cd"].astype(str)
     df["track_code"] = df["track_code"].astype(str)
-    for col in ["umaban", "corner_1", "corner_4", "kakutei_chakujun", "go_3f_time", "distance"]:
+    for col in ["umaban", "corner_1", "corner_4", "kakutei_chakujun", "go_3f_time", "distance", "field_size"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["race_date"] = pd.to_datetime(df["race_id"].str[:8], format="%Y%m%d", errors="coerce")
     return df
@@ -357,6 +399,113 @@ def _load_jockey_recent_wins(
         ).fetchall()
 
     return {r.kishu_code: (float(r.yr_wins), float(r.career_wins)) for r in rows}
+
+
+# ── jockey_te / sire_te（Layer2 target encoding）の母集団補完 ─────────────────
+# _compute_pit_te() の cumsum 母集団に含める過去走の下限（メインレース検証
+# バッチ（validate_main_races.py 相当）と同じ 2018-01-01 を採用し、
+# global_rate（ベイズスムージングの中立値）の再現性を揃える）。
+_TE_HIST_START = "20180101"
+_TE_JRA_CODES  = [f"{i:02d}" for i in range(1, 11)]
+
+
+def _load_te_population_history(engine: sqlalchemy.engine.Engine) -> pd.DataFrame:
+    """jockey_te / sire_te の PIT-safe target encoding に必要な母集団データを
+    DB から一括ロードする（generate_ai_picks() / update_ai_tipster_results の
+    実行あたり1回のみ。opponent_model.features.load_all_race_history() と同じ
+    「1回ロードして全レースで使い回す」設計）。
+
+    build_layer2_features() 内の _compute_pit_te() は「渡された DataFrame 内」
+    でしか cumsum 集計できない。だが _load_pace_v4_history() は対象レースの
+    出走馬「自身」の過去走しか読まないため、score_race_ai() をそのまま呼ぶと
+    その騎手/種牡馬が他の馬に騎乗・産駒として関わった実績が一切拾えず、
+    jockey_te/sire_te が極端に薄いサンプルから計算されてしまう
+    （2026-07-02 メインレース検証で発見。例: 通算2,204騎乗のベテラン騎手が
+    対象馬自身の過去走ではわずか数走分しか登場しない）。
+
+    本関数は JRA・2018年以降の全確定レースを母集団としてロードする
+    （メインレース検証バッチと同一範囲）。_compute_te_for_pred_rows() で
+    _compute_pit_te() に正しい母集団を渡せるようにする
+    （検証スクリプトと同一関数 _compute_pit_te を再利用）。
+    """
+    sql = sqlalchemy.text("""
+        SELECT e.blood_no AS horse_id, e.race_id, e.kishu_code AS jockey_cd,
+               e.kakutei_chakujun, r.distance, r.track_code, h.sire_id
+        FROM race_entries_v2 e
+        JOIN races_v2 r ON r.race_id = e.race_id
+        LEFT JOIN horses h ON h.id = e.blood_no
+        WHERE LEFT(e.race_id, 8) >= :hist_start
+          AND e.kakutei_chakujun IS NOT NULL
+          AND r.keibajo_code = ANY(:jra_codes)
+    """)
+
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            sql, conn,
+            params={"hist_start": _TE_HIST_START, "jra_codes": _TE_JRA_CODES},
+        )
+
+    df["horse_id"]  = df["horse_id"].astype(str)
+    df["race_id"]   = df["race_id"].astype(str)
+    df["jockey_cd"] = df["jockey_cd"].astype(str)
+    df["sire_id"]   = df["sire_id"].astype(str)
+    df["distance"]   = pd.to_numeric(df["distance"], errors="coerce")
+    df["kakutei_chakujun"] = pd.to_numeric(df["kakutei_chakujun"], errors="coerce")
+    df["race_date"] = pd.to_datetime(df["race_id"].str[:8], format="%Y%m%d", errors="coerce")
+    df["dist_cat"] = pd.cut(
+        df["distance"], bins=_DIST_BINS, labels=False, right=True
+    ).astype(float)
+    df["surface_code"] = _classify_surface(df["track_code"])
+    rank_num = df["kakutei_chakujun"]
+    df["_placed3"] = (rank_num <= 3).where(rank_num.notna()).astype(float)
+    return df
+
+
+def _compute_te_for_pred_rows(
+    pred_rows: list[dict],
+    te_population: pd.DataFrame,
+) -> pd.DataFrame:
+    """jockey_te / sire_te を、検証バッチと同一の _compute_pit_te() を用いて
+    正しい母集団（_load_te_population_history() の結果）付きで計算する。
+
+    build_layer2_features() が内部で計算する jockey_te/sire_te（narrow-history）
+    は上書きする前提。venue_horse_te は対象馬自身の過去走で完結するため対象外
+    （_load_pace_v4_history() の hist_df で従来通り正しく計算される）。
+
+    Returns:
+        pred_rows と同じ順序の DataFrame（horse_id, jockey_te, sire_te 列）
+    """
+    te_context = te_population
+    df_pred = pd.DataFrame(pred_rows)
+    n_pred = len(df_pred)
+    if n_pred == 0:
+        return pd.DataFrame(columns=["horse_id", "jockey_te", "sire_te"])
+
+    pred_slim = pd.DataFrame({
+        "horse_id":     df_pred["horse_id"].astype(str),
+        "race_id":      df_pred["race_id"].astype(str),
+        "race_date":    pd.to_datetime(df_pred["race_date"]),
+        "jockey_cd":    df_pred["jockey_cd"].astype(str),
+        "sire_id":      df_pred["sire_id"].astype(str),
+        "dist_cat":     pd.cut(
+            pd.to_numeric(df_pred["distance"], errors="coerce"),
+            bins=_DIST_BINS, labels=False, right=True,
+        ).astype(float),
+        "surface_code": _classify_surface(df_pred["track_code"]),
+        "_placed3":     np.nan,  # 今走の結果は未確定（PITガード、shift(1)には影響しない）
+    })
+
+    combined = pd.concat([te_context, pred_slim], ignore_index=True)
+    pred_index = combined.index[-n_pred:]
+
+    jockey_te = _compute_pit_te(combined, ["jockey_cd", "dist_cat", "surface_code"], "_placed3", _TE_ALPHA_JOCKEY)
+    sire_te   = _compute_pit_te(combined, ["sire_id", "dist_cat", "surface_code"], "_placed3", _TE_ALPHA_SIRE)
+
+    return pd.DataFrame({
+        "horse_id":  pred_slim["horse_id"].values,
+        "jockey_te": jockey_te.loc[pred_index].values,
+        "sire_te":   sire_te.loc[pred_index].values,
+    })
 
 
 # ── 予測行の構築 ──────────────────────────────────────────────────────────────
@@ -445,17 +594,43 @@ def _compute_v1_features(
     combined["race_date"] = pd.to_datetime(combined["race_date"])
     combined = combined.sort_values(["horse_id", "race_id", "umaban"]).reset_index(drop=True)
 
-    # field_size: 過去走は umaban(確定済み)の最大値から算出。
-    # 予測対象レースは umaban(枠番)が未確定だと 0 になり出走頭数を著しく過小評価する
-    # （例: 16頭立てが 2頭立て相当に crush → field_size_norm が誤って 0 になる）ため、
-    # races.syusso_tosu (field_size_meta, 出走投票時点で既に確定) で補完する。
-    combined["field_size"] = pd.to_numeric(
+    # field_size:
+    #   過去走 (hist_df 由来の行)     → races.shusso_tosu（"field_size" 列）を必ず使う。
+    #   予測対象レース (df_pred 由来の行) → umaban(確定済み)の最大値を最優先、
+    #                                  未確定(0)の場合のみ races.syusso_tosu
+    #                                  （"field_size_meta" 列）で補完。
+    #
+    # 2026-07-02 発見・修正（過去走側）: 以前は umaban(確定済み)の「combined内
+    # での」最大値から算出していたが、hist_df は対象馬「自身」の過去走しか
+    # 含まないため、その過去レースに対象馬グループの他の馬がたまたま同時
+    # 出走していない限り「その過去レースに実際に登場する対象馬の中の最大
+    # umaban」（真の出走頭数よりずっと小さい）になってしまい、avg_c4_norm_5
+    # 等の正規化値が 1.0 を超える異常値になるバグがあった（例: 真の16頭立て
+    # で対象馬の umaban=1 しか combined 内に無いため field_size=1 相当になり、
+    # c4_norm=(8-1)/(1-1).clip(1)=7 に破綻）。
+    #
+    # 既存修正（予測対象レース側）: umaban(枠番)が未確定だと 0 になり出走頭数
+    # を著しく過小評価する（16頭立てが2頭立て相当に crush）問題への対応
+    # （field_size_meta フォールバック）。ここでは umaban 確定済みなら
+    # 実測値を優先する既存の挙動を維持する。
+    if "field_size" in combined.columns:
+        hist_field_size = pd.to_numeric(combined["field_size"], errors="coerce")
+    else:
+        hist_field_size = pd.Series(np.nan, index=combined.index)
+
+    umaban_max = pd.to_numeric(
         combined.groupby("race_id")["umaban"].transform("max"), errors="coerce"
     )
+    pred_field_size = umaban_max.copy()
     if "field_size_meta" in combined.columns:
         meta_fs = pd.to_numeric(combined["field_size_meta"], errors="coerce")
-        needs_meta = combined["field_size"].fillna(0) <= 0
-        combined.loc[needs_meta, "field_size"] = meta_fs[needs_meta]
+        needs_meta = pred_field_size.fillna(0) <= 0
+        pred_field_size = pred_field_size.where(~needs_meta, meta_fs)
+
+    # hist_df 由来の行（"field_size" 実測値あり）はそちらを優先し、
+    # 無い行（= df_pred 由来、または shusso_tosu 欠損の古いデータ）は
+    # pred_field_size（umaban最大値 or メタ補完）にフォールバックする。
+    combined["field_size"] = hist_field_size.fillna(pred_field_size)
 
     # avg_rank_3: 直近3走の平均確定着順（shift(1)+rolling(3)、PIT-safe）。
     # _compute_confidence()「2走前3着以内」近似条件（+1点）で参照する。
@@ -837,6 +1012,7 @@ def score_race_ai(
     engine_jvdl: sqlalchemy.engine.Engine,
     df_ent_hist: pd.DataFrame,
     df_races_hist: pd.DataFrame,
+    df_te_hist: pd.DataFrame | None = None,
 ) -> dict | None:
     """1レース分のAI推奨（v1×opponent_v3アンサンブル）を計算する。
 
@@ -844,6 +1020,11 @@ def score_race_ai(
     実績記録（update_ai_tipster_results）からも同じロジックで再利用できるよう
     に切り出している。出走馬が2頭未満、またはv1特徴量計算に失敗した場合は
     None を返す（呼び出し側でスキップ判定に使う）。
+
+    Args:
+        df_te_hist: _load_te_population_history() の結果。呼び出し側で1回だけ
+            ロードして使い回す（None の場合は jockey_te/sire_te の母集団補完を
+            スキップし、build_layer2_features() の narrow-history 版のまま）。
     """
     race_id = race_meta["race_id"]
 
@@ -866,6 +1047,19 @@ def score_race_ai(
         log.warning("v1 特徴量計算失敗 → スキップ: %s", race_id)
         return None
     v1_df = v1_df.reset_index(drop=True)
+
+    # ── jockey_te / sire_te の母集団補完（narrow-history バグの修正） ──────
+    # _compute_v1_features 内の build_layer2_features() は hist_df（対象馬
+    # 自身の過去走のみ）だけから jockey_te/sire_te を計算してしまうため、
+    # 正しい母集団（df_te_hist、全馬の過去走）で上書きする。
+    if df_te_hist is not None:
+        try:
+            te_fix = _compute_te_for_pred_rows(pred_rows, df_te_hist)
+            te_fix = te_fix.set_index("horse_id")
+            v1_df["jockey_te"] = v1_df["horse_id"].astype(str).map(te_fix["jockey_te"])
+            v1_df["sire_te"]   = v1_df["horse_id"].astype(str).map(te_fix["sire_te"])
+        except Exception:
+            log.exception("jockey_te/sire_te 母集団補完に失敗 → narrow-history版を使用: %s", race_id)
 
     v1_scores_raw = _predict_v1(v1_df, model_v1)
     v1_df["_v1_score"] = v1_scores_raw
@@ -971,6 +1165,10 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
     log.info("JVDL 全履歴ロード中...")
     df_ent_hist, df_races_hist = load_all_race_history(engine_jvdl)
 
+    # jockey_te/sire_te 用の母集団を一括ロード（narrow-history バグの修正）
+    log.info("jockey_te/sire_te 母集団ロード中...")
+    df_te_hist = _load_te_population_history(engine_jvdl)
+
     # 週末レース取得
     races = _get_upcoming_races(target_dates)
     if not races:
@@ -988,7 +1186,7 @@ def generate_ai_picks(target_dates: list[date] | None = None) -> dict:
         entries = _get_race_entries(race_meta["race_id"])
         race_result = score_race_ai(
             race_meta, entries, model_v1, model_opp,
-            engine_jvdl, df_ent_hist, df_races_hist,
+            engine_jvdl, df_ent_hist, df_races_hist, df_te_hist,
         )
         if race_result is not None:
             race_results.append(race_result)

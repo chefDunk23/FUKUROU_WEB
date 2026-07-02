@@ -23,6 +23,7 @@ from scripts.generate_ai_picks import (
     _blend_normalized,
     _build_pred_row,
     _compute_confidence,
+    _compute_te_for_pred_rows,
     _compute_v1_features,
     _empty_pace_hist,
     _minmax_within_race,
@@ -191,6 +192,113 @@ class TestFieldSizeMetaFallback:
         assert (out["field_size"] == 5.0).all()
 
 
+class TestHistoricalFieldSizeFromShussoTosu:
+    """2026-07-02 メインレース検証で発見したバグの回帰テスト。
+
+    _load_pace_v4_history() は対象馬「自身」の過去走しか読まないため、
+    過去のある1レースに対象馬グループの他の馬がたまたま同時出走していない
+    限り、combined 内でその過去レースに登場するのはその馬1頭だけになる。
+    修正前は field_size を combined 内の umaban 最大値から算出していたため、
+    「その馬1頭だけの umaban」が field_size 扱いになり、真の出走頭数
+    （例: 16頭）よりずっと小さい値（例: umaban=1 なら 1）に潰れ、
+    avg_c4_norm_5 等の正規化値が 1.0 を超える異常値になっていた。
+
+    修正: _load_pace_v4_history() が付与する実測の "field_size"
+    （races.shusso_tosu 由来）列を過去走側で使うようにした。
+    """
+
+    def test_historical_row_uses_shusso_tosu_not_lone_umaban(self):
+        """過去走1件だけが combined に含まれる（対象馬グループの他馬は
+        同時出走していない）ケースで、field_size が真の出走頭数(16)を
+        反映し、umaban(=3)には潰れないこと。"""
+        horse_id = "H001"
+        hist_row = _hist_row(horse_id, "2024010105010101", kakutei_chakujun=8)
+        hist_row["umaban"] = 3.0       # この馬だけの馬番（真の出走頭数ではない）
+        hist_row["field_size"] = 16.0  # races.shusso_tosu 由来の真の出走頭数
+        hist_row["corner_4"] = 8.0
+        hist_df = pd.DataFrame([hist_row])
+
+        entries = [_entry(horse_id, umaban=1)]
+        pred_rows = [_build_pred_row(e, _race_meta(field_size_meta=1)) for e in entries]
+
+        out = _compute_v1_features(pred_rows, hist_df)
+
+        # avg_c4_norm_5 = (corner_4-1)/(field_size-1) = (8-1)/(16-1) = 0.4667
+        # 修正前バグ時は (8-1)/(3-1)=3.5 のように 1.0 超の異常値になっていた
+        assert 0.0 <= out["avg_c4_norm_5"].iloc[0] <= 1.0
+        assert out["avg_c4_norm_5"].iloc[0] == pytest.approx((8 - 1) / (16 - 1), abs=1e-6)
+
+    def test_historical_field_size_missing_falls_back_to_umaban_max(self):
+        """races.shusso_tosu が欠損(NaN)の古いデータでは、従来通り
+        umaban 最大値へのフォールバックが働くこと（クラッシュしない）。"""
+        horse_id = "H001"
+        hist_row = _hist_row(horse_id, "2024010105010101", kakutei_chakujun=3)
+        hist_row["field_size"] = np.nan
+        hist_df = pd.DataFrame([hist_row])
+
+        entries = [_entry(horse_id, umaban=1)]
+        pred_rows = [_build_pred_row(e, _race_meta(field_size_meta=1)) for e in entries]
+
+        out = _compute_v1_features(pred_rows, hist_df)
+        assert not out.empty
+
+
+class TestTeContextPopulation:
+    """2026-07-02 発見バグの回帰テスト: jockey_te/sire_te が対象馬「自身」の
+    過去走だけから計算されると、その騎手/種牡馬が他の馬に関わった実績が
+    一切拾えず、極端に薄いサンプル（≈全体平均への丸め）になっていた。
+    _compute_te_for_pred_rows() が正しい母集団を使うことを確認する。
+    """
+
+    @staticmethod
+    def _population_row(jockey_cd, sire_id, placed3, race_id):
+        # dist_cat=2.0 / surface_code=0.0 は _race_meta() 既定
+        # (distance=2000, track_code="11"=芝) から算出される値に合わせている。
+        return {
+            "race_id": race_id, "race_date": pd.Timestamp("2020-01-01"),
+            "jockey_cd": jockey_cd, "sire_id": sire_id,
+            "dist_cat": 2.0, "surface_code": 0.0, "_placed3": placed3,
+        }
+
+    def test_jockey_te_reflects_broader_population_not_just_target_horse(self):
+        """騎手Aは母集団内で高い複勝率、騎手Bは低い複勝率 →
+        jockey_te(A) > jockey_te(B) となること（母集団を正しく参照している証拠）。
+        対象馬自身の過去走にはこの騎手の記録が一切無い状況を想定する。"""
+        rows = []
+        for i in range(30):
+            rows.append(self._population_row("JOCKEY_A", "SIRE_X", 1.0, f"2020{i:04d}01010101"))
+        for i in range(30):
+            rows.append(self._population_row("JOCKEY_B", "SIRE_X", 0.0, f"2021{i:04d}01010101"))
+        te_population = pd.DataFrame(rows)
+
+        entries = [
+            {**_entry("H_A", umaban=1), "jockey_cd": "JOCKEY_A", "sire_id": "SIRE_Y"},
+            {**_entry("H_B", umaban=2), "jockey_cd": "JOCKEY_B", "sire_id": "SIRE_Y"},
+        ]
+        meta = _race_meta(field_size_meta=2)
+        meta["race_id"] = "2026010105010101"
+        pred_rows = [_build_pred_row(e, meta) for e in entries]
+
+        result = _compute_te_for_pred_rows(pred_rows, te_population).set_index("horse_id")
+
+        assert result.loc["H_A", "jockey_te"] > result.loc["H_B", "jockey_te"]
+
+    def test_no_population_data_falls_back_to_neutral_te(self):
+        """母集団に一致するデータが無ければ、ベイズスムージングにより
+        中立値（global_rateのみ）に丸められる（クラッシュしない）。"""
+        te_population = pd.DataFrame(columns=[
+            "race_id", "race_date", "jockey_cd", "sire_id",
+            "dist_cat", "surface_code", "_placed3",
+        ])
+        entries = [_entry("H001", umaban=1)]
+        entries[0]["jockey_cd"] = "UNKNOWN"
+        meta = _race_meta(field_size_meta=1)
+        pred_rows = [_build_pred_row(e, meta) for e in entries]
+
+        result = _compute_te_for_pred_rows(pred_rows, te_population)
+        assert len(result) == 1
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # avg_rank_3 復元（2026-07-02 発見バグの回帰テスト）
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,6 +317,7 @@ def _hist_row(horse_id: str, race_id: str, kakutei_chakujun: float) -> dict:
         "go_3f_time":       np.nan,
         "distance":         2000.0,
         "track_code":       "11",
+        "field_size":       16.0,
         "jockey_cd":        "05",
     }
 

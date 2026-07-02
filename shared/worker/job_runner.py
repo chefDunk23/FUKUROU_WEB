@@ -845,6 +845,7 @@ def _handle_update_ai_tipster_results(params: dict, ctx: JobContext) -> None:
         _get_race_entries,
         _get_race_meta_by_id,
         _jvdl_engine,
+        _load_te_population_history,
         compute_unified_rank,
         score_race_ai,
     )
@@ -885,6 +886,7 @@ def _handle_update_ai_tipster_results(params: dict, ctx: JobContext) -> None:
     model_opp = _lgb.Booster(model_file=str(_OPP_MODEL))
     engine_jvdl = _jvdl_engine()
     df_ent_hist, df_races_hist = load_all_race_history(engine_jvdl)
+    df_te_hist = _load_te_population_history(engine_jvdl)
     ctx.report_progress(15)
 
     upsert_rows: list[tuple] = []
@@ -899,7 +901,7 @@ def _handle_update_ai_tipster_results(params: dict, ctx: JobContext) -> None:
             try:
                 result = score_race_ai(
                     race_meta, entries, model_v1, model_opp,
-                    engine_jvdl, df_ent_hist, df_races_hist,
+                    engine_jvdl, df_ent_hist, df_races_hist, df_te_hist,
                 )
             except Exception as e:
                 ctx.append_log(f"  skip race_id={race_id}: {e}")
