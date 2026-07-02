@@ -309,11 +309,62 @@ def _load_pace_v4_history(
     return df
 
 
+def _load_jockey_recent_wins(
+    engine: sqlalchemy.engine.Engine,
+    jockey_codes: list[str],
+    before_race_id: str,
+) -> dict[str, tuple[float, float]]:
+    """騎手の（年間勝利数, 通算勝利数）を PIT-safe に DB から集計する。
+
+    layer1_horse.py の create_layer1_horse_features() は
+    jockey_yr_wins/jockey_career_wins 列が無い場合、_compute_jockey_pit_wins()
+    で「渡された DataFrame 内の過去走のみ」から代替集計する。だが
+    _load_pace_v4_history() は「対象レースの出走馬自身の過去走」しか読まないため、
+    その騎手が別の馬に騎乗した分の勝利が一切カウントされず、
+    jockey_leading_flag（年間50勝以上）がほぼ常に 0 になるバグがあった
+    （2026-07-02 メインレース検証で発見）。本関数で騎手コード単位に正しく
+    集計し、_build_pred_row() で明示的に渡すことで代替集計を回避する。
+
+    Args:
+        jockey_codes:    対象レースの騎手コードリスト
+        before_race_id:  この race_id より前の確定済みレースのみ集計（PITガード）
+    Returns:
+        {jockey_cd: (yr_wins, career_wins)}
+        yr_wins:     今走と同じ暦年内の、今走より前の勝利数
+        career_wins: 通算（全期間）の、今走より前の勝利数
+    """
+    if not jockey_codes:
+        return {}
+    cur_year = before_race_id[:4]
+
+    sql = sqlalchemy.text("""
+        SELECT kishu_code,
+               COUNT(*) FILTER (
+                   WHERE kakutei_chakujun = 1 AND LEFT(race_id, 4) = :cur_year
+               ) AS yr_wins,
+               COUNT(*) FILTER (WHERE kakutei_chakujun = 1) AS career_wins
+        FROM race_entries_v2
+        WHERE kishu_code IN :jockey_codes
+          AND race_id < :before_race_id
+          AND kakutei_chakujun IS NOT NULL
+        GROUP BY kishu_code
+    """).bindparams(bindparam("jockey_codes", expanding=True))
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sql,
+            {"jockey_codes": list(set(jockey_codes)), "before_race_id": before_race_id, "cur_year": cur_year},
+        ).fetchall()
+
+    return {r.kishu_code: (float(r.yr_wins), float(r.career_wins)) for r in rows}
+
+
 # ── 予測行の構築 ──────────────────────────────────────────────────────────────
 
 def _build_pred_row(
     entry: dict,
     race_meta: dict,
+    jockey_wins: dict[str, tuple[float, float]] | None = None,
 ) -> dict:
     """1馬の予測行を構築する。
 
@@ -349,6 +400,16 @@ def _build_pred_row(
         # 既に確定しているため、umaban=0 のフォールバックより優先して使う
         # （_compute_v1_features 側で field_size 列に反映）。
         "field_size_meta": race_meta.get("field_size") or np.nan,
+        # 騎手の年間/通算勝利数（PIT-safe、_load_jockey_recent_wins() で別途集計）。
+        # 明示的に渡すことで layer1_horse.py 側の PIT フォールバック集計
+        # （＝この馬自身の過去走だけからの過小集計）を回避する。
+        "jockey_yr_wins":     (jockey_wins or {}).get(entry["jockey_cd"], (np.nan, np.nan))[0],
+        "jockey_career_wins": (jockey_wins or {}).get(entry["jockey_cd"], (np.nan, np.nan))[1],
+        # 開催日次（layer1_horse.py の opening_week_flag 用）。
+        # _load_pace_v4_history() 側は過去走側で使わないため取得していないが、
+        # 予測行（今走）は race_meta（_row_to_race_meta の "nichiji"）から取れる。
+        # 未設定だと opening_week_flag が常に0になる（2026-07-02 発見）。
+        "kaisai_nichime": race_meta.get("nichiji"),
         # 結果列は NULL (未来のレース)
         "kakutei_chakujun": np.nan,
         "corner_1":         np.nan,
@@ -395,6 +456,21 @@ def _compute_v1_features(
         meta_fs = pd.to_numeric(combined["field_size_meta"], errors="coerce")
         needs_meta = combined["field_size"].fillna(0) <= 0
         combined.loc[needs_meta, "field_size"] = meta_fs[needs_meta]
+
+    # avg_rank_3: 直近3走の平均確定着順（shift(1)+rolling(3)、PIT-safe）。
+    # _compute_confidence()「2走前3着以内」近似条件（+1点）で参照する。
+    # 旧 archive/v2_ensemble/src/features/ability_features_v3.py の avg_rank_3
+    # と同一定義（parquet除去 [2026-07-01] 後に本カラムが未生成となり、
+    # 当該加点条件が常にNaNで無効化されていたための復元）。
+    # combined は既に (horse_id, race_id) でソート済みかつ予測行の
+    # kakutei_chakujun=NaN のため、shift(1) が当走を含むことはない。
+    rank_valid = combined["kakutei_chakujun"].where(
+        combined["kakutei_chakujun"].notna() & (combined["kakutei_chakujun"] > 0)
+    )
+    combined["avg_rank_3"] = (
+        rank_valid.groupby(combined["horse_id"])
+        .transform(lambda x: x.shift(1).rolling(3, min_periods=1).mean())
+    )
 
     # LAYER1 + LAYER2 を実行
     # hist_df は生の過去走データのみ (PACE_V4_COLS 等は未計算)。
@@ -780,7 +856,10 @@ def score_race_ai(
     # ── v1 特徴量計算 ──────────────────────────────────────────────────
     # 対象馬の全確定済み過去走を都度DBロード（parquet陳腐化を回避、PIT-safe）
     hist_df = _load_pace_v4_history(engine_jvdl, horse_ids, race_id[:8])
-    pred_rows = [_build_pred_row(e, race_meta) for e in entries]
+    jockey_wins = _load_jockey_recent_wins(
+        engine_jvdl, [e["jockey_cd"] for e in entries], race_id
+    )
+    pred_rows = [_build_pred_row(e, race_meta, jockey_wins) for e in entries]
 
     v1_df = _compute_v1_features(pred_rows, hist_df)
     if v1_df.empty:
