@@ -390,7 +390,8 @@ def get_backtest_result(job_id: str) -> dict:
 _STRATEGIES_DIR = Path(__file__).parent.parent.parent / "tipster" / "strategies"
 _TRAINING_CONFIG_PATH = Path(__file__).parent.parent.parent / "tipster" / "training_ranker_config.json"
 
-# 検証済み数値（BACKTEST_FINAL_VALIDATION.md / PROGRESS.md / ANABA_AI_RESULTS.md）
+# 検証済み数値（docs/validation/BACKTEST_FINAL_VALIDATION.md /
+# archive/docs/PROGRESS_BACKLOG.md / docs/validation/ANABA_AI_RESULTS.md）
 _VERIFIED_STATS: dict[str, dict[str, Any]] = {
     "s1_pattern": {
         "place_rate": 0.650,
@@ -408,7 +409,7 @@ _VERIFIED_STATS: dict[str, dict[str, Any]] = {
     "anaba_v5": {
         "tan_roi": 1.973,
         "segment": "芝短距離 + 野芝コース（4番人気以降）",
-        "source": "PROGRESS.md",
+        "source": "archive/docs/PROGRESS_BACKLOG.md",
     },
     "training_tr1": {
         "segment": "全会場（坂路/ウッドタイム判定）",
