@@ -46,6 +46,7 @@ interface AIRace {
   field_size:     number
   top_confidence: 'A' | 'B' | 'C'
   data_kubun:     string | null  // RAレコードのデータ区分: "1"=出走馬名表(枠順未確定) "2"=出馬表(枠順確定) "3"〜"7"=速報〜確定成績
+  rank_mode?:     'graded' | 'standard'  // 重賞用confidence判定が適用されたか（grade_code in A/B/C/L/E）
   picks:          AIPick[]
 }
 
@@ -544,6 +545,14 @@ function AIRaceCard({ race }: { race: AIRace }) {
         <span className="text-xs opacity-75 flex-1 truncate min-w-0">{race.race_name}</span>
         <span className="text-xs opacity-75 whitespace-nowrap">{race.surface} {race.distance}m</span>
         <span className="text-xs opacity-60">{race.picks.length}頭</span>
+        {race.rank_mode === 'graded' && (
+          <span
+            className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-400/90 text-rose-950 whitespace-nowrap"
+            title="重賞用confidence判定が適用されています"
+          >
+            重賞
+          </span>
+        )}
         {/* 一押し馬名（あれば表示、なければ「自信あり推奨なし」） */}
         {topRec ? (
           <span className="text-xs px-1.5 py-0.5 rounded bg-white/20 font-medium whitespace-nowrap">
