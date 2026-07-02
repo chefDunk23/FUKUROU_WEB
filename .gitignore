@@ -1,5 +1,8 @@
 # ── モデルファイル（LightGBM バイナリ・数百MB） ───────────────────────────
-models/
+# 2026-07: 先頭スラッシュが無かったため pace_bias_ai/models/ や src/models/ 等
+# ソースコードを含むディレクトリまで無視されていた（layer2_model.py 等が
+# 一度も git 追跡されていなかった）。ルート直下の models/ のみ対象にする。
+/models/
 *.lgb
 *.pkl
 *.joblib
