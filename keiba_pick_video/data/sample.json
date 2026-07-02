@@ -1,0 +1,59 @@
+{
+  "scenes": [
+    {
+      "type": "title",
+      "raceDate": "2026/6/28(日)",
+      "raceNames": ["G3函館記念", "G3ラジオNIKKEI賞"],
+      "catch": "AIが推奨する本命馬は？"
+    },
+    {
+      "type": "racePick",
+      "venue": "函館9R 臥牛山特別",
+      "horses": [
+        { "mark": "honmei", "number": 5, "name": "サンライズホーク", "reading": "さんらいずほーく" },
+        { "mark": "taikou", "number": 2, "name": "メイショウテンザン", "reading": "めいしょうてんざん" },
+        { "mark": "tanana", "number": 8, "name": "コウエイパルサー", "reading": "こうえいぱるさー" }
+      ]
+    },
+    {
+      "type": "racePick",
+      "venue": "函館11R 函館記念",
+      "horses": [
+        { "mark": "honmei", "number": 3, "name": "ニシノイストワール", "reading": "にしのいすとわーる" },
+        { "mark": "taikou", "number": 2, "name": "ドウアドバンテージ", "reading": "どうあどばんてーじ" },
+        { "mark": "tanana", "number": 6, "name": "ウェイクフィールド", "reading": "うぇいくふぃーるど" }
+      ]
+    },
+    {
+      "type": "racePick",
+      "venue": "福島11R ラジオNIKKEI賞",
+      "horses": [
+        { "mark": "honmei", "number": 7, "name": "コスモディナー", "reading": "こすもでぃなー" },
+        { "mark": "taikou", "number": 4, "name": "エピファニーロード", "reading": "えぴふぁにーろーど" },
+        { "mark": "tanana", "number": 11, "name": "キャッスルガード", "reading": "きゃっするがーど" }
+      ]
+    },
+    {
+      "type": "evalPoints",
+      "horseNumber": 3,
+      "horseName": "ニシノイストワール",
+      "points": [
+        {
+          "title": "評価ポイント①",
+          "body": "前走は上がり3ハロン最速をマークし、末脚の破壊力は今回のメンバー随一。"
+        },
+        {
+          "title": "評価ポイント②",
+          "body": "函館の重賞コースで好走実績があり、コース適性の高さが光る一戦。"
+        },
+        {
+          "title": "評価ポイント③",
+          "body": "鞍上は当該コースで好成績を残しており、乗り替わりもプラス材料。"
+        }
+      ]
+    },
+    {
+      "type": "ending"
+    }
+  ]
+}
