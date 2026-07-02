@@ -134,7 +134,24 @@ def _ingest_file(
     return ok, dlq, dict(type_counts)
 
 
-def run_ingest(files: list[str], dry_run: bool = False) -> None:
+def run_ingest(files: list[str], dry_run: bool = False) -> dict:
+    """raw_*.txt を一括投入する。
+
+    2026-07 修正: 以前は完了時に sys.exit() を呼んでいたため、CLI単体実行では
+    問題なかったが、jvdl_client/sync_jvdata.py がライブラリとして本関数を
+    呼び出すようになった際、この sys.exit() が呼び出し元プロセス
+    （shared/worker/job_runner.py のワーカープロセス全体）を巻き込んで
+    強制終了させてしまうバグがあった（sync_jvdataジョブが実行中のまま
+    プロセスごと終了し、次回ワーカー起動時に孤児runningジョブとして
+    failed化する原因になっていたと推測される。tests/test_bulk_ingest_v2.py
+    参照）。sys.exit() は呼び出し元（main()、CLI実行時のみ）に移し、
+    本関数は結果を dict で返すだけにする。
+
+    Returns:
+        {"total_files": int, "total_ok": int, "total_dlq": int, "dlq_rate": float,
+         "type_counts": dict[str, int], "ok": bool}
+        ok=False は「有効なファイルが1件もなかった」場合。
+    """
     target_files: list[Path] = []
     for fname in files:
         p = _RAW_DIR / fname
@@ -145,7 +162,10 @@ def run_ingest(files: list[str], dry_run: bool = False) -> None:
 
     if not target_files:
         logger.error("有効なファイルが 1 件もありません。終了します。")
-        sys.exit(2)
+        return {
+            "total_files": 0, "total_ok": 0, "total_dlq": 0, "dlq_rate": 0.0,
+            "type_counts": {}, "ok": False,
+        }
 
     total_size_mb = sum(f.stat().st_size for f in target_files) / (1024 * 1024)
     logger.info("対象ファイル: %d 件, 合計 %.1f MB (dry_run=%s)",
@@ -223,7 +243,14 @@ def run_ingest(files: list[str], dry_run: bool = False) -> None:
 
     print("=" * 62)
 
-    sys.exit(0 if dlq_rate < 0.1 else 1)
+    return {
+        "total_files": len(target_files),
+        "total_ok": total_ok,
+        "total_dlq": total_dlq,
+        "dlq_rate": dlq_rate,
+        "type_counts": dict(all_type_counts),
+        "ok": True,
+    }
 
 
 def main() -> None:
@@ -240,10 +267,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_ingest(
+    result = run_ingest(
         files=[f.strip() for f in args.files.split(",") if f.strip()],
         dry_run=args.dry_run,
     )
+
+    if not result["ok"]:
+        sys.exit(2)
+    sys.exit(0 if result["dlq_rate"] < 0.1 else 1)
 
 
 if __name__ == "__main__":

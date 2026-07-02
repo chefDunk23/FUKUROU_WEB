@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DATASPECS = ["RACE", "SLOP", "WOOD"]  # DIFF は無効な dataspec (JVOpen rc=-1)
 _DEFAULT_FROM_TIME = "20220101000000"  # 初回(ウォーターマークなし)の場合
+
+# JVOpen(option=2/OPT_WEEKLY)に対応する dataspec。2026-07-02 の実地検証で、
+# RACE は正常応答(ret=0)する一方、SLOP/WOOD に option=2 を渡すと ret=-111
+# (エラー)になることを確認した。weekly=True 指定時、このリスト外の
+# dataspec は自動的に通常の差分取得(OPT_STORED_DIFF)にフォールバックする。
+_WEEKLY_CAPABLE_DATASPECS = frozenset({"RACE"})
 _RAW_DIR = Path(os.getenv("RAW_DATA_DIR", str(_ROOT / "data" / "input")))
 _ADMIN_API_BASE = os.getenv("ADMIN_API_BASE", "http://127.0.0.1:8003")
 _ADMIN_API_KEY  = os.getenv("ADMIN_API_KEY", "")
@@ -85,12 +91,24 @@ def sync_from_jvlink(
     raw_dir = Path(output_dir) if output_dir else _RAW_DIR
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    if full_setup:
-        option = OPT_SETUP
-    elif weekly:
-        option = OPT_WEEKLY
-    else:
-        option = OPT_STORED_DIFF
+    _today = datetime.datetime.now()
+    _monday_str = (_today - datetime.timedelta(days=_today.weekday())).strftime("%Y%m%d000000")
+
+    def _resolve_option_and_from(ds: str, wm: str) -> tuple[int, str]:
+        """dataspec単位で option と effective_from を決定する。
+
+        JVOpen(option=2/OPT_WEEKLY)は RACE では正常応答(ret=0)する一方、
+        SLOP/WOOD に option=2 を渡すと ret=-111(エラー)になることを
+        実地検証で確認した（2026-07-02）。また OPT_WEEKLY は from_time に
+        sync_watermark 由来の直近時刻を渡すと ret=-1(データなし)になり、
+        当週月曜 00:00:00 を渡すと正しく readcount が返ることも確認した。
+        """
+        if full_setup:
+            return OPT_SETUP, (from_time or wm)
+        if weekly and ds in _WEEKLY_CAPABLE_DATASPECS:
+            return OPT_WEEKLY, (from_time or _monday_str)
+        return OPT_STORED_DIFF, (from_time or wm)
+
     now_str = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
     results: dict[str, str] = {}
@@ -107,17 +125,17 @@ def sync_from_jvlink(
                     results[ds] = f"ERROR: {e}"
                 return results
 
-            print(f"[dry-run] option={option} ({'full-setup' if full_setup else 'diff'})")
-            print(f"{'dataspec':<8}  {'from_time':<14}  {'ret':>4}  {'readcount':>10}  {'downloadcount':>13}  lastfile_ts")
-            print("-" * 75)
+            print(f"[dry-run] weekly={weekly} full_setup={full_setup}")
+            print(f"{'dataspec':<8}  {'option':>6}  {'from_time':<14}  {'ret':>4}  {'readcount':>10}  {'downloadcount':>13}  lastfile_ts")
+            print("-" * 85)
             with jv:
                 for ds in dataspecs:
                     wm = JVLinkClient.get_watermark(conn, ds, _DEFAULT_FROM_TIME)
-                    effective_from = from_time or wm
+                    option, effective_from = _resolve_option_and_from(ds, wm)
                     try:
                         info = jv.dry_run(ds, effective_from, option)
                         print(
-                            f"{ds:<8}  {effective_from:<14}  {info['ret']:>4}  "
+                            f"{ds:<8}  {option:>6}  {effective_from:<14}  {info['ret']:>4}  "
                             f"{info['readcount']:>10}  {info['downloadcount']:>13}  {info['lastfile_ts']}"
                         )
                         results[ds] = (
@@ -146,10 +164,12 @@ def sync_from_jvlink(
         with jv:
             for ds in dataspecs:
                 wm = JVLinkClient.get_watermark(conn, ds, _DEFAULT_FROM_TIME)
-                effective_from = from_time or wm
+                option, effective_from = _resolve_option_and_from(ds, wm)
                 raw_path = raw_dir / f"raw_{ds}.txt"
 
-                logger.info("[sync_jvdata] %s: from_time=%s → %s", ds, effective_from, raw_path)
+                logger.info(
+                    "[sync_jvdata] %s: option=%d from_time=%s → %s", ds, option, effective_from, raw_path
+                )
                 try:
                     byte_count = 0
                     with open(raw_path, "wb") as fout:
@@ -181,7 +201,7 @@ def sync_from_jvlink(
         try:
             from scripts.bulk_ingest_v2 import run_ingest as _bulk_ingest  # type: ignore[import]
             file_names = [f"raw_{ds}.txt" for ds in ok_specs]
-            _bulk_ingest(files=file_names, dry_run=False, hook=False)
+            _bulk_ingest(files=file_names, dry_run=False)
             logger.info("[sync_jvdata] bulk_ingest_v2 完了")
         except Exception as e:
             logger.exception("[sync_jvdata] bulk_ingest_v2 失敗: %s", e)
