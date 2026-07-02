@@ -5,7 +5,7 @@ api_admin/main.py
 
 ⚠️  絶対に外部公開しないこと。
     nginx / ファイアウォールで 8003 を LAN/WAN からブロックすること。
-    docs/deploy.md の「8003 ポートに関する注意」を参照。
+    docs/operations/deploy.md の「8003 ポートに関する注意」を参照。
 
 起動:
     uvicorn api_admin.main:app --host 127.0.0.1 --port 8003 --reload

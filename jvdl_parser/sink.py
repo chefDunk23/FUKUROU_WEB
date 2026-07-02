@@ -11,7 +11,7 @@ BulkSink: パース済みレコードをバッファリングして DB にバル
           >= (t.data_create_date, t.data_kubun)
 - WH / O1（繰返しブロック）は Phase 3 で別ハンドラを追加予定
 
-参照: docs/jvdl_parser_spec.md §2(鉄則5), §5.3, §7(Phase 2)
+参照: docs/design/jvdl_parser_spec.md §2(鉄則5), §5.3, §7(Phase 2)
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ jvdl_parser/fields.py
 FieldSpec 宣言と conv 関数群。
 バイト位置はすべて公式仕様書 4.9.0.1 から転記（1 始まり）。
 
-参照: docs/jvdl_parser_spec.md §3, §4, §5.1
+参照: docs/design/jvdl_parser_spec.md §3, §4, §5.1
 """
 from __future__ import annotations
 

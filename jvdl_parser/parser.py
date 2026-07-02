@@ -7,7 +7,7 @@ parse_record / iter_records / WH・O1 専用エントリ展開。
 鉄則2: レコード長検証。不一致は RecordLengthError → DLQ。
 鉄則6: 未知レコード種別はエラーではなくスキップ+カウント。
 
-参照: docs/jvdl_parser_spec.md §2, §5.1
+参照: docs/design/jvdl_parser_spec.md §2, §5.1
 """
 from __future__ import annotations
 

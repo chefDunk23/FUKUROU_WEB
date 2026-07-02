@@ -87,7 +87,7 @@ app.include_router(db_status.router,     dependencies=_auth)
 app.include_router(lab.router,           dependencies=_auth)
 # 公開エンドポイント: 認証不要（/api/v2/public/*）
 app.include_router(public_races.router)
-# admin 系は api_admin (port 8003) に移設済み — docs/deploy.md 参照
+# admin 系は api_admin (port 8003) に移設済み — docs/operations/deploy.md 参照
 
 
 @app.get("/healthz", tags=["system"])
