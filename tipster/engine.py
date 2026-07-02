@@ -68,8 +68,8 @@ def fetch_race_context(race_id: str) -> RaceContext:
     """race_id のレースコンテキストを取得する。
 
     既存 API の `race_detail_cache`（AI予測・過去走・次走成績を含む既算出データ）を
-    最優先で読み、キャッシュが無ければ `api_v2.routers.races._compute_detail` を
-    直接呼び出して計算する（既存ロジックの再利用）。
+    最優先で読み、キャッシュが無ければ `_compute_payload_live` で
+    fukurou_keiba_v2 から直接計算する。
     """
     payload = _load_cached_payload(race_id)
     if payload is None:
@@ -90,12 +90,111 @@ def _load_cached_payload(race_id: str) -> dict | None:
 
 
 def _compute_payload_live(race_id: str) -> dict:
-    from api_v2.routers.races import _compute_detail
+    """race_detail_cache が無い場合のフォールバック（V2アンサンブル非依存の軽量版）。
 
-    resp = _compute_detail(race_id)
-    if resp is None:
+    2026-07-03 修正: 以前は api_v2.routers.races._compute_detail（V2アンサンブルの
+    LightGBM推論を含む）を直接呼んでいたが、V2アンサンブル引退でその関数自体が
+    削除されており ImportError になっていた（未来レースへのpicks生成が全滅する形で
+    2026-07-03 の実データ検証で発覚）。tipster が実際に使うのは DB 直接クエリで
+    取得可能な情報のみ（ai_score/ai_rank は元々 None でも動作する設計）のため、
+    fukurou_keiba_v2 (races/race_entries) から直接構築する。
+    """
+    import psycopg2.extras
+
+    from api_v2.routers._race_common import _KEIBAJO_NAME
+    from api_v2.routers.races import (
+        _build_race_score,
+        _compute_class_label,
+        _fetch_daily_time_stats,
+        fetch_detail_supplements,
+        fetch_opponents_next_races,
+        fetch_past_5_races,
+        fetch_prev_race,
+    )
+    from shared.db.jvdata import get_conn as get_v2_conn
+
+    with get_v2_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.id AS race_id, r.race_date, r.race_num, r.keibajo_code,
+                       r.distance, r.track_code, r.grade_code,
+                       COALESCE(NULLIF(TRIM(r.race_name_hondai), ''), r.race_name_short_10) AS race_name,
+                       e.umaban, e.wakuban, e.horse_id, e.horse_name,
+                       e.basis_weight, e.horse_weight, e.tan_odds
+                FROM   races r JOIN race_entries e ON e.race_id = r.id
+                WHERE  r.id = %s
+                ORDER  BY e.umaban
+                """,
+                (race_id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
         raise ValueError(f"race_id={race_id!r} のレースデータが見つかりません")
-    return resp.model_dump(mode="json")
+
+    first = rows[0]
+    race_date = first["race_date"]
+    horse_ids = [str(r["horse_id"]) for r in rows]
+
+    prev_map = fetch_prev_race(horse_ids, race_date)
+    past5_map, past_race_ids, race_meta_map = fetch_past_5_races(horse_ids, race_date)
+    opponents_map = fetch_opponents_next_races(past_race_ids, as_of_date=race_date)
+    time_stats_map = _fetch_daily_time_stats(race_meta_map)
+    supp_map = fetch_detail_supplements(race_id)
+
+    for records in past5_map.values():
+        for pr in records:
+            if pr.race_id and pr.race_id in opponents_map:
+                pr.opponents_next_races = opponents_map[pr.race_id]
+            if pr.race_id:
+                meta = race_meta_map.get(pr.race_id)
+                grade = meta.get("grade_code") if meta else None
+                pr.race_score = _build_race_score(pr, time_stats_map.get(pr.race_id), grade)
+
+    class_label = _compute_class_label(
+        str(first.get("grade_code") or "").strip() or None,
+        None, None, None, None, None,
+        str(first.get("race_name") or ""),
+    )
+
+    horses: list[dict] = []
+    for r in rows:
+        hid = str(r["horse_id"])
+        prev = prev_map.get(hid, {})
+        past5 = past5_map.get(hid, [])
+        supp = supp_map.get(int(r["umaban"])) if r.get("umaban") else None
+        horses.append({
+            "horse_id":      hid,
+            "horse_name":    r.get("horse_name"),
+            "umaban":        r.get("umaban"),
+            "wakuban":       r.get("wakuban") or (supp or {}).get("wakuban"),
+            "jockey_name":   (supp or {}).get("jockey_name"),
+            "trainer_name":  (supp or {}).get("trainer_name"),
+            "burden_weight": float(r["basis_weight"]) if r.get("basis_weight") is not None else None,
+            "horse_weight":  r.get("horse_weight"),
+            "ai_score":      None,
+            "ai_rank":       None,
+            "tan_odds":      float(r["tan_odds"]) if r.get("tan_odds") is not None else None,
+            "extra": {
+                "prev_race_grade":    prev.get("prev_race_grade"),
+                "prev_race_rank":     prev.get("prev_race_rank"),
+                "prev_race_days_ago": prev.get("prev_race_days_ago"),
+                "chokyo_score":       None,
+                "past_races":         [pr.model_dump(mode="json") for pr in past5],
+            },
+        })
+
+    kc = str(first.get("keibajo_code") or "").strip().zfill(2)
+    return {
+        "race_name":     first.get("race_name"),
+        "race_date":     str(race_date) if race_date else None,
+        "distance":      first.get("distance"),
+        "keibajo_name":  _KEIBAJO_NAME.get(kc, kc),
+        "grade_code":    first.get("grade_code"),
+        "class_label":   class_label,
+        "horses":        horses,
+    }
 
 
 def _collect_past_race_ids(horses_raw: list[dict], limit: int = 5) -> set[str]:

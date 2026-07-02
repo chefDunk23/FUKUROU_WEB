@@ -86,12 +86,12 @@ def _fetch_race_meta_v2(race_ids: list[str]) -> dict[str, dict]:
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, keibajo_code, track_code, distance, race_syubetsu_code"
+            "SELECT id, keibajo_code, track_code, distance, race_syubetsu_code, data_kubun"
             " FROM races WHERE id = ANY(%s)",
             (race_ids,),
         )
         for row in cur.fetchall():
-            rid, keibajo, track, dist, syubetsu = row
+            rid, keibajo, track, dist, syubetsu, data_kubun = row
             surface = (
                 "芝"    if (track or "")[:1] == "1" else
                 "ダート" if (track or "")[:1] == "2" else
@@ -103,6 +103,7 @@ def _fetch_race_meta_v2(race_ids: list[str]) -> dict[str, dict]:
                 "surface":     surface,
                 "distance":    int(dist) if dist else 0,
                 "class_level": class_level,
+                "data_kubun":  str(data_kubun) if data_kubun else None,
             }
         cur.close()
     finally:
@@ -872,6 +873,7 @@ def _race_to_json_obj(
         "segment_hint": _SEGMENT_INFO[tier]["hint"],
         "surface":      race_meta.get("surface", ""),
         "distance":     race_meta.get("distance", 0),
+        "data_kubun":   race_meta.get("data_kubun"),
         "horses":       horses_json,
         "baba_picks":   baba_picks or {},
     }

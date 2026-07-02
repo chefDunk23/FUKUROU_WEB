@@ -45,6 +45,7 @@ interface AIRace {
   grade_code:     string | null
   field_size:     number
   top_confidence: 'A' | 'B' | 'C'
+  data_kubun:     string | null  // RAレコードのデータ区分: "1"=出走馬名表(枠順未確定) "2"=出馬表(枠順確定) "3"〜"7"=速報〜確定成績
   picks:          AIPick[]
 }
 
@@ -125,6 +126,7 @@ interface Race {
   segment_hint: string
   surface:      string
   distance:     number
+  data_kubun:   string | null  // RAレコードのデータ区分: "1"=出走馬名表(枠順未確定) "2"=出馬表(枠順確定) "3"〜"7"=速報〜確定成績
   horses:       Horse[]
   baba_picks:   Record<string, BabaPick | null>
 }
@@ -157,6 +159,22 @@ const CONF_STYLE: Record<string, string> = {
   A: 'text-yellow-600 font-bold',
   B: 'text-gray-500 font-medium',
   C: 'text-gray-300',
+}
+
+// data_kubun（RAレコードのデータ区分）→ 表示ラベル・色。
+// JV-Data仕様書「フォーマット」シート RA レコード項番2 に準拠。
+// 1=出走馬名表(木曜, 枠番未確定) 2=出馬表(金土, 枠番確定) 3-6=速報成績 7=成績(月曜, 確定)
+const DATA_KUBUN_LABEL: Record<string, string> = {
+  '1': '枠順未確定', '2': '枠順確定',
+  '3': '速報成績', '4': '速報成績', '5': '速報成績', '6': '速報成績',
+  '7': '成績確定',
+}
+const DATA_KUBUN_COLOR: Record<string, string> = {
+  '1': 'bg-orange-400/90 text-orange-950',
+  '2': 'bg-sky-400/90 text-sky-950',
+  '3': 'bg-sky-400/90 text-sky-950', '4': 'bg-sky-400/90 text-sky-950',
+  '5': 'bg-sky-400/90 text-sky-950', '6': 'bg-sky-400/90 text-sky-950',
+  '7': 'bg-white/30 text-white',
 }
 
 // ── 統合推奨ランク ─────────────────────────────────────────────────────────────
@@ -386,6 +404,14 @@ function RaceCard({
         <span className="text-sm font-bold">{race.venue} {race.race_num}R</span>
         <span className="text-xs opacity-75 flex-1 truncate">{race.race_name}</span>
         <span className="text-xs opacity-75">{race.surface} {race.distance}m</span>
+        {race.data_kubun && DATA_KUBUN_LABEL[race.data_kubun] && (
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${DATA_KUBUN_COLOR[race.data_kubun]}`}
+            title="データ提供段階（JV-Link配信タイミングに基づく）"
+          >
+            {DATA_KUBUN_LABEL[race.data_kubun]}
+          </span>
+        )}
         <span
           className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/20"
         >
@@ -526,6 +552,14 @@ function AIRaceCard({ race }: { race: AIRace }) {
         ) : (
           <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-white/50 whitespace-nowrap">
             自信あり推奨なし
+          </span>
+        )}
+        {race.data_kubun && DATA_KUBUN_LABEL[race.data_kubun] && (
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${DATA_KUBUN_COLOR[race.data_kubun]}`}
+            title="データ提供段階（JV-Link配信タイミングに基づく）"
+          >
+            {DATA_KUBUN_LABEL[race.data_kubun]}
           </span>
         )}
         {gradeLabel && (

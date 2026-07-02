@@ -130,6 +130,7 @@ class WeeklyRace(BaseModel):
     pick_labels:   list[str]
     volatility:    str    # "荒れそう" / "やや荒れ" / "堅め" / "不明"
     head_count:    int | None
+    data_kubun:    str | None   # RAレコードのデータ区分（1=出走馬名表/2=出馬表/3-7=速報〜確定成績）
 
 
 class WeeklyOverviewResponse(BaseModel):
@@ -285,7 +286,7 @@ def get_weekly_overview(target_date: str | None = Query(None)):
                 SELECT r.id AS race_id, r.race_date, r.race_num,
                        r.keibajo_code, r.distance, r.track_code AS surface,
                        COALESCE(NULLIF(TRIM(r.race_name_hondai), ''), r.race_name_short_10) AS race_name,
-                       r.syusso_tosu AS head_count
+                       r.syusso_tosu AS head_count, r.data_kubun
                 FROM   races r
                 WHERE  r.race_date BETWEEN %s AND %s
                   AND  r.keibajo_code::int <= 10
@@ -318,7 +319,7 @@ def get_weekly_overview(target_date: str | None = Query(None)):
                         SELECT race_id, race_num, keibajo_code, distance,
                                track_code AS surface,
                                COALESCE(NULLIF(TRIM(race_name_hondai), ''), race_name_short_10) AS race_name,
-                               shusso_tosu AS head_count
+                               shusso_tosu AS head_count, data_kubun
                         FROM   races_v2
                         WHERE  LEFT(race_id, 8) = ANY(%s)
                           AND  keibajo_code ~ '^[0-9]+$' AND keibajo_code::int <= 10
@@ -419,6 +420,7 @@ def get_weekly_overview(target_date: str | None = Query(None)):
             pick_labels  = labels,
             volatility   = _volatility(hc, has_p),
             head_count   = hc,
+            data_kubun   = r.get("data_kubun"),
         ))
 
     return WeeklyOverviewResponse(

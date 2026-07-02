@@ -173,7 +173,7 @@ def _resolve_target_dates(target_dates: list[date]) -> list[date]:
 _RACE_META_COLS = (
     "id, race_date, keibajo_code, kaiji, nichiji, race_num, "
     "race_name_hondai, distance, track_code, grade_code, "
-    "joken_code_youngest, syusso_tosu"
+    "joken_code_youngest, syusso_tosu, data_kubun"
 )
 
 
@@ -191,6 +191,7 @@ def _row_to_race_meta(row) -> dict:
         "grade_code":       str(row[9]) if row[9] else "",
         "joken_cd_youngest": str(row[10]) if row[10] else "",
         "field_size":       int(row[11]) if row[11] else 0,
+        "data_kubun":       str(row[12]) if row[12] else None,
     }
 
 
@@ -1134,6 +1135,7 @@ def score_race_ai(
         "grade_code":     race_meta["grade_code"],
         "field_size":     len(entries),
         "top_confidence": top_confidence,
+        "data_kubun":     race_meta.get("data_kubun"),
         "picks":          picks,
     }
 

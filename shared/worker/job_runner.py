@@ -497,11 +497,15 @@ def _handle_sync_races_from_jvdl(params: dict, ctx: JobContext) -> None:
                 e.get("data_kubun"),
             ))
 
-        # race_entries には PK (race_id, umaban) のほかに、馬番変更（出走取消の再出走等）を
-        # 想定した部分一意インデックス uq_re_race_horse (race_id, horse_id) も存在する。
-        # ON CONFLICT は1つの制約しか対象にできないため、horse_id の umaban が前回同期時から
-        # 変わったケースで uq_re_race_horse 違反になり UPSERT が失敗する。
-        # jvdl側にエントリが存在するレースのみ削除してから挿入し直すことで両制約の衝突を避ける
+        # race_entries の PK は 2026-07-03 に (race_id, umaban) から
+        # (race_id, horse_id, umaban) に変更した（旧 uq_re_race_horse 部分インデックス
+        # は新PKに包含されるため削除済み。scripts/migrate_fix_race_entries_pkey.sql 参照）。
+        # 変更前は木曜出走馬名表(全頭 umaban=0)を投入しようとすると
+        # (race_id, umaban)=(X, 0) の重複で UniqueViolation になっていた
+        # （実地検証: job id=50 が "重複したキー値は一意性制約 race_entries_pkey
+        # 違反" で failed）。DELETE→INSERT方式自体は維持（ON CONFLICTは1つの
+        # 制約しか対象にできないため、複数制約が絡む更新には不向き）。
+        # jvdl側にエントリが存在するレースのみ削除してから挿入し直す
         # （jvdl側が未バックフィルのレースまで削除してしまわないよう、対象を entry_rows に限定）。
         if entry_records:
             entry_race_ids = list({e["race_id"] for e in entry_rows})

@@ -24,6 +24,7 @@ interface WeeklyRace {
   pick_labels:  string[]
   volatility:   string
   head_count:   number | null
+  data_kubun:   string | null  // RAレコードのデータ区分: "1"=出走馬名表(枠順未確定) "2"=出馬表(枠順確定) "3"〜"7"=速報〜確定成績
 }
 
 interface WeeklyOverviewResponse {
@@ -45,6 +46,29 @@ const RANK_BADGE_COLOR: Record<string, string> = {
   '二押し': 'bg-gray-300 text-gray-800',
   '三押し': 'bg-amber-200 text-amber-900',
   '穴推奨': 'bg-purple-100 text-purple-800',
+}
+
+// data_kubun（RAレコードのデータ区分）→ 表示ラベル・色。
+// JV-Data仕様書「フォーマット」シート RA レコード項番2 に準拠。
+// 1=出走馬名表(木曜, 枠番未確定) 2=出馬表(金土, 枠番確定) 3-6=速報成績 7=成績(月曜, 確定)
+const DATA_KUBUN_LABEL: Record<string, string> = {
+  '1': '枠順未確定',
+  '2': '枠順確定',
+  '3': '速報成績',
+  '4': '速報成績',
+  '5': '速報成績',
+  '6': '速報成績',
+  '7': '成績確定',
+}
+
+const DATA_KUBUN_COLOR: Record<string, string> = {
+  '1': 'bg-orange-100 text-orange-700',
+  '2': 'bg-sky-100 text-sky-700',
+  '3': 'bg-sky-100 text-sky-700',
+  '4': 'bg-sky-100 text-sky-700',
+  '5': 'bg-sky-100 text-sky-700',
+  '6': 'bg-sky-100 text-sky-700',
+  '7': 'bg-slate-200 text-slate-700',
 }
 
 // ── ユーティリティ ────────────────────────────────────────────────────────────
@@ -107,6 +131,16 @@ function RaceRow({ race }: { race: WeeklyRace }) {
       <span className={`text-[10px] px-1 py-0.5 rounded font-medium flex-shrink-0 ${surfaceCls}`}>
         {race.surface ?? '?'}
       </span>
+
+      {/* データ段階バッジ（枠順未確定/確定/成績確定） */}
+      {race.data_kubun && DATA_KUBUN_LABEL[race.data_kubun] && (
+        <span
+          className={`text-[10px] px-1 py-0.5 rounded font-medium flex-shrink-0 ${DATA_KUBUN_COLOR[race.data_kubun]}`}
+          title="データ提供段階（JV-Link配信タイミングに基づく）"
+        >
+          {DATA_KUBUN_LABEL[race.data_kubun]}
+        </span>
+      )}
 
       {/* 距離 */}
       <span className="text-[11px] text-gray-400 flex-shrink-0 w-10">

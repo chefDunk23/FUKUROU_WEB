@@ -28,6 +28,7 @@ export interface RaceSummary {
   tenko_code:      string | null  // 天候: "1"=晴 "2"=曇 "3"=雨 "4"=小雨
   shiba_baba_code: string | null  // 芝馬場: "1"=良 "2"=稍重 "3"=重 "4"=不良
   dirt_baba_code:  string | null  // ダ馬場: 同上
+  data_kubun:      string | null  // RAレコードのデータ区分: "1"=出走馬名表(枠順未確定) "2"=出馬表(枠順確定) "3"〜"7"=速報〜確定成績
 }
 
 export interface RaceListResponse {
@@ -58,6 +59,7 @@ function _makeMockRaces(date: string, keibajo_code: string, keibajo_name: string
     tenko_code:      null,
     shiba_baba_code: null,
     dirt_baba_code:  null,
+    data_kubun:      null,
   }))
 }
 

@@ -240,3 +240,84 @@ class TestSelectAite:
         candidates = [_ev("A", score=2.0), _ev("B", score=1.0)]
         aite = select_aite(candidates, honmei_horse_id="Z")
         assert len(aite) == 2
+
+
+# ── _compute_payload_live 回帰テスト ─────────────────────────────────────────
+# 2026-07-03: race_detail_cache に対象レースのキャッシュが無い場合の
+# フォールバック経路(_compute_payload_live)が、V2アンサンブル引退で削除済みの
+# api_v2.routers.races._compute_detail を直接importしようとして ImportError に
+# なっていた。未来レース(7/4-5)へのpicks生成が72レース全滅する形で発覚した。
+# 既存テスト(test_fetch_race_context_returns_horses等)は race_detail_cache に
+# キャッシュがある場合のみ実行されるため、このバグを検出できていなかった。
+
+def test_compute_payload_live_does_not_import_deleted_compute_detail():
+    """tipster.engine が削除済みの api_v2.routers.races._compute_detail を
+    参照していないこと（モジュールとして存在しないことを確認する回帰テスト）。"""
+    import api_v2.routers.races as races_module
+
+    assert not hasattr(races_module, "_compute_detail"), (
+        "_compute_detail は V2アンサンブル引退で削除済みのはずだが races.py に復活している。"
+        "tipster/engine.py が再びこれをimportしようとしていないか確認すること。"
+    )
+
+
+# _compute_payload_live は fukurou_keiba_v2.races/race_entries を直接クエリするため、
+# race_detail_cache 用の _TEST_RACE_ID（旧フォーマットの短縮ID）とは別に、
+# 実在する16桁 race_id を用意する。
+_LIVE_SKIP_REASON = ""
+_LIVE_TEST_RACE_ID = ""
+try:
+    import psycopg2 as _psycopg2
+
+    from shared.config import DB_V2 as _DB_V2
+
+    _conn2 = _psycopg2.connect(**_DB_V2)
+    try:
+        _cur2 = _conn2.cursor()
+        _cur2.execute(
+            "SELECT r.id FROM races r JOIN race_entries e ON e.race_id = r.id "
+            "WHERE r.race_date = '2026-06-14' GROUP BY r.id "
+            "HAVING COUNT(e.umaban) > 0 ORDER BY r.id LIMIT 1"
+        )
+        _row2 = _cur2.fetchone()
+        if _row2 is None:
+            _LIVE_SKIP_REASON = "テスト用レース（2026-06-14）がDBに存在しないためスキップ"
+        else:
+            _LIVE_TEST_RACE_ID = _row2[0]
+    finally:
+        _conn2.close()
+except Exception as _e2:
+    _LIVE_SKIP_REASON = f"DB 未接続のためスキップ: {_e2}"
+
+
+@pytest.mark.skipif(bool(_LIVE_SKIP_REASON), reason=_LIVE_SKIP_REASON or "DB unavailable")
+def test_compute_payload_live_returns_dict_with_ai_score_none():
+    """_compute_payload_live が ai_score/ai_rank=None でも正しく dict を返すこと
+    （V2アンサンブル非依存の軽量版であることの確認）。"""
+    from tipster.engine import _compute_payload_live
+
+    payload = _compute_payload_live(_LIVE_TEST_RACE_ID)
+
+    assert isinstance(payload, dict)
+    assert "horses" in payload
+    assert len(payload["horses"]) > 0
+    for h in payload["horses"]:
+        assert h["ai_score"] is None
+        assert h["ai_rank"] is None
+        assert "horse_id" in h
+        assert "extra" in h
+
+
+@pytest.mark.skipif(bool(_LIVE_SKIP_REASON), reason=_LIVE_SKIP_REASON or "DB unavailable")
+def test_fetch_race_context_works_without_cache():
+    """race_detail_cache が存在しないレースでも fetch_race_context が
+    例外を送出せず RaceContext を返すこと（フォールバック経路の疎通確認）。"""
+    from unittest.mock import patch
+
+    from tipster.engine import fetch_race_context
+
+    with patch("tipster.engine._load_cached_payload", return_value=None):
+        ctx = fetch_race_context(_LIVE_TEST_RACE_ID)
+
+    assert ctx.race_id == _LIVE_TEST_RACE_ID
+    assert len(ctx.horses) > 0
