@@ -1,0 +1,14 @@
+{
+  "speakers": {
+    "hina": {
+      "name": "ひよこ助手",
+      "voicevox_speaker_id": 3,
+      "voicevox_speaker_name": "ずんだもん（ノーマル）"
+    },
+    "hakase": {
+      "name": "フクロウ博士",
+      "voicevox_speaker_id": 13,
+      "voicevox_speaker_name": "青山龍星（ノーマル）"
+    }
+  }
+}

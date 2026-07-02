@@ -33,7 +33,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api_admin.deps import verify_admin_key
-from api_admin.routers import health, jobs
+from api_admin.routers import health, jobs, video
 from shared.config import API_KEY, DEV_MODE
 
 logging.basicConfig(
@@ -76,6 +76,7 @@ app.add_middleware(
 _auth = [Depends(verify_admin_key)]
 app.include_router(jobs.router,    dependencies=_auth)
 app.include_router(health.router,  dependencies=_auth)
+app.include_router(video.router,   dependencies=_auth)
 
 
 @app.get("/healthz", tags=["system"])

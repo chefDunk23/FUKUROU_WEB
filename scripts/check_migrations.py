@@ -33,6 +33,7 @@ _SQL_TO_DB: dict[str, str] = {
     "migrate_add_detail_cache.sql": "fukurou_jvdl",
     "migrate_add_jobs_table.sql":   "fukurou_jvdl",
     "migrate_v2_nar_policy.sql":    "fukurou_jvdl",
+    "migrate_add_video_tables.sql": "fukurou_jvdl",
 }
 
 
