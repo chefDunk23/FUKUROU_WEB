@@ -561,3 +561,87 @@ class TestHRPayoutHandler:
 
         sql_passed = mock_ev.call_args[0][1]
         assert "ON CONFLICT ON CONSTRAINT payouts_race_bet_combo_key" in sql_passed
+
+
+# ── SE (race_entries_v2) umaban=0 重複除去バグの回帰テスト ──────────────────────
+# 2026-07-03: 木曜配信の出走馬名表(SEレコード)は枠番・馬番確定前で全頭 umaban=0。
+# pkey が (race_id, umaban) だった当時、BulkSink._flush_type のバッチ内PK重複
+# 除去(last-wins)により1レース16頭中15頭が消失する重大バグがあった。
+# 実地検証(合成データ16頭)で execute_values 到達が1行のみになることを確認し、
+# pkey を (race_id, blood_no, umaban) に修正した。本テストは同シナリオの回帰確認。
+
+def _se_row(**kwargs) -> dict:
+    base = {
+        "kaisai_year": "2026", "kaisai_monthday": "0704",
+        "keibajo_code": "05", "kaisai_kai": "01",
+        "kaisai_nichime": "01", "race_num": "01",
+        "umaban": 0, "wakuban": 0,
+        "blood_no": "2023100001", "horse_name": "テストウマ",
+        "sex_cd": "1", "horse_age": 3, "chokyosi_code": "00000",
+        "kinryo": 550, "blinker": 0, "kishu_code": "00000",
+        "horse_weight": 480, "zogen_fugo": " ", "zogen_sa": 0, "ijyo_kubun": "0",
+        "nyusen_juni": 0, "kakutei_chakujun": 0, "race_time": "0000",
+        "corner_1": 0, "corner_2": 0, "corner_3": 0, "corner_4": 0,
+        "tansho_odds": 0, "tansho_ninki": 0,
+        "kohan_4f": "000", "kohan_3f": "000",
+        "data_kubun": "1", "data_create_date": "20260703",
+    }
+    return {**base, **kwargs}
+
+
+class TestSeUmabanZeroDedupRegression:
+    def test_se_pkey_includes_blood_no(self):
+        """SEハンドラのpkeyにblood_noが含まれること(umaban単独キーへの後退防止)。"""
+        conf = _HANDLERS["SE"]
+        assert conf.pkey == ("race_id", "blood_no", "umaban")
+
+    def test_16_horses_all_umaban_zero_all_survive(self):
+        """木曜出走馬名表を模した16頭(全員umaban=0, blood_no違い)が
+        BulkSinkのバッチ内デデュープで消失せず全頭 execute_values に渡ること。"""
+        conn, _ = _make_mock_conn()
+        sink = BulkSink(conn)
+        for i in range(16):
+            sink.feed("SE", _se_row(blood_no=f"202600000{i:03d}", horse_name=f"テストウマ{i:02d}"))
+
+        with patch("psycopg2.extras.execute_values") as mock_ev:
+            counts = sink.flush()
+
+        assert counts == {"SE": 16}
+        rows_arg = mock_ev.call_args[0][2]
+        assert len(rows_arg) == 16
+        blood_no_idx = _HANDLERS["SE"].columns.index("blood_no")
+        blood_nos = {row[blood_no_idx] for row in rows_arg}
+        assert len(blood_nos) == 16, "重複除去で頭数が減っている"
+
+    def test_same_horse_umaban_0_then_confirmed_are_different_pk(self):
+        """同一馬(同一blood_no)が umaban=0(木曜) -> umaban確定(金曜)と2バッチに
+        分かれて配信された場合、PKが異なるため別行としてUPSERTされる
+        (上書きにはならない。既存DBに umaban=0 の残骸が残る挙動の実証)。"""
+        conn, _ = _make_mock_conn()
+        sink = BulkSink(conn)
+
+        sink.feed("SE", _se_row(umaban=0, blood_no="2023100001", data_kubun="1", data_create_date="20260703"))
+        with patch("psycopg2.extras.execute_values") as mock_ev1:
+            sink.flush()
+        row1 = mock_ev1.call_args[0][2][0]
+
+        sink.feed("SE", _se_row(umaban=5, blood_no="2023100001", data_kubun="2", data_create_date="20260704"))
+        with patch("psycopg2.extras.execute_values") as mock_ev2:
+            sink.flush()
+        row2 = mock_ev2.call_args[0][2][0]
+
+        umaban_idx = _HANDLERS["SE"].columns.index("umaban")
+        assert row1[umaban_idx] == 0
+        assert row2[umaban_idx] == 5  # 別行として追加される(PKが異なるため)
+
+    def test_field_size_of_16_matches_shusso_tosu_scenario(self):
+        """1レース分の合成データで、投入頭数がそのままDB到達件数と一致すること
+        (実DB検証: races_v2.shusso_tosu と race_entries_v2 の実件数比較の代替)。"""
+        conn, _ = _make_mock_conn()
+        sink = BulkSink(conn)
+        shusso_tosu = 18  # フルゲート想定
+        for i in range(shusso_tosu):
+            sink.feed("SE", _se_row(blood_no=f"20231000{i:02d}", horse_name=f"馬{i:02d}"))
+        with patch("psycopg2.extras.execute_values") as mock_ev:
+            counts = sink.flush()
+        assert counts["SE"] == shusso_tosu

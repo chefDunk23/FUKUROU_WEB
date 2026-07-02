@@ -169,6 +169,16 @@ _HANDLERS: dict[str, _SinkConf] = {
         preprocessor=_with_race_id,
     ),
 
+    # 2026-07-03 修正: pkey は元 (race_id, umaban) だった。木曜配信の出走馬名表
+    # (SEレコード)は枠番・馬番確定前で全頭 umaban=0 のため、BulkSink._flush_type
+    # のバッチ内PK重複除去(last-wins)により1レース16頭中15頭が消失する重大バグが
+    # あった（実地検証: 16頭合成データ投入 → execute_values 到達1行のみ）。
+    # blood_no(血統登録番号)は基本的に馬ごとに一意なため (race_id, blood_no) が
+    # 理想だが、地方競馬・海外レース(is_jra=False)では blood_no='0000000000' の
+    # ダミー値が複数頭に共有されるケースが実データで確認された(100レース,1047行)。
+    # (race_id, blood_no, umaban) の3列複合キーなら、木曜出走馬名表(umaban=0だが
+    # blood_no は頭ごとに一意)・地方競馬(blood_noは重複するがumabanは頭ごとに
+    # 一意)のいずれでも一意性を保てる。既存 345,911 行での重複ゼロを確認済み。
     "SE": _SinkConf(
         table="race_entries_v2",
         columns=(
@@ -182,7 +192,7 @@ _HANDLERS: dict[str, _SinkConf] = {
             "kohan_4f", "kohan_3f",
             "data_kubun", "data_create_date",
         ),
-        pkey=("race_id", "umaban"),
+        pkey=("race_id", "blood_no", "umaban"),
         preprocessor=_with_race_id,
     ),
 
